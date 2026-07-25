@@ -88,9 +88,9 @@ def state_for(m, side):
         out["draft"] = {
             "picker": d["picker"],
             "your_pick": d["picker"] == side,
-            "step": d["step"],
-            "total": len(d["order"]),
-            "pair": [cards[k] for k in (d["pair"] or [])],
+            "batch": d["batch"] + 1,
+            "batches_total": len(M.DRAFT_BATCHES),
+            "shown": [cards[k] for k in d["shown"]],
             "taken": {
                 LEFT: [cards[k] for k in m.drafted[LEFT]],
                 RIGHT: [cards[k] for k in m.drafted[RIGHT]],

@@ -41,15 +41,27 @@ class DamageEvent:
 
 
 class FlatReduction:
-    """A flat per-target cut on all incoming damage — the target's accumulated
-    `damage_reduction` (e.g. 森林之子's guard). Applies to every category and
-    never takes an instance below zero."""
+    """A flat per-target cut on all incoming damage — the target's permanent
+    `damage_reduction` (e.g. 森林之子's guard) plus any temporary `stance_dr`
+    (e.g. 武器大师's 剑盾). Applies to every category, never below zero."""
 
     @EV.hook(priority=40)
     def on_before_damage(self, match, ev):
-        dr = ev.target.vars.get("damage_reduction", 0)
+        dr = ev.target.vars.get("damage_reduction", 0) + ev.target.vars.get("stance_dr", 0)
         if dr and not ev.cancelled and ev.amount > 0:
             ev.amount = max(0, ev.amount - dr)
+
+
+class AbilityImmunity:
+    """A unit flagged `ability_immune` takes nothing from enemy active abilities
+    (e.g. 武器大师's 太刀). Normal attacks and tile damage still land."""
+
+    @EV.hook(priority=20)
+    def on_before_damage(self, match, ev):
+        if ev.cancelled or ev.category != ABILITY:
+            return
+        if ev.target.vars.get("ability_immune") and ev.source is not None and ev.source.side != ev.target.side:
+            ev.cancel("warded (太刀)")
 
 
 class HalvingRule:

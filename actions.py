@@ -39,13 +39,14 @@ class CellLockedAttack(ActionInstance):
 
     needs_pick = True
 
-    def __init__(self, attacker, cells, intended_origin, halve=False, index=0):
+    def __init__(self, attacker, cells, intended_origin, halve=False, index=0, amount=None):
         self.attacker = attacker
         self.actor = attacker
         self.committed_cells = [tuple(c) for c in cells]
         self.intended_origin = tuple(intended_origin)
         self.halve = halve
         self.index = index
+        self.amount = amount  # None = use the attacker's live atk (weapons pass a fixed value)
         self.label = "shot 2" if index else "attack"
 
     def resolved_cells(self, match):
@@ -79,10 +80,36 @@ class CellLockedAttack(ActionInstance):
             DMG.DamageEvent(
                 source=self.attacker,
                 target=victim,
-                amount=self.attacker.atk,
+                amount=self.attacker.atk if self.amount is None else self.amount,
                 category=DMG.NORMAL_ATTACK,
                 tags=tags,
             )
+        ]
+
+
+class AreaAttack(ActionInstance):
+    """Hits every enemy standing in a fixed set of cells for a flat amount — no
+    victim pick (e.g. 武器大师's 长枪 sweeping its row)."""
+
+    needs_pick = False
+
+    def __init__(self, attacker, cells, amount):
+        self.attacker = attacker
+        self.actor = attacker
+        self.cells = set(tuple(c) for c in cells)
+        self.amount = amount
+        self.label = "attack"
+
+    def eligible_victims(self, match):
+        return None
+
+    def build_damage(self, match, victim):
+        return [
+            DMG.DamageEvent(
+                source=self.attacker, target=e, amount=self.amount, category=DMG.NORMAL_ATTACK
+            )
+            for e in match.living()
+            if e.side != self.attacker.side and e.flags["targetable"] and (e.cells & self.cells)
         ]
 
 

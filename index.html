@@ -34,8 +34,9 @@ header{display:flex;align-items:baseline;gap:18px;flex-wrap:wrap;
 .clock{margin-left:auto;font-family:var(--mono);font-size:11px;letter-spacing:.14em;color:var(--dim)}
 .clock b{color:var(--text);font-weight:600}
 
-main{display:grid;grid-template-columns:250px minmax(0,1fr) 250px;gap:16px;padding:14px 16px;align-items:start}
-@media(max-width:1080px){main{grid-template-columns:1fr}}
+main{display:grid;grid-template-columns:240px auto minmax(320px,1fr);gap:16px;padding:14px 16px;align-items:start}
+@media(max-width:1080px){main{grid-template-columns:1fr}
+  #rows,.coords{width:100%}}
 
 .panel{background:var(--panel);border:1px solid var(--rule);border-radius:3px}
 .panel h3{padding:11px 14px;border-bottom:1px solid var(--rule);font-family:var(--mono);
@@ -43,12 +44,11 @@ main{display:grid;grid-template-columns:250px minmax(0,1fr) 250px;gap:16px;paddi
 .panel .body{padding:14px}
 
 /* ---------- board ---------- */
-.boardwrap{display:flex;flex-direction:column;gap:10px;align-items:center}
-#rows{width:100%;max-width:1200px;display:flex;flex-direction:column;gap:4px}
-.coords{display:grid;grid-template-columns:26px repeat(9,1fr);gap:4px;width:100%;max-width:1200px;flex:0 0 auto}
+.boardwrap{display:flex;flex-direction:column;gap:10px;align-items:flex-start}
+#rows{width:min(1200px,60vw);display:flex;flex-direction:column;gap:4px}
+.coords{display:grid;grid-template-columns:repeat(9,1fr);gap:4px;width:min(1200px,60vw);flex:0 0 auto}
 .coords span{font-family:var(--mono);font-size:10px;color:var(--dimmer);text-align:center}
-.boardrow{display:grid;grid-template-columns:26px 1fr;gap:4px;width:100%;align-items:center}
-.rowlabel{font-family:var(--mono);font-size:10px;color:var(--dimmer);text-align:center}
+.boardrow{width:100%}
 .board{display:grid;grid-template-columns:repeat(9,1fr);gap:4px;width:100%;min-width:0}
 
 .cell{position:relative;aspect-ratio:5/6;padding:0;font:inherit;color:inherit;background:var(--chart);border:1px solid var(--rule-soft);
@@ -131,6 +131,25 @@ body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
 .unit.place:hover .rm{opacity:.95}
 .dzHint{font-size:11px;color:var(--dim);margin:2px 0 12px;font-family:var(--mono);letter-spacing:.04em}
 
+/* ---------- hero detail (right panel) ---------- */
+.hd-name{font-size:20px;font-weight:600;line-height:1.15}
+.hd-name .en{font-size:13px;color:var(--dim);font-weight:400;margin-left:9px}
+.hd-hp{margin:18px 0 4px}
+.hd-hp .lbl{display:flex;justify-content:space-between;align-items:baseline;font-family:var(--mono);
+  font-size:11px;letter-spacing:.1em;color:var(--dim);margin-bottom:6px}
+.hd-hp .lbl b{color:var(--text);font-size:14px;font-weight:600}
+.hd-hp .bar{height:9px;background:#0d1418;border-radius:5px;overflow:hidden}
+.hd-hp .bar i{display:block;height:100%;background:var(--verdigris);transition:width .2s}
+.hd-hp.sideR .bar i{background:var(--brass)}
+.hd-hp .bar i.hurt{background:var(--oxide)}
+.hd-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin:18px 0}
+.hd-tile{background:var(--panel-2);border:1px solid var(--rule);border-radius:3px;padding:10px 12px}
+.hd-tile .k{font-family:var(--mono);font-size:9px;letter-spacing:.18em;text-transform:uppercase;color:var(--dim)}
+.hd-tile .v{font-size:18px;font-weight:600;margin-top:4px;letter-spacing:.01em}
+.hd-trait{border-left:2px solid var(--verdigris);padding:4px 0 4px 14px;margin:18px 0;
+  font-size:15px;line-height:1.65;color:var(--text)}
+.hd-trait b{display:block;color:var(--verdigris);font-weight:600;margin-bottom:6px;font-size:15px}
+
 /* ---------- draft modal ---------- */
 .modal-backdrop{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;
   padding:20px;background:rgba(9,13,17,.72);backdrop-filter:blur(3px);
@@ -143,8 +162,11 @@ body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
 .modal-sub{color:var(--dim);font-size:13px;text-align:center;margin:8px 0 20px}
 .pair-row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
 .pair-row .hero{margin:0}
-.pair-row .hero.pickable{cursor:pointer}
-.pair-row .hero.pickable:hover{transform:translateY(-2px);box-shadow:0 8px 20px rgba(0,0,0,.35)}
+.modal-wide{max-width:900px}
+.offer-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.offer-grid .hero{margin:0}
+.offer-grid .hero.pickable{cursor:pointer}
+.offer-grid .hero.pickable:hover{transform:translateY(-2px);box-shadow:0 8px 20px rgba(0,0,0,.35)}
 .modal-wait{text-align:center;color:var(--dim);font-family:var(--mono);font-size:11px;
   letter-spacing:.16em;text-transform:uppercase;margin-top:18px}
 .modal-taken{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:22px;
@@ -272,7 +294,7 @@ function syncDraft(){
 }
 function blankDraft(entity){
   return {entity, destination:null, held:false, tentative:null, actionKey:null, shots:[], shotIndex:0,
-          target:null, direction:null, cell:null, amount:null};
+          target:null, direction:null, cell:null, amount:null, weapon:null};
 }
 
 function unitAt(cell){ return (S.units||[]).find(u => u.alive && u.cell && eq(u.cell, cell)); }
@@ -287,15 +309,30 @@ function originCell(){
   const u = selectedUnit(); if (!u) return null;
   return draft && draft.destination ? draft.destination : u.cell;
 }
+function currentWeapon(){
+  const act = currentAction();
+  if (!act || act.targeting.kind!=='weapon' || !draft.weapon) return null;
+  return (act.weapons||[]).find(w => w.key===draft.weapon);
+}
+// Effective cell-marking spec — from a plain cells attack, or a cells-mode weapon.
+function cellSpec(){
+  const act = currentAction(); if (!act) return null;
+  const t = act.targeting;
+  if (t.kind==='cells') return {count:t.count, range:t.range, shots:t.shots};
+  const w = currentWeapon();
+  if (w && w.mode==='cells') return {count:w.cells, range:w.range, shots:1};
+  return null;
+}
 
 /* ---------------- board ---------------- */
 function renderBoard(){
   const cols = S.board.cols, rows = S.board.rows;
   document.getElementById('coords').innerHTML =
-    '<span></span>' + Array.from({length:cols},(_,i)=>`<span>${COLS[i]}</span>`).join('');
+    Array.from({length:cols},(_,i)=>`<span>${COLS[i]}</span>`).join('');
 
   const act = currentAction();
   const tgt = act ? act.targeting : null;
+  const cspec = cellSpec();
   const origin = originCell();
   const sweepCells = sweepPreview();
 
@@ -318,7 +355,7 @@ function renderBoard(){
 
   let html = '';
   for (let r=1;r<=rows;r++){
-    html += `<div class="boardrow"><div class="rowlabel">${r}</div><div class="board">`;
+    html += `<div class="boardrow"><div class="board">`;
     for (let c=1;c<=cols;c++){
       const cell=[c,r], cls=['cell'];
       cls.push(c<=3 ? 'regL' : c>=cols-2 ? 'regR' : 'regM');
@@ -326,8 +363,8 @@ function renderBoard(){
       if (S.phase==='setup' && has(S.zone,cell)) cls.push('zone');
       const tile = (S.tiles||[]).find(t=>eq(t.cell,cell));
       if (tile) cls.push('burn');
-      if (origin && tgt && tgt.kind==='cells' &&
-          Math.abs(origin[0]-c)+Math.abs(origin[1]-r) <= tgt.range) cls.push('inrange');
+      if (origin && cspec &&
+          Math.abs(origin[0]-c)+Math.abs(origin[1]-r) <= cspec.range) cls.push('inrange');
       if (draft && ((draft.destination && eq(draft.destination,cell)) || (draft.tentative && eq(draft.tentative,cell)))) cls.push('dest');
       if (S.phase==='commit' && draft && !draft.destination && !draft.held &&
           S.commit.legal_moves && has(S.commit.legal_moves,cell)) cls.push('legal','pick');
@@ -509,10 +546,11 @@ function clickableCell(cell){
   if (S.phase!=='commit' || !draft || S.commit.sealed) return false;
   if (!draft.destination && !draft.held) return has(S.commit.legal_moves,cell);
   const act = currentAction(); if (!act) return false;
-  if (act.targeting.kind==='cells'){
+  const cs = cellSpec();
+  if (cs){
     if (S.mode==='self') return false;   // solo mode auto-aims — no manual marking
     const o = originCell();
-    return Math.abs(o[0]-cell[0])+Math.abs(o[1]-cell[1]) <= act.targeting.range;
+    return Math.abs(o[0]-cell[0])+Math.abs(o[1]-cell[1]) <= cs.range;
   }
   if (act.targeting.kind==='any_cell') return true;
   return false;
@@ -554,15 +592,16 @@ function onCell(c,r){
     return;
   }
   const act = currentAction(); if (!act) return;
-  if (act.targeting.kind==='cells'){
+  const cs = cellSpec();
+  if (cs){
     if (S.mode==='self') return;   // solo mode auto-aims — clicks do nothing here
     const o=originCell();
-    if (Math.abs(o[0]-c)+Math.abs(o[1]-r) > act.targeting.range){ err="Out of range."; return render(); }
+    if (Math.abs(o[0]-c)+Math.abs(o[1]-r) > cs.range){ err="Out of range."; return render(); }
     const sh = draft.shots[draft.shotIndex] || (draft.shots[draft.shotIndex]=[]);
     const at = sh.findIndex(x=>eq(x,cell));
     if (at>=0) sh.splice(at,1);
-    else if (sh.length < act.targeting.count) sh.push(cell);
-    else { err=`Shot ${draft.shotIndex+1} already has ${act.targeting.count} cells.`; return render(); }
+    else if (sh.length < cs.count) sh.push(cell);
+    else { err=`Already marked ${cs.count} cells.`; return render(); }
     err=""; return render();
   }
   if (act.targeting.kind==='any_cell'){ draft.cell=cell; err=""; return render(); }
@@ -644,10 +683,16 @@ function onKey(e){
 
 function chooseAction(key){
   const act = S.commit.actions.find(a=>a.key===key);
-  draft.actionKey=key; draft.shots=[]; draft.shotIndex=0; draft.target=null; draft.direction=null; draft.cell=null; draft.amount=null;
+  draft.actionKey=key; draft.shots=[]; draft.shotIndex=0; draft.target=null; draft.direction=null; draft.cell=null; draft.amount=null; draft.weapon=null;
   if (act.targeting.kind==='cells') draft.shots = Array.from({length:act.targeting.shots},()=>[]);
   if (act.targeting.kind==='magnitude') draft.amount = 1;
   err=""; render();
+}
+function chooseWeapon(key){
+  draft.weapon = key;
+  const w = currentWeapon();
+  draft.shots = (w && w.mode==='cells') ? [[]] : [];
+  draft.shotIndex = 0; err=""; render();
 }
 
 function orderReady(){
@@ -661,6 +706,7 @@ function orderReady(){
   if (t.kind==='magnitude') return draft.amount>=1;
   if (t.kind==='direction') return draft.direction!=null;
   if (t.kind==='any_cell') return draft.cell!=null;
+  if (t.kind==='weapon') return draft.weapon!=null;
   return false;
 }
 
@@ -672,6 +718,7 @@ function sealOrder(){
   if (t.kind==='magnitude') action.amount = draft.amount;
   if (t.kind==='direction') action.direction = draft.direction;
   if (t.kind==='any_cell') action.cell = draft.cell;
+  if (t.kind==='weapon'){ action.weapon = draft.weapon; const w=currentWeapon(); if (w && w.mode==='cells') action.shots = draft.shots; }
   // Remember the intended move so the ghost persists after the slip is sealed,
   // until the exchange actually resolves.
   pendingMove = draft.destination ? {id: draft.entity, to: draft.destination} : null;
@@ -731,26 +778,26 @@ function renderDraft(){
 
   const d = S.draft;
   const whose = d.picker==='L' ? 'Left' : 'Right';
-  const cards = (d.pair||[]).map(h => heroCard(h, d.your_pick, `draftPick('${h.key}')`)).join('');
+  const cards = (d.shown||[]).map(h => heroCard(h, d.your_pick, `draftPick('${h.key}')`)).join('');
   const takenCol = (arr) => arr.length
     ? arr.map(x=>`<div class="hero" style="padding:6px 9px;margin-bottom:5px">
         <span class="cn">${x.name}</span> <span class="en">${x.name_en}</span></div>`).join('')
     : `<p class="note">—</p>`;
 
   const sub = d.your_pick
-    ? 'Choose one — the hero you leave goes to your opponent.'
+    ? 'Choose one hero from the offer.'
     : `<b class="side${d.picker}">${whose}</b> is choosing…`;
 
   document.getElementById('modal').innerHTML = `
     <div class="modal-backdrop">
-      <div class="modal">
-        <div class="modal-h">Draft · pick ${d.step+1} of ${d.total}</div>
+      <div class="modal modal-wide">
+        <div class="modal-h">Draft · batch ${d.batch} of ${d.batches_total}</div>
         <div class="modal-sub">${sub}</div>
-        <div class="pair-row">${cards}</div>
+        <div class="offer-grid">${cards}</div>
         ${d.your_pick ? '' : `<div class="modal-wait">Waiting for ${whose} to choose</div>`}
         <div class="modal-taken">
-          <div><div class="eyebrow sideL" style="margin-bottom:6px">Left${SIDE==='L'?' · you':''}</div>${takenCol(d.taken.L)}</div>
-          <div><div class="eyebrow sideR" style="margin-bottom:6px">Right${SIDE==='R'?' · you':''}</div>${takenCol(d.taken.R)}</div>
+          <div><div class="eyebrow sideL" style="margin-bottom:6px">Left${SIDE==='L'?' · you':''} (${d.taken.L.length}/4)</div>${takenCol(d.taken.L)}</div>
+          <div><div class="eyebrow sideR" style="margin-bottom:6px">Right${SIDE==='R'?' · you':''} (${d.taken.R.length}/4)</div>${takenCol(d.taken.R)}</div>
         </div>
         <p class="err" style="text-align:center;margin-top:10px">${err}</p>
       </div>
@@ -861,6 +908,28 @@ function renderCommit(){
 function targetingHTML(act){
   const t = act.targeting;
   if (t.kind==='none') return '';
+  if (t.kind==='weapon'){
+    let h = `<div class="step">2 · Weapon</div>
+      <p class="note">Pick a weapon — it sets this turn's attack and stance.</p>`;
+    for (const w of (act.weapons||[])){
+      h += `<button class="btn ${draft.weapon===w.key?'on':''}" onclick="chooseWeapon('${w.key}')">
+              ${w.name}<small>${w.text}</small></button>`;
+    }
+    const w = currentWeapon();
+    if (w){
+      h += `<div class="step">3 · Target</div>`;
+      if (w.mode==='cells'){
+        const n = (draft.shots[0]||[]).length;
+        h += `<p class="note">Mark up to ${w.cells} cells within ${w.range}, then <b>Enter</b>. You pick the enemy hit after everyone moves.</p>
+              <button class="btn on">Cells <span class="cost">${n}/${w.cells}</span></button>`;
+      } else if (w.mode==='row'){
+        h += `<p class="note">Hits every enemy in your row — press <b>Enter</b> to swing.</p>`;
+      } else if (w.mode==='surround8'){
+        h += `<p class="note">Strikes one enemy among the 8 cells around you (picked after moves) — press <b>Enter</b>.</p>`;
+      }
+    }
+    return h;
+  }
   let h = `<div class="step">3 · Target</div>`;
   if (t.kind==='cells'){
     if (S.mode==='self'){
@@ -961,14 +1030,21 @@ function renderOver(){
 function heroDetailHTML(u){
   const h = (S.codex||{})[u.key] || {};
   const a = h.attack || {};
-  const reach = a.mode==='cell_locked' ? `${a.cells} cells @ range ${u.rng}` : 'any one enemy';
-  return `<div class="hero" style="margin:0 0 12px">
-      <div class="top"><span class="cn">${u.name}</span><span class="en">${u.name_en} · ${u.cell?cn(u.cell):'—'}</span></div>
-      <div class="stats">HP ${u.hp}/${u.max_hp} · ATK ${u.atk} · MOVE ${h.move} · AP ${u.ap}/${u.max_ap} · ${reach}${u.shots>1?` · ${u.shots} shots`:''}</div>
+  const pct = Math.max(0, Math.round(100*u.hp/u.max_hp));
+  const tile = (k,v) => `<div class="hd-tile"><div class="k">${k}</div><div class="v">${v}</div></div>`;
+  let tiles = tile('Attack', u.atk) + tile('Move', h.move);
+  if (a.mode==='cell_locked') tiles += tile('Grids', a.cells) + tile('Range', u.rng);
+  else tiles += tile('Reach', 'any enemy');
+  return `<div class="hd">
+    <div class="hd-name">${u.name}<span class="en">${u.name_en}</span></div>
+    <div class="hd-hp side${u.side}">
+      <div class="lbl"><span>HP</span><b>${u.hp} / ${u.max_hp}</b></div>
+      <div class="bar"><i class="${pct<40?'hurt':''}" style="width:${pct}%"></i></div>
     </div>
-    ${h.blurb?`<p class="note">${h.blurb}</p>`:''}
-    ${(h.traits||[]).map(t=>`<div class="trait"><b>${t.name}${t.ap_cost?` (${t.ap_cost} AP)`:''}</b> — ${t.text}</div>`).join('')}
-    <button class="btn" style="margin-top:12px" onclick="inspected=null;renderRHS()">← Back to field log</button>`;
+    <div class="hd-grid">${tiles}</div>
+    ${(h.traits||[]).map(t=>`<div class="hd-trait"><b>${t.name}${t.ap_cost?` · ${t.ap_cost} AP`:''}</b>${t.text}</div>`).join('')}
+    <button class="btn" style="margin-top:18px" onclick="inspected=null;renderRHS()">← Back to field log</button>
+  </div>`;
 }
 function renderRHS(){
   const head=document.getElementById('rhshead'), body=document.getElementById('rhsbody');

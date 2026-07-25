@@ -106,6 +106,24 @@ class Incite(Ability):
         match.log_line(f"{match.label(actor)} rallies the line — +1 movement to all allies.")
 
 
+class Pierce(Ability):
+    key = "pierce"
+    name = "穿刺 Pierce"
+    ap_cost = 3
+    targeting = {"kind": "unit"}
+    blurb = "8 damage to one chosen enemy, anywhere. Element: wood."
+
+    def build_damage(self, match, actor, params):
+        tgt = match.entity(params.get("target"))
+        if tgt is None or not tgt.alive or tgt.side == actor.side:
+            return []
+        return [
+            DMG.DamageEvent(
+                source=actor, target=tgt, amount=8, category=DMG.ABILITY, element=DMG.WOOD
+            )
+        ]
+
+
 class Thunderstorm(Ability):
     key = "thunderstorm"
     name = "雷暴 Thunderstorm"
@@ -331,11 +349,42 @@ class HeroDef:
     halve_from_index: int = None
     abilities: list = field(default_factory=list)
     passives: list = field(default_factory=list)
+    weapons: list = None  # 武器大师 only: per-turn choosable attacks (see WEAPONS)
     blurb: str = ""
 
 
 CELL = "cell_locked"
 UNIT = "unit_locked"
+WEAPON = "weapon"  # 武器大师: the attack is chosen each turn from `weapons`
+
+# 武器大师's arsenal. `mode` drives targeting: "cells" = mark cells within range
+# (single victim); "surround8" = the 8 cells around you (single victim); "row" =
+# every enemy in your row. `buff` grants a stance until the master's next turn.
+WEAPONS = [
+    {"key": "sword_shield", "name": "剑盾 Sword & Shield", "atk": 2, "mode": "cells",
+     "cells": 3, "range": 2, "buff": "guard",
+     "text": "3 cells @2, one target. +2 damage reduction until your next turn."},
+    {"key": "odachi", "name": "太刀 Odachi", "atk": 2, "mode": "cells",
+     "cells": 4, "range": 2, "buff": "ward",
+     "text": "4 cells @2, one target. Immune to enemy abilities until your next turn."},
+    {"key": "spear", "name": "长枪 Spear", "atk": 3, "mode": "row",
+     "text": "3 damage to every enemy in your row."},
+    {"key": "hammer", "name": "大锤 Warhammer", "atk": 5, "mode": "surround8",
+     "text": "5 damage to one enemy among the 8 cells around you."},
+    {"key": "bow", "name": "弓箭 Bow", "atk": 3, "mode": "cells",
+     "cells": 5, "range": 8, "text": "5 cells @8, one target."},
+]
+WEAPONS_BY_KEY = {w["key"]: w for w in WEAPONS}
+
+
+class WeaponMaster:
+    describe = "Each turn, choose a weapon: it sets that turn's attack and stance."
+
+    def on_turn_start(self, match, owner, ctx):
+        # A new turn — last turn's stance expires "before this turn begins".
+        if ctx.get("entity") is owner:
+            owner.vars["stance_dr"] = 0
+            owner.vars["ability_immune"] = False
 
 ROSTER = [
     HeroDef(
@@ -519,6 +568,31 @@ ROSTER = [
         abilities=[Inspire(), Incite()],
         blurb="Lifts the whole army — sharper blades, and once, longer strides.",
     ),
+    HeroDef(
+        key="druid",
+        name="德鲁伊",
+        name_en="Druid",
+        max_hp=17,
+        atk=1,
+        move=1,
+        max_ap=6,
+        attack={"mode": CELL, "cells": 3, "range": 5},
+        abilities=[Pierce()],
+        blurb="A single wooden spike — 8 damage to any one enemy.",
+    ),
+    HeroDef(
+        key="weapon_master",
+        name="武器大师",
+        name_en="Weapon Master",
+        max_hp=23,
+        atk=2,
+        move=1,
+        max_ap=0,
+        attack={"mode": WEAPON},
+        passives=[WeaponMaster],
+        weapons=WEAPONS,
+        blurb="Swaps weapons every turn — five attacks, two stances.",
+    ),
 ]
 
 BY_KEY = {h.key: h for h in ROSTER}
@@ -540,7 +614,7 @@ BY_KEY[DUMMY.key] = DUMMY
 
 # The champions --test puts under your control (the current batch). Update this
 # whenever you add heroes; --test fills the rest of your side with dummies.
-TEST_HEROES = ["victory_goddess"]
+TEST_HEROES = ["weapon_master"]
 
 
 def describe(hero):

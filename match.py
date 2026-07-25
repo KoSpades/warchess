@@ -26,10 +26,16 @@ COMMIT = "commit"
 VICTIM = "victim"
 GAMEOVER = "gameover"
 
-# Whose pick each draft step is. Each pick also hands the unchosen hero to the
-# opponent, so N picks give each side ceil(N/2)... here 3 picks, alternating,
-# leave both sides with three heroes.
-DRAFT_ORDER = [LEFT, RIGHT, LEFT]
+# The draft plays out in batches: each batch shows a fresh set of never-seen
+# champions, and the listed sides each pick one (in order); leftover cards are
+# discarded, not handed to anyone. 5+3+5+3 = 16 shown, 4 picked per side, so the
+# roster must stay at least 16 heroes.
+DRAFT_BATCHES = [
+    (5, [LEFT, RIGHT]),
+    (3, [RIGHT, LEFT]),
+    (5, [RIGHT, LEFT]),
+    (3, [LEFT, RIGHT]),
+]
 
 
 class Match:
@@ -38,7 +44,7 @@ class Match:
         self.topology = Topology()
         self.board = Board(self.topology)
         self.bus = EV.EventBus(self)
-        self.global_rules = [DMG.FlatReduction(), DMG.HalvingRule()]
+        self.global_rules = [DMG.AbilityImmunity(), DMG.FlatReduction(), DMG.HalvingRule()]
 
         self.entities = []
         self._ids = itertools.count(1)
@@ -170,21 +176,20 @@ class Match:
     def _begin_draft(self):
         self.phase = DRAFT
         self.drafted = {LEFT: [], RIGHT: []}
-        self.draft = {
-            "order": list(DRAFT_ORDER),
-            "step": 0,
-            "used": set(),
-            "pair": None,
-            "picker": DRAFT_ORDER[0],
-        }
-        self._deal_pair()
+        self.draft = {"batch": 0, "pick": 0, "order": [], "shown": [], "used": set(), "picker": LEFT}
+        self._deal_batch()
 
-    def _deal_pair(self):
-        """Offer two heroes drawn from those nobody has taken yet."""
+    def _deal_batch(self):
+        """Reveal a fresh batch of never-seen champions for the current batch's
+        pickers to choose from; leftovers are discarded (added to `used`)."""
         d = self.draft
-        d["picker"] = d["order"][d["step"]]
+        size, order = DRAFT_BATCHES[d["batch"]]
         pool = [h.key for h in HEROES.ROSTER if h.key not in d["used"]]
-        d["pair"] = random.sample(pool, 2)
+        d["shown"] = random.sample(pool, min(size, len(pool)))
+        d["used"].update(d["shown"])
+        d["order"] = list(order)
+        d["pick"] = 0
+        d["picker"] = order[0]
 
     def draft_pick(self, side, hero_key):
         if self.phase != DRAFT or not self.draft:
@@ -192,22 +197,21 @@ class Match:
         d = self.draft
         if side != d["picker"]:
             return "It is not your pick."
-        if hero_key not in (d["pair"] or []):
+        if hero_key not in d["shown"]:
             return "That hero is not on offer."
-        other = d["pair"][1] if d["pair"][0] == hero_key else d["pair"][0]
-        foe = other_side(side)
         self.drafted[side].append(hero_key)
-        self.drafted[foe].append(other)
-        d["used"].update(d["pair"])
+        d["shown"].remove(hero_key)
         self.log_line(
-            f"{'Left' if side == LEFT else 'Right'} drafts {HEROES.BY_KEY[hero_key].name}; "
-            f"{'Left' if foe == LEFT else 'Right'} takes {HEROES.BY_KEY[other].name}."
+            f"{'Left' if side == LEFT else 'Right'} drafts {HEROES.BY_KEY[hero_key].name}."
         )
-        d["step"] += 1
-        if d["step"] >= len(d["order"]):
-            self._finish_draft()
+        d["pick"] += 1
+        if d["pick"] < len(d["order"]):
+            d["picker"] = d["order"][d["pick"]]
+        elif d["batch"] + 1 < len(DRAFT_BATCHES):
+            d["batch"] += 1
+            self._deal_batch()
         else:
-            self._deal_pair()
+            self._finish_draft()
         self.bump()
         return None
 
@@ -485,6 +489,16 @@ class Match:
                     },
                 }
             )
+        elif spec["mode"] == HEROES.WEAPON:
+            out.append(
+                {
+                    "key": "attack",
+                    "name": "Weapon",
+                    "ap_cost": 0,
+                    "targeting": {"kind": "weapon"},
+                    "weapons": e.hero.weapons,
+                }
+            )
         else:
             out.append(
                 {
@@ -546,6 +560,8 @@ class Match:
 
     def validate_action(self, e, dest, action):
         key = action.get("key", "none")
+        if e.hero.attack.get("mode") == HEROES.WEAPON:
+            return self._validate_weapon(e, dest, action, key)
         if key == "none":
             return None
         if key == "attack":
@@ -594,6 +610,10 @@ class Match:
                 tt = self.entity(action.get("target"))
                 if tt is None or not tt.alive or tt.side != e.side:
                     return "Choose a living ally."
+            if t["kind"] == "unit":
+                tt = self.entity(action.get("target"))
+                if tt is None or not tt.alive or tt.side == e.side:
+                    return "Choose a living enemy."
             if t["kind"] == "magnitude":
                 x = action.get("amount")
                 cap = min(e.hp, e.max_hp - 1)
@@ -601,6 +621,61 @@ class Match:
                     return f"Choose an amount between 1 and {cap}."
             return None
         return "Unknown action."
+
+    # ---- 武器大师 weapon stances -------------------------------------------
+
+    def _validate_weapon(self, e, dest, action, key):
+        w = HEROES.WEAPONS_BY_KEY.get(action.get("weapon"))
+        if w is None:
+            return "Choose a weapon."
+        if key != "attack":          # a weapon is always the attack; stance rides along
+            return None
+        if w["mode"] == "cells":
+            cells = (action.get("shots") or [[]])[0] or []
+            if len(cells) > w["cells"]:
+                return f"At most {w['cells']} cells."
+            for c in cells:
+                c = tuple(c)
+                if not self.topology.in_bounds(c):
+                    return "Cell off the board."
+                if self.topology.distance(dest, c) > w["range"]:
+                    return "Cell out of range of where you will be standing."
+            if len(set(tuple(c) for c in cells)) != len(cells):
+                return "Cells must be distinct."
+        return None
+
+    def _surround8(self, cell):
+        c, r = cell
+        return [
+            (c + dc, r + dr)
+            for dc in (-1, 0, 1) for dr in (-1, 0, 1)
+            if (dc or dr) and self.topology.in_bounds((c + dc, r + dr))
+        ]
+
+    def _apply_stance(self, e, w):
+        buff = w.get("buff")
+        if buff == "guard":
+            e.vars["stance_dr"] = 2
+            self.log_line(f"{self.label(e)} raises 剑盾 — +2 damage reduction.")
+        elif buff == "ward":
+            e.vars["ability_immune"] = True
+            self.log_line(f"{self.label(e)} draws 太刀 — warded against enemy abilities.")
+
+    def _build_weapon(self, e, action, intended):
+        w = HEROES.WEAPONS_BY_KEY.get(action.get("weapon"))
+        if w is None:
+            return [ACT.NullAction()]
+        self._apply_stance(e, w)
+        if action.get("key") != "attack":
+            return [ACT.NullAction()]
+        if w["mode"] == "cells":
+            cells = (action.get("shots") or [[]])[0] or []
+            return [ACT.CellLockedAttack(e, cells, intended, amount=w["atk"])]
+        if w["mode"] == "row":
+            return [ACT.AreaAttack(e, self.topology.row(e.cell[1]), w["atk"])]
+        if w["mode"] == "surround8":
+            return [ACT.CellLockedAttack(e, self._surround8(e.cell), e.cell, amount=w["atk"])]
+        return [ACT.NullAction()]
 
     def maybe_resolve(self):
         if all(v is not None for v in self.commits.values()):
@@ -669,6 +744,8 @@ class Match:
         action = commit["action"]
         key = action.get("key", "none")
         intended = tuple(commit["destination"])
+        if e.hero.attack.get("mode") == HEROES.WEAPON:
+            return self._build_weapon(e, action, intended)
         if key == "none":
             return [ACT.NullAction()]
         if key == "attack":
