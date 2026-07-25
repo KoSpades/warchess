@@ -1,0 +1,864 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Warchess — plotting table</title>
+<style>
+:root{
+  --ink:#131A21; --panel:#1A232C; --panel-2:#202B35; --chart:#1E2A33;
+  --rule:#2E3D49; --rule-soft:#26333d;
+  --verdigris:#57A08E; --brass:#C99A3E; --oxide:#D8564A; --ember:#D2622F;
+  --text:#DCE4E8; --dim:#7C8B95; --dimmer:#4E5F6B;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue","Noto Sans SC","PingFang SC",sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--ink);color:var(--text);font-family:var(--sans)}
+body{min-height:100vh;font-size:14px;line-height:1.5}
+h1,h2,h3{margin:0;font-weight:600}
+button{font-family:inherit;font-size:inherit;color:inherit;background:none;border:none;cursor:pointer}
+button:disabled{cursor:not-allowed;opacity:.35}
+:focus-visible{outline:2px solid var(--verdigris);outline-offset:2px}
+
+.eyebrow{font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--dim)}
+
+/* ---------- frame ---------- */
+header{display:flex;align-items:baseline;gap:18px;flex-wrap:wrap;
+  padding:14px 20px;border-bottom:1px solid var(--rule);background:var(--panel)}
+.brand{font-family:var(--mono);letter-spacing:.24em;text-transform:uppercase;font-size:12px}
+.brand b{color:var(--verdigris);font-weight:600}
+.sidebadge{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;
+  padding:3px 9px;border:1px solid currentColor;border-radius:2px}
+.sideL{color:var(--verdigris)} .sideR{color:var(--brass)}
+.clock{margin-left:auto;font-family:var(--mono);font-size:11px;letter-spacing:.14em;color:var(--dim)}
+.clock b{color:var(--text);font-weight:600}
+
+main{display:grid;grid-template-columns:250px minmax(0,1fr) 250px;gap:16px;padding:14px 16px;align-items:start}
+@media(max-width:1080px){main{grid-template-columns:1fr}}
+
+.panel{background:var(--panel);border:1px solid var(--rule);border-radius:3px}
+.panel h3{padding:11px 14px;border-bottom:1px solid var(--rule);font-family:var(--mono);
+  font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--dim);font-weight:500}
+.panel .body{padding:14px}
+
+/* ---------- board ---------- */
+.boardwrap{display:flex;flex-direction:column;gap:10px;align-items:center}
+#rows{width:100%;max-width:1200px;display:flex;flex-direction:column;gap:4px}
+.coords{display:grid;grid-template-columns:26px repeat(9,1fr);gap:4px;width:100%;max-width:1200px;flex:0 0 auto}
+.coords span{font-family:var(--mono);font-size:10px;color:var(--dimmer);text-align:center}
+.boardrow{display:grid;grid-template-columns:26px 1fr;gap:4px;width:100%;align-items:center}
+.rowlabel{font-family:var(--mono);font-size:10px;color:var(--dimmer);text-align:center}
+.board{display:grid;grid-template-columns:repeat(9,1fr);gap:4px;width:100%;min-width:0}
+
+.cell{position:relative;aspect-ratio:5/6;padding:0;font:inherit;color:inherit;background:var(--chart);border:1px solid var(--rule-soft);
+  border-radius:2px;display:flex;align-items:center;justify-content:center;transition:background .12s,border-color .12s}
+.cell .tick{position:absolute;inset:0;pointer-events:none;
+  background:linear-gradient(to right,var(--rule) 0 1px,transparent 1px) 50% 0/100% 5px no-repeat,
+             linear-gradient(to bottom,var(--rule) 0 1px,transparent 1px) 0 50%/5px 100% no-repeat;opacity:.5}
+.cell.regL{background:#18261F;border-color:#294036}
+.cell.regR{background:#282218;border-color:#40382a}
+.cell.regM{background:var(--chart)}
+.cell.zone{box-shadow:inset 0 0 0 1px rgba(220,228,232,.14)}
+.cell.pick{cursor:pointer}
+.cell.pick:hover{border-color:var(--verdigris)}
+.cell.inrange{background:#20303a;border-color:#33505c}
+.cell.legal{border-color:var(--verdigris);box-shadow:inset 0 0 0 1px rgba(87,160,142,.35)}
+.cell.legal::after{content:"";width:7px;height:7px;border-radius:50%;background:var(--verdigris);opacity:.6}
+.cell.marked{border-color:var(--oxide);background:#2C2529}
+.cell.marked::after{content:attr(data-mark);font-family:var(--mono);font-size:10px;color:var(--oxide);
+  position:absolute;top:2px;left:4px}
+.cell.preview{background:#2A2E28;border-color:#4A5A3E}
+.cell.dest{box-shadow:inset 0 0 0 2px var(--verdigris)}
+.cell.burn{background:#2E211B;border-color:#4A2E22}
+.flame{position:absolute;bottom:3px;right:4px;font-family:var(--mono);font-size:9px;color:var(--ember);letter-spacing:-.02em}
+
+/* ---------- units ---------- */
+.unit{position:absolute;inset:4px;border-radius:2px;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:2px;background:#16202880;border:1px solid var(--rule);
+  font-size:13px;overflow:hidden}
+.unit.L{border-color:var(--verdigris);background:linear-gradient(180deg,#1c2e2b,#16232a)}
+.unit.R{border-color:var(--brass);background:linear-gradient(180deg,#302a1c,#1f2229)}
+.unit.acted{opacity:1}
+.unit.acted .done{position:absolute;top:2px;right:4px;font-size:9px;color:var(--dim);line-height:1}
+.unit.dead{display:none}
+.unit .nm{font-weight:600;line-height:1.05;font-size:12px;text-align:center}
+.unit .hpbar{width:78%;height:3px;background:#0d1418;border-radius:2px;overflow:hidden}
+.unit .hpbar i{display:block;height:100%;background:var(--verdigris)}
+.unit.R .hpbar i{background:var(--brass)}
+.unit .hpbar i.hurt{background:var(--oxide)}
+.unit .hpn{font-family:var(--mono);font-size:9px;color:var(--dim)}
+.unit.sel{box-shadow:0 0 0 2px var(--verdigris),0 0 14px rgba(87,160,142,.3)}
+.unit.pending{opacity:.62;border-style:dashed}
+.cell.movefrom{box-shadow:inset 0 0 0 1px var(--dimmer)}
+.cell.movefrom::before{content:"";position:absolute;inset:0;margin:auto;width:8px;height:8px;
+  border:1px dashed var(--dimmer);border-radius:50%}
+.unit.tgt{cursor:pointer;box-shadow:0 0 0 2px var(--oxide)}
+.unit.clickable{cursor:pointer}
+.unit.clickable:hover{filter:brightness(1.25)}
+.pips{display:flex;gap:2px}
+.pips i{width:3px;height:3px;border-radius:50%;background:var(--dimmer)}
+.pips i.on{background:var(--brass)}
+
+/* ---------- roster / force list ---------- */
+.hero{border:1px solid var(--rule);border-radius:2px;padding:9px 11px;margin-bottom:7px;background:var(--panel-2)}
+.hero.pickable{cursor:pointer}
+.hero.pickable:hover{border-color:var(--verdigris)}
+.hero.armed{border-color:var(--verdigris);box-shadow:inset 0 0 0 1px rgba(87,160,142,.4)}
+.hero.used{opacity:.3;pointer-events:none}
+.hero .top{display:flex;align-items:baseline;gap:7px}
+.hero .cn{font-weight:600}
+.hero .en{font-size:11px;color:var(--dim)}
+.hero .stats{font-family:var(--mono);font-size:10px;color:var(--dim);margin-top:3px;letter-spacing:.03em}
+.hero .trait{font-size:11px;color:var(--dim);margin-top:5px;padding-left:8px;border-left:1px solid var(--rule)}
+.hero .trait b{color:var(--text);font-weight:500}
+.hero.pickable{cursor:grab}
+.hero.pickable:active{cursor:grabbing}
+.hero.dragging{opacity:.35}
+.hero .grip{margin-left:auto;color:var(--dimmer);font-family:var(--mono);font-size:13px;line-height:1}
+.hero .top{align-items:center}
+
+/* ---------- deployment drag & drop ---------- */
+body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
+.cell.drop-ok{background:#1f2f2c !important;border-color:var(--verdigris) !important;
+  box-shadow:inset 0 0 0 2px rgba(87,160,142,.55)}
+.unit.place{cursor:grab;inset:3px}
+.unit.place:active{cursor:grabbing}
+.unit.place .rm{position:absolute;top:0;right:3px;font-size:11px;color:var(--oxide);opacity:0;transition:opacity .12s}
+.unit.place:hover .rm{opacity:.95}
+.dzHint{font-size:11px;color:var(--dim);margin:2px 0 12px;font-family:var(--mono);letter-spacing:.04em}
+
+/* ---------- draft modal ---------- */
+.modal-backdrop{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;
+  padding:20px;background:rgba(9,13,17,.72);backdrop-filter:blur(3px);
+  animation:fade .18s ease-out}
+@keyframes fade{from{opacity:0}to{opacity:1}}
+.modal{width:100%;max-width:600px;background:var(--panel);border:1px solid var(--rule);border-radius:6px;
+  padding:24px;box-shadow:0 24px 70px rgba(0,0,0,.55)}
+.modal-h{font-family:var(--mono);font-size:12px;letter-spacing:.18em;text-transform:uppercase;
+  color:var(--text);text-align:center}
+.modal-sub{color:var(--dim);font-size:13px;text-align:center;margin:8px 0 20px}
+.pair-row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.pair-row .hero{margin:0}
+.pair-row .hero.pickable{cursor:pointer}
+.pair-row .hero.pickable:hover{transform:translateY(-2px);box-shadow:0 8px 20px rgba(0,0,0,.35)}
+.modal-wait{text-align:center;color:var(--dim);font-family:var(--mono);font-size:11px;
+  letter-spacing:.16em;text-transform:uppercase;margin-top:18px}
+.modal-taken{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:22px;
+  padding-top:16px;border-top:1px solid var(--rule)}
+@media(max-width:520px){.pair-row{grid-template-columns:1fr}}
+
+/* ---------- order slip: the signature ---------- */
+.slip{background:#F0EBE1;color:#1a1a1a;border-radius:2px;position:relative;
+  font-family:var(--mono);font-size:11px;padding:16px 14px 14px;
+  box-shadow:0 6px 18px rgba(0,0,0,.4)}
+.slip::before{content:"";position:absolute;top:0;left:0;right:0;height:6px;
+  background:repeating-linear-gradient(90deg,transparent 0 5px,var(--ink) 5px 6px);opacity:.25}
+.slip .hdr{display:flex;justify-content:space-between;align-items:baseline;
+  border-bottom:1px solid #b9b2a4;padding-bottom:6px;margin-bottom:9px;
+  letter-spacing:.16em;text-transform:uppercase;font-size:9px;color:#6b6355}
+.slip .fld{display:flex;gap:8px;padding:4px 0;border-bottom:1px dotted #c8c1b3}
+.slip .fld:last-child{border-bottom:none}
+.slip .k{width:60px;color:#6b6355;text-transform:uppercase;font-size:9px;letter-spacing:.1em;padding-top:1px}
+.slip .v{flex:1;color:#1a1a1a}
+.slip .v.blank{color:#a89f8f}
+.slip.sealed{background:#2A3038;color:var(--dim)}
+.slip.sealed .stamp{font-size:14px;letter-spacing:.3em;text-transform:uppercase;color:var(--verdigris);
+  text-align:center;padding:14px 0}
+.slip.R .stamp{color:var(--brass)}
+
+.flip{animation:flip .5s ease-out}
+@keyframes flip{from{transform:rotateX(-88deg);opacity:.2}to{transform:rotateX(0);opacity:1}}
+@media(prefers-reduced-motion:reduce){.flip{animation:none}}
+
+/* ---------- controls ---------- */
+.btn{display:block;width:100%;text-align:left;padding:8px 11px;margin-bottom:6px;
+  border:1px solid var(--rule);border-radius:2px;background:var(--panel-2);transition:border-color .12s}
+.btn:hover:not(:disabled){border-color:var(--verdigris)}
+.btn.on{border-color:var(--verdigris);background:#1f2f2c}
+.btn .cost{float:right;font-family:var(--mono);font-size:10px;color:var(--brass)}
+.btn small{display:block;color:var(--dim);font-size:11px;margin-top:2px}
+.primary{background:var(--verdigris);color:#0d1a17;border-color:var(--verdigris);
+  text-align:center;font-weight:600;letter-spacing:.04em}
+.primary:hover:not(:disabled){filter:brightness(1.1)}
+.ghost{text-align:center;color:var(--dim)}
+
+.note{font-size:12px;color:var(--dim);margin:0 0 10px}
+.err{color:var(--oxide);font-size:12px;margin:8px 0 0;min-height:16px}
+.step{font-family:var(--mono);font-size:9px;letter-spacing:.18em;text-transform:uppercase;
+  color:var(--dim);margin:12px 0 7px;padding-bottom:4px;border-bottom:1px solid var(--rule)}
+.step:first-child{margin-top:0}
+
+/* ---------- log ---------- */
+.log{max-height:52vh;overflow-y:auto;font-size:12px}
+.log div{padding:3px 0;border-bottom:1px solid #1f2a33;color:var(--text)}
+.log div.quiet{color:var(--dimmer)}
+.log div.rd{font-family:var(--mono);font-size:10px;letter-spacing:.18em;text-transform:uppercase;
+  color:var(--dim);margin-top:6px}
+.banner{padding:14px;text-align:center;font-family:var(--mono);letter-spacing:.2em;text-transform:uppercase}
+.banner.win{color:var(--verdigris)} .banner.lose{color:var(--oxide)} .banner.draw{color:var(--dim)}
+.waiting{text-align:center;padding:26px 14px;color:var(--dim);font-family:var(--mono);
+  font-size:11px;letter-spacing:.16em;text-transform:uppercase}
+.linkline{padding:10px 20px;border-top:1px solid var(--rule);color:var(--dim);font-size:12px}
+.linkline a{color:var(--verdigris)}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">War<b>chess</b> · plotting table</div>
+  <div id="badge" class="sidebadge sideL">Left</div>
+  <div class="clock" id="clock"></div>
+  <button class="btn" style="width:auto;margin:0;padding:4px 10px" onclick="resetMatch()">Reset match</button>
+</header>
+
+<main>
+  <section class="panel" id="leftpanel"><h3 id="leftheading">Your force</h3><div class="body" id="leftbody"></div></section>
+
+  <section class="boardwrap">
+    <div class="coords" id="coords"></div>
+    <div id="rows"></div>
+  </section>
+
+  <section class="panel"><h3>Field log</h3><div class="body log" id="log"></div></section>
+</main>
+
+<div class="linkline" id="linkline"></div>
+
+<div id="modal"></div>
+
+<script>
+const SIDE = (new URLSearchParams(location.search).get('side') || 'L').toUpperCase().startsWith('R') ? 'R' : 'L';
+const COLS = "ABCDEFGHI";
+let S = null, armed = null, draft = null, err = "", lastVersion = -1, pendingMove = null;
+
+const cn = c => COLS[c[0]-1] + c[1];
+const eq = (a,b) => a && b && a[0]===b[0] && a[1]===b[1];
+const has = (arr,c) => (arr||[]).some(x => eq(x,c));
+
+async function api(path, body){
+  const r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json', 'ngrok-skip-browser-warning':'1'},
+                              body: JSON.stringify(Object.assign({side:SIDE}, body||{}))});
+  return r.json();
+}
+async function cmd(body){
+  const res = await api('/api/cmd', body);
+  err = res.error || "";
+  await poll(true);
+}
+async function resetMatch(){ await api('/api/reset'); draft=null; armed=null; pendingMove=null; err=""; await poll(true); }
+
+async function poll(force){
+  const r = await fetch('/api/state?side='+SIDE, {cache:'no-store', headers:{'ngrok-skip-browser-warning':'1'}});
+  const next = await r.json();
+  // Presence isn't part of the version counter, so compare it explicitly —
+  // otherwise a seat stays on "waiting" when the opponent joins.
+  const changed = !S || next.version !== lastVersion || next.both_present !== S.both_present;
+  S = next; lastVersion = next.version;
+  // Drop the pending-move ghost once its order is no longer the live selection
+  // (i.e. the exchange resolved and the board updated to the real position).
+  if (pendingMove && (S.phase!=='commit' || !S.commit || S.commit.selected!==pendingMove.id)) pendingMove = null;
+  if (changed || force) { syncDraft(); render(); }
+}
+
+function syncDraft(){
+  if (S.phase !== 'commit') { draft = null; return; }
+  const sel = S.commit && S.commit.selected;
+  if (!sel || (S.commit && S.commit.sealed)) { draft = null; return; }
+  if (!draft || draft.entity !== sel) draft = blankDraft(sel);
+}
+function blankDraft(entity){
+  return {entity, destination:null, held:false, tentative:null, actionKey:null, shots:[], shotIndex:0,
+          target:null, direction:null, cell:null};
+}
+
+function unitAt(cell){ return (S.units||[]).find(u => u.alive && u.cell && eq(u.cell, cell)); }
+function myUnits(){ return (S.units||[]).filter(u => u.side === SIDE); }
+function foeUnits(){ return (S.units||[]).filter(u => u.side !== SIDE); }
+function selectedUnit(){ return S.commit && S.commit.selected ? (S.units||[]).find(u=>u.id===S.commit.selected) : null; }
+function currentAction(){
+  if (!draft || !draft.actionKey || !S.commit || !S.commit.actions) return null;
+  return S.commit.actions.find(a => a.key === draft.actionKey);
+}
+function originCell(){
+  const u = selectedUnit(); if (!u) return null;
+  return draft && draft.destination ? draft.destination : u.cell;
+}
+
+/* ---------------- board ---------------- */
+function renderBoard(){
+  const cols = S.board.cols, rows = S.board.rows;
+  document.getElementById('coords').innerHTML =
+    '<span></span>' + Array.from({length:cols},(_,i)=>`<span>${COLS[i]}</span>`).join('');
+
+  const act = currentAction();
+  const tgt = act ? act.targeting : null;
+  const origin = originCell();
+  const sweepCells = sweepPreview();
+
+  // A planned-but-unresolved move: draw the selected piece as a ghost at its
+  // intended square rather than where it currently stands. Covers the tentative
+  // (arrow-key) square, the confirmed destination, and a sealed-but-unresolved
+  // order — all cleared once the move actually resolves on the board.
+  let movePreview = null;
+  if (S.phase==='commit' && draft){
+    const to = draft.destination || draft.tentative;
+    const su = selectedUnit();
+    if (to && su && !eq(to, su.cell)) movePreview = {u:su, to};
+  } else if (pendingMove && S.phase==='commit' && S.commit && S.commit.sealed
+             && S.commit.selected===pendingMove.id){
+    // Only during the exact sealed-and-waiting window of the order that set it —
+    // once the exchange resolves the seal clears, so the ghost never lingers.
+    const su = (S.units||[]).find(x=>x.id===pendingMove.id);
+    if (su && !eq(pendingMove.to, su.cell)) movePreview = {u:su, to:pendingMove.to};
+  }
+
+  let html = '';
+  for (let r=1;r<=rows;r++){
+    html += `<div class="boardrow"><div class="rowlabel">${r}</div><div class="board">`;
+    for (let c=1;c<=cols;c++){
+      const cell=[c,r], cls=['cell'];
+      cls.push(c<=3 ? 'regL' : c>=cols-2 ? 'regR' : 'regM');
+      let mark='', extra='';
+      if (S.phase==='setup' && has(S.zone,cell)) cls.push('zone');
+      const tile = (S.tiles||[]).find(t=>eq(t.cell,cell));
+      if (tile) cls.push('burn');
+      if (origin && tgt && tgt.kind==='cells' &&
+          Math.abs(origin[0]-c)+Math.abs(origin[1]-r) <= tgt.range) cls.push('inrange');
+      if (draft && ((draft.destination && eq(draft.destination,cell)) || (draft.tentative && eq(draft.tentative,cell)))) cls.push('dest');
+      if (S.phase==='commit' && draft && !draft.destination && !draft.held &&
+          S.commit.legal_moves && has(S.commit.legal_moves,cell)) cls.push('legal','pick');
+      if (has(sweepCells,cell)) cls.push('preview');
+      if (draft && draft.shots){
+        draft.shots.forEach((sh,i)=>{ if (has(sh,cell)){ cls.push('marked'); mark = draft.shots.length>1?(i+1):'x'; }});
+      }
+      if (draft && draft.cell && eq(draft.cell,cell)) cls.push('marked');
+      if (S.phase==='victim' && S.victim && has(S.victim.cells,cell)) cls.push('marked');
+      if (clickableCell(cell)) cls.push('pick');
+
+      let u = unitAt(cell), ghost = false;
+      if (movePreview){
+        if (u && u.id===movePreview.u.id){ u = null; cls.push('movefrom'); }  // vacate + mark origin
+        if (eq(cell, movePreview.to)){ u = movePreview.u; ghost = true; }       // ghost at target
+      }
+      if (u) extra = unitHTML(u, ghost);
+      if (S.phase==='setup'){
+        const p = (S.setup.placements||[]).find(x=>eq(x.cell,cell));
+        if (p) extra = placementHTML(p);
+      }
+      const dnd = (S.phase==='setup' && !S.setup.ready)
+        ? ` ondragover="allowDrop(event)" ondragenter="dragEnterCell(event)"`
+          + ` ondragleave="dragLeaveCell(event)" ondrop="dropCell(event,${c},${r})"`
+        : '';
+      const live = cls.includes('pick');
+      html += `<button type="button" class="${cls.join(' ')}" data-mark="${mark}"`
+            + ` ${live?'':'tabindex="-1"'} aria-label="${cn(cell)}${u?' — '+u.name:''}"`
+            + ` onclick="onCell(${c},${r})"${dnd}>`
+            + `<span class="tick"></span>${extra}`
+            + (tile?`<span class="flame">▲${tile.stacks}</span>`:'')
+            + `</button>`;
+    }
+    html += '</div></div>';
+  }
+  document.getElementById('rows').innerHTML = html;
+}
+
+function unitHTML(u, pending){
+  const cls=['unit',u.side];
+  if (pending) cls.push('pending');
+  if (u.acted) cls.push('acted');
+  if (!u.alive) cls.push('dead');
+  if (S.commit && S.commit.selected===u.id) cls.push('sel');
+  if (S.phase==='victim' && S.victim && S.victim.needed && S.victim.options.includes(u.id)) cls.push('tgt');
+  const act = currentAction();
+  if (act && act.targeting.kind==='unit' && u.side!==SIDE) cls.push('clickable');
+  if (draft && draft.target===u.id) cls.push('tgt');
+  if (S.phase==='commit' && !S.commit.sealed && !S.commit.selected &&
+      u.side===SIDE && !u.acted && u.alive) cls.push('clickable');
+  const pct = Math.max(0,Math.round(100*u.hp/u.max_hp));
+  const pips = u.max_ap>0 ? `<span class="pips">${Array.from({length:u.max_ap},(_,i)=>`<i class="${i<u.ap?'on':''}"></i>`).join('')}</span>` : '';
+  return `<span class="${cls.join(' ')}">`
+       + (u.acted && !pending ? `<span class="done">✓</span>` : '')
+       + `<span class="nm">${u.name.slice(0,4)}</span>`
+       + `<span class="hpbar"><i class="${pct<40?'hurt':''}" style="width:${pct}%"></i></span>`
+       + `<span class="hpn">${u.hp}</span>${pips}</span>`;
+}
+
+function heroByKey(k){ return (S.roster||[]).find(h=>h.key===k); }
+
+function placementHTML(p){
+  const hero = heroByKey(p.key) || {name:p.key, hp:''};
+  const drag = S.setup.ready ? ''
+    : `draggable="true" ondragstart="startDragUnit(event,'${p.key}',${p.cell[0]},${p.cell[1]})"`;
+  return `<span class="unit ${SIDE} place" ${drag}>`
+       + `<span class="rm">✕</span>`
+       + `<span class="nm">${hero.name.slice(0,4)}</span>`
+       + `<span class="hpn">${hero.hp} HP</span></span>`;
+}
+
+/* ---------------- deployment drag & drop ---------------- */
+let dragHero = null;
+function setDragChip(e, key){
+  // Replace the browser's default drag ghost (a snapshot of the whole card)
+  // with a small cell-sized chip carrying just the hero's name.
+  const hero = heroByKey(key) || {name:key};
+  const chip = document.createElement('div');
+  chip.textContent = hero.name;
+  chip.style.cssText = 'position:absolute;top:-999px;left:-999px;'
+    + 'padding:8px 12px;border-radius:3px;white-space:nowrap;'
+    + 'background:#16232a;border:1px solid #57A08E;color:#DCE4E8;'
+    + 'font:600 12px system-ui,sans-serif';
+  document.body.appendChild(chip);
+  e.dataTransfer.setDragImage(chip, 24, 16);
+  setTimeout(()=>chip.remove(), 0);
+}
+function startDragHero(e, key){
+  if (S.phase!=='setup' || S.setup.ready) { e.preventDefault(); return; }
+  if (S.setup.placements.some(p=>p.key===key)) { e.preventDefault(); return; }
+  dragHero = {key, fromCell:null};
+  e.dataTransfer.setData('text/plain', key);
+  e.dataTransfer.effectAllowed='move';
+  setDragChip(e, key);
+  e.currentTarget.classList.add('dragging');
+  document.body.classList.add('placing');
+}
+function startDragUnit(e, key, c, r){
+  if (S.phase!=='setup' || S.setup.ready) { e.preventDefault(); return; }
+  dragHero = {key, fromCell:[c,r]};
+  e.dataTransfer.setData('text/plain', key);
+  e.dataTransfer.effectAllowed='move';
+  setDragChip(e, key);
+  document.body.classList.add('placing');
+  e.stopPropagation();
+}
+function allowDrop(e){ if (dragHero){ e.preventDefault(); e.dataTransfer.dropEffect='move'; } }
+function dragEnterCell(e){ if (dragHero){ e.preventDefault(); e.currentTarget.classList.add('drop-ok'); } }
+function dragLeaveCell(e){ e.currentTarget.classList.remove('drop-ok'); }
+function endDrag(){
+  dragHero = null;
+  document.body.classList.remove('placing');
+  document.querySelectorAll('.drop-ok').forEach(el=>el.classList.remove('drop-ok'));
+  document.querySelectorAll('.hero.dragging').forEach(el=>el.classList.remove('dragging'));
+}
+async function dropCell(e, c, r){
+  e.preventDefault();
+  const d = dragHero; endDrag();
+  if (!d || S.phase!=='setup' || S.setup.ready) return;
+  const cell=[c,r];
+  if (!has(S.zone, cell)) return;
+  const occ = S.setup.placements.find(p=>eq(p.cell,cell));
+  if (!d.fromCell){                       // from roster
+    if (occ) return;
+    await cmd({cmd:'place', hero:d.key, cell});
+  } else if (!eq(d.fromCell, cell)) {      // moving a placed hero
+    if (!occ){
+      await api('/api/cmd', {cmd:'unplace', cell:d.fromCell});
+      await cmd({cmd:'place', hero:d.key, cell});
+    } else {                               // swap two placed heroes
+      const other = occ.key;
+      await api('/api/cmd', {cmd:'unplace', cell:d.fromCell});
+      await api('/api/cmd', {cmd:'unplace', cell});
+      await api('/api/cmd', {cmd:'place', hero:d.key, cell});
+      await cmd({cmd:'place', hero:other, cell:d.fromCell});
+    }
+  }
+}
+
+function sweepPreview(){
+  const act = currentAction();
+  if (!act || !draft || !draft.direction || act.targeting.kind!=='direction') return [];
+  const o = originCell(); if (!o) return [];
+  let step = SIDE==='L' ? 1 : -1;
+  if (draft.direction==='backward') step = -step;
+  const out=[];
+  for (const col of [o[0], o[0]+step])
+    for (let r=1;r<=S.board.rows;r++) if (col>=1 && col<=S.board.cols) out.push([col,r]);
+  return out;
+}
+
+function clickableCell(cell){
+  if (S.phase==='setup') return !S.setup.ready && has(S.zone,cell);
+  if (S.phase!=='commit' || !draft || S.commit.sealed) return false;
+  if (!draft.destination && !draft.held) return has(S.commit.legal_moves,cell);
+  const act = currentAction(); if (!act) return false;
+  if (act.targeting.kind==='cells'){
+    const o = originCell();
+    return Math.abs(o[0]-cell[0])+Math.abs(o[1]-cell[1]) <= act.targeting.range;
+  }
+  if (act.targeting.kind==='any_cell') return true;
+  return false;
+}
+
+/* ---------------- interaction ---------------- */
+function onCell(c,r){
+  const cell=[c,r];
+  if (S.phase==='setup'){
+    if (S.setup.ready) return;
+    const placed = S.setup.placements.find(p=>eq(p.cell,cell));
+    if (placed) return cmd({cmd:'unplace', cell});
+    if (!armed) { err="Pick a hero from the roster first."; return render(); }
+    return cmd({cmd:'place', hero:armed, cell}).then(()=>{ armed=null; });
+  }
+  if (S.phase==='victim'){
+    const u = unitAt(cell);
+    if (u && S.victim.needed && S.victim.options.includes(u.id)) return cmd({cmd:'victim', entity:u.id});
+    return;
+  }
+  if (S.phase!=='commit' || S.commit.sealed) return;
+  if (!S.commit.selected){
+    // Click your own un-acted piece to start its turn.
+    const u = unitAt(cell);
+    if (u && u.side===SIDE && !u.acted && u.alive) return cmd({cmd:'select', entity:u.id});
+    return;
+  }
+  if (!draft) return;
+  if (!draft.destination && !draft.held){
+    if (has(S.commit.legal_moves,cell)){ draft.destination=cell; draft.tentative=null; err=""; return render(); }
+    return;
+  }
+  const act = currentAction(); if (!act) return;
+  if (act.targeting.kind==='cells'){
+    const o=originCell();
+    if (Math.abs(o[0]-c)+Math.abs(o[1]-r) > act.targeting.range){ err="Out of range."; return render(); }
+    const sh = draft.shots[draft.shotIndex] || (draft.shots[draft.shotIndex]=[]);
+    const at = sh.findIndex(x=>eq(x,cell));
+    if (at>=0) sh.splice(at,1);
+    else if (sh.length < act.targeting.count) sh.push(cell);
+    else { err=`Shot ${draft.shotIndex+1} already has ${act.targeting.count} cells.`; return render(); }
+    err=""; return render();
+  }
+  if (act.targeting.kind==='any_cell'){ draft.cell=cell; err=""; return render(); }
+}
+
+function onUnitPick(id){
+  if (S.phase==='commit' && !S.commit.selected) return cmd({cmd:'select', entity:id});
+  const act = currentAction();
+  if (act && act.targeting.kind==='unit'){ draft.target=id; err=""; render(); }
+}
+
+/* ---- keyboard: arrows move the piece, Enter confirms move then registers attack ---- */
+function commitActive(){
+  return S && S.phase==='commit' && S.commit && !S.commit.sealed && S.commit.selected && draft;
+}
+function moveInputActive(){
+  return commitActive() && !draft.destination && !draft.held;
+}
+function confirmMove(){
+  if (!moveInputActive()) return;
+  if (draft.tentative) draft.destination = draft.tentative;
+  else draft.held = true;              // Enter with no move = hold position
+  draft.tentative = null; err="";
+  // Default straight into the normal attack so grids can be marked immediately,
+  // and a second Enter registers them (or holds if none are marked).
+  const atk = (S.commit.actions||[]).find(a=>a.key==='attack');
+  if (atk) chooseAction('attack'); else render();
+}
+function sealFromKeyboard(){
+  const act = currentAction();
+  if (act && act.targeting.kind==='cells'){
+    const any = (draft.shots||[]).some(s=>s.length>0);
+    if (!any) draft.actionKey='none';         // no grids marked → hold
+    return sealOrder();
+  }
+  if (act && act.targeting.kind==='unit' && draft.target==null){
+    draft.actionKey='none'; return sealOrder();
+  }
+  if (orderReady()) return sealOrder();
+  draft.actionKey='none'; sealOrder();         // otherwise Enter holds
+}
+function onKey(e){
+  if (!commitActive()) return;
+  const moving = !draft.destination && !draft.held;
+  const dirs = {ArrowUp:[0,-1], ArrowDown:[0,1], ArrowLeft:[-1,0], ArrowRight:[1,0]};
+  if (moving && (e.key in dirs)){
+    e.preventDefault();
+    const u = selectedUnit(); if (!u) return;
+    const cur = draft.tentative || u.cell;
+    const [dx,dy] = dirs[e.key];
+    const cand = [cur[0]+dx, cur[1]+dy];
+    if (eq(cand, u.cell)){ draft.tentative=null; err=""; return render(); }   // step back to origin
+    if ((S.commit.legal_moves||[]).some(m=>eq(m,cand))){ draft.tentative=cand; err=""; return render(); }
+    return;                                     // off-limits — ignore
+  }
+  if (e.key==='Enter'){
+    e.preventDefault();
+    if (moving) confirmMove(); else sealFromKeyboard();
+  }
+}
+
+function chooseAction(key){
+  const act = S.commit.actions.find(a=>a.key===key);
+  draft.actionKey=key; draft.shots=[]; draft.shotIndex=0; draft.target=null; draft.direction=null; draft.cell=null;
+  if (act.targeting.kind==='cells') draft.shots = Array.from({length:act.targeting.shots},()=>[]);
+  err=""; render();
+}
+
+function orderReady(){
+  if (!draft || (!draft.destination && !draft.held)) return false;
+  const act = currentAction(); if (!act) return false;
+  const t = act.targeting;
+  if (t.kind==='none') return true;
+  if (t.kind==='cells') return draft.shots.length===t.shots && draft.shots.every(s=>s.length<=t.count);
+  if (t.kind==='unit') return draft.target!=null;
+  if (t.kind==='direction') return draft.direction!=null;
+  if (t.kind==='any_cell') return draft.cell!=null;
+  return false;
+}
+
+function sealOrder(){
+  const act=currentAction(), t=act.targeting, action={key:draft.actionKey};
+  if (t.kind==='cells') action.shots = draft.shots;
+  if (t.kind==='unit') action.target = draft.target;
+  if (t.kind==='direction') action.direction = draft.direction;
+  if (t.kind==='any_cell') action.cell = draft.cell;
+  // Remember the intended move so the ghost persists after the slip is sealed,
+  // until the exchange actually resolves.
+  pendingMove = draft.destination ? {id: draft.entity, to: draft.destination} : null;
+  cmd({cmd:'commit', payload:{destination: draft.destination, action}});
+}
+
+/* ---------------- panels ---------------- */
+function render(){
+  if (!S) return;
+  document.getElementById('badge').textContent = SIDE==='L' ? 'Left force' : 'Right force';
+  document.getElementById('badge').className = 'sidebadge side'+SIDE;
+  document.getElementById('clock').innerHTML =
+      S.phase==='draft' ? 'Draft'
+    : S.phase==='setup' ? 'Deployment'
+    : `Round <b>${S.round}</b> · exchange <b>${S.exchange}</b> · <b>${S.phase}</b>`;
+  document.getElementById('linkline').innerHTML =
+    `Two players, two tabs. This is the <b>${SIDE==='L'?'Left':'Right'}</b> seat — open `
+    + `<a href="?side=${SIDE==='L'?'R':'L'}">the ${SIDE==='L'?'Right':'Left'} seat</a> in another tab or window.`;
+  document.getElementById('modal').innerHTML = '';
+  renderBoard();
+  renderLog();
+  if (S.phase==='draft') renderDraft();
+  else if (S.phase==='setup') renderSetup();
+  else if (S.phase==='commit') renderCommit();
+  else if (S.phase==='victim') renderVictim();
+  else renderOver();
+  document.querySelectorAll('.unit.clickable, .unit.tgt').forEach(el=>{
+    const cell = el.parentElement;
+    cell.onclick = cell.onclick; // board handler already routes
+  });
+}
+
+function heroCard(hero, clickable, onclick){
+  return `<div class="hero ${clickable?'pickable':''}" ${clickable?`onclick="${onclick}"`:''}>
+    <div class="top"><span class="cn">${hero.name}</span><span class="en">${hero.name_en}</span></div>
+    <div class="stats">HP ${hero.hp} · ATK ${hero.atk} · MOVE ${hero.move} · AP ${hero.max_ap}
+      · ${hero.attack.mode==='cell_locked'?`${hero.attack.cells} cells @ ${hero.attack.range}`:'any one enemy'}
+      ${hero.shots>1?` · ${hero.shots} shots`:''}</div>
+    ${hero.traits.map(t=>`<div class="trait"><b>${t.name}${t.ap_cost?` (${t.ap_cost} AP)`:''}</b> — ${t.text}</div>`).join('')}
+  </div>`;
+}
+
+function renderDraft(){
+  document.getElementById('leftheading').textContent = 'Draft';
+  document.getElementById('leftbody').innerHTML = `<p class="note">Hero draft in progress — make your pick in the panel.</p>`;
+
+  if (!S.both_present){
+    document.getElementById('modal').innerHTML = `
+      <div class="modal-backdrop"><div class="modal">
+        <div class="modal-h">Waiting for the other player</div>
+        <div class="modal-sub">The draft begins once both seats are open.</div>
+      </div></div>`;
+    return;
+  }
+
+  const d = S.draft;
+  const whose = d.picker==='L' ? 'Left' : 'Right';
+  const cards = (d.pair||[]).map(h => heroCard(h, d.your_pick, `draftPick('${h.key}')`)).join('');
+  const takenCol = (arr) => arr.length
+    ? arr.map(x=>`<div class="hero" style="padding:6px 9px;margin-bottom:5px">
+        <span class="cn">${x.name}</span> <span class="en">${x.name_en}</span></div>`).join('')
+    : `<p class="note">—</p>`;
+
+  const sub = d.your_pick
+    ? 'Choose one — the hero you leave goes to your opponent.'
+    : `<b class="side${d.picker}">${whose}</b> is choosing…`;
+
+  document.getElementById('modal').innerHTML = `
+    <div class="modal-backdrop">
+      <div class="modal">
+        <div class="modal-h">Draft · pick ${d.step+1} of ${d.total}</div>
+        <div class="modal-sub">${sub}</div>
+        <div class="pair-row">${cards}</div>
+        ${d.your_pick ? '' : `<div class="modal-wait">Waiting for ${whose} to choose</div>`}
+        <div class="modal-taken">
+          <div><div class="eyebrow sideL" style="margin-bottom:6px">Left${SIDE==='L'?' · you':''}</div>${takenCol(d.taken.L)}</div>
+          <div><div class="eyebrow sideR" style="margin-bottom:6px">Right${SIDE==='R'?' · you':''}</div>${takenCol(d.taken.R)}</div>
+        </div>
+        <p class="err" style="text-align:center;margin-top:10px">${err}</p>
+      </div>
+    </div>`;
+}
+function draftPick(k){ cmd({cmd:'draft', hero:k}); }
+
+function renderSetup(){
+  document.getElementById('leftheading').textContent = 'Deployment';
+  const st = S.setup, used = new Set(st.placements.map(p=>p.key));
+  let h = '';
+  if (st.ready){
+    h += `<div class="waiting">Deployment sealed<br>Waiting for the other seat</div>`;
+  } else {
+    const left = st.force_size - st.placements.length;
+    h += `<p class="note">Drag each hero onto a square in your shaded zone. <b>${left}</b> left to place.</p>`;
+    h += `<p class="dzHint">Drag a placed hero to move it · drop onto another to swap · click it to remove.</p>`;
+    for (const hero of S.roster){
+      const on = used.has(hero.key);
+      const drag = on ? '' : `draggable="true" ondragstart="startDragHero(event,'${hero.key}')" ondragend="endDrag()"`;
+      h += `<div class="hero ${on?'used':'pickable'} ${armed===hero.key?'armed':''}" ${drag} onclick="armHero('${hero.key}')">
+        <div class="top"><span class="cn">${hero.name}</span><span class="en">${hero.name_en}</span>${on?'':'<span class="grip">⠿</span>'}</div>
+        <div class="stats">HP ${hero.hp} · ATK ${hero.atk} · MOVE ${hero.move} · AP ${hero.max_ap}
+          · ${hero.attack.mode==='cell_locked'?`${hero.attack.cells} cells @ ${hero.attack.range}`:'any one enemy'}
+          ${hero.shots>1?` · ${hero.shots} shots`:''}</div>
+        ${hero.traits.map(t=>`<div class="trait"><b>${t.name}${t.ap_cost?` (${t.ap_cost} AP)`:''}</b> — ${t.text}</div>`).join('')}
+      </div>`;
+    }
+    h += `<button class="btn primary" ${st.placements.length===st.force_size?'':'disabled'} onclick="cmd({cmd:'lock'})">Seal deployment</button>`;
+  }
+  h += `<p class="err">${err}</p>`;
+  document.getElementById('leftbody').innerHTML = h;
+}
+function armHero(k){ armed = (armed===k?null:k); err=""; render(); }
+
+function renderCommit(){
+  document.getElementById('leftheading').textContent = 'Order slip';
+  const c = S.commit;
+  let h = '';
+  if (c.sealed){
+    h += `<div class="slip sealed ${SIDE} flip"><div class="stamp">Sealed</div></div>`;
+    h += `<div class="waiting">${c.opponent_sealed?'Resolving':'Waiting for the other seat'}</div>`;
+    document.getElementById('leftbody').innerHTML = h; return;
+  }
+  if (!c.selected){
+    h += `<p class="note">Choose the hero to send in. Its turn begins the moment you pick it — board effects resolve at once and the choice is final.</p>`;
+    for (const u of myUnits().filter(u=>u.alive && !u.acted)){
+      h += `<div class="hero pickable" onclick="onUnitPick(${u.id})">
+        <div class="top"><span class="cn">${u.name}</span><span class="en">${u.name_en} · ${cn(u.cell)}</span></div>
+        <div class="stats">HP ${u.hp}/${u.max_hp} · AP ${u.ap}/${u.max_ap}</div></div>`;
+    }
+    const done = myUnits().filter(u=>u.alive && u.acted).length;
+    if (done) h += `<p class="note">${done} of your heroes have already acted this round.</p>`;
+    h += `<p class="err">${err}</p>`;
+    document.getElementById('leftbody').innerHTML = h; return;
+  }
+
+  const u = selectedUnit(), act = currentAction();
+  h += slipHTML(u, act);
+  h += `<div class="step">1 · Movement</div>`;
+  if (!draft.destination && !draft.held){
+    h += `<p class="note">Arrow keys move ${u.name}; <b>Enter</b> confirms. Enter without moving holds position. (Or click a marked square.)</p>
+          <button class="btn primary" onclick="confirmMove()">${draft.tentative?'Confirm move to '+cn(draft.tentative):'Confirm — hold position'}</button>`;
+  } else {
+    h += `<button class="btn on" onclick="draft.destination=null;draft.held=false;draft.tentative=null;draft.actionKey=null;render()">
+            ${draft.held?'Holding position':'Moving to '+cn(draft.destination)} <small>Click to change</small></button>`;
+  }
+  if (draft.destination || draft.held){
+    h += `<div class="step">2 · Action</div>`;
+    for (const a of c.actions){
+      const dis = a.affordable===false ? 'disabled' : '';
+      h += `<button class="btn ${draft.actionKey===a.key?'on':''}" ${dis} onclick="chooseAction('${a.key}')">
+             ${a.name}${a.ap_cost?`<span class="cost">${a.ap_cost} AP</span>`:''}
+             ${a.text?`<small>${a.text}</small>`:''}</button>`;
+    }
+    if (act) h += targetingHTML(act);
+    h += `<button class="btn primary" ${orderReady()?'':'disabled'} onclick="sealFromKeyboard()">Seal order — <b>Enter</b></button>`;
+  }
+  h += `<p class="err">${err}</p>`;
+  document.getElementById('leftbody').innerHTML = h;
+}
+
+function targetingHTML(act){
+  const t = act.targeting;
+  if (t.kind==='none') return '';
+  let h = `<div class="step">3 · Target</div>`;
+  if (t.kind==='cells'){
+    h += `<p class="note">Mark up to ${t.count} cells within ${t.range}, then <b>Enter</b> to register (no marks = hold). You pick which enemy is hit after everyone moves.</p>`;
+    for (let i=0;i<t.shots;i++){
+      const n=(draft.shots[i]||[]).length;
+      h += `<button class="btn ${draft.shotIndex===i?'on':''}" onclick="draft.shotIndex=${i};render()">
+              ${t.shots>1?`Shot ${i+1}`:'Cells'} <span class="cost">${n}/${t.count}</span>
+              ${t.shots>1&&i===1?'<small>Half damage</small>':''}</button>`;
+    }
+  } else if (t.kind==='unit'){
+    h += `<p class="note">Choose one enemy. This lands wherever it moves.</p>`;
+    for (const u of foeUnits().filter(u=>u.alive)){
+      h += `<button class="btn ${draft.target===u.id?'on':''}" onclick="draft.target=${u.id};err='';render()">
+              ${u.name} <span class="cost">${cn(u.cell)}</span></button>`;
+    }
+  } else if (t.kind==='direction'){
+    h += `<p class="note">Choose which neighbouring column joins your own.</p>`;
+    for (const d of t.options){
+      h += `<button class="btn ${draft.direction===d?'on':''}" onclick="draft.direction='${d}';err='';render()">
+              ${d==='forward'?'Forward — toward the enemy':'Backward — toward your own line'}</button>`;
+    }
+  } else if (t.kind==='any_cell'){
+    h += `<p class="note">Click any cell on the board to set it alight.</p>`;
+    if (draft.cell) h += `<button class="btn on">Igniting ${cn(draft.cell)}</button>`;
+  }
+  return h;
+}
+
+function slipHTML(u, act){
+  const t = act ? act.targeting : null;
+  let target = '—';
+  if (t){
+    if (t.kind==='cells') target = draft.shots.map(s=>s.map(cn).join(' ')).filter(Boolean).join('  /  ') || '—';
+    else if (t.kind==='unit'){ const v=foeUnits().find(x=>x.id===draft.target); target = v?v.name:'—'; }
+    else if (t.kind==='direction') target = draft.direction || '—';
+    else if (t.kind==='any_cell') target = draft.cell?cn(draft.cell):'—';
+  }
+  const f = (k,v)=>`<div class="fld"><div class="k">${k}</div><div class="v ${v==='—'?'blank':''}">${v}</div></div>`;
+  return `<div class="slip">
+    <div class="hdr"><span>Order · R${S.round}/E${S.exchange}</span><span>${SIDE==='L'?'LEFT':'RIGHT'}</span></div>
+    ${f('Hero', u.name+' '+cn(u.cell))}
+    ${f('Move', draft.held?'hold':(draft.destination?cn(draft.destination):'—'))}
+    ${f('Action', act?act.name:'—')}
+    ${f('Target', target)}
+  </div>`;
+}
+
+function renderVictim(){
+  document.getElementById('leftheading').textContent = 'Target choice';
+  let h='';
+  if (S.victim.needed){
+    h += `<p class="note">More than one enemy is standing in your marked cells. Choose which one takes the hit.</p>`;
+    for (const id of S.victim.options){
+      const u=(S.units||[]).find(x=>x.id===id);
+      h += `<button class="btn" onclick="cmd({cmd:'victim', entity:${id}})">
+              ${u.name} <small>${u.name_en}</small>
+              <span class="cost">${cn(u.cell)} · ${u.hp} HP</span></button>`;
+    }
+  } else {
+    h += `<div class="waiting">Waiting for the other seat</div>`;
+  }
+  h += `<p class="err">${err}</p>`;
+  document.getElementById('leftbody').innerHTML=h;
+}
+
+function renderOver(){
+  document.getElementById('leftheading').textContent = 'Result';
+  const w = S.winner;
+  const cls = w==='draw' ? 'draw' : (w===SIDE ? 'win' : 'lose');
+  const txt = w==='draw' ? 'Mutual destruction' : (w===SIDE ? 'Your force holds the field' : 'Your force is destroyed');
+  document.getElementById('leftbody').innerHTML =
+    `<div class="banner ${cls}">${txt}</div><button class="btn primary" onclick="resetMatch()">New match</button>`;
+}
+
+function renderLog(){
+  const el=document.getElementById('log');
+  el.innerHTML=(S.log||[]).map(l=>{
+    const isRound = l.text.startsWith('—');
+    return `<div class="${isRound?'rd':(l.quiet?'quiet':'')}">${l.text}</div>`;
+  }).join('');
+  el.scrollTop = el.scrollHeight;
+}
+
+document.addEventListener('dragend', endDrag);
+document.addEventListener('keydown', onKey);
+poll(true);
+setInterval(poll, 700);
+</script>
+</body>
+</html>

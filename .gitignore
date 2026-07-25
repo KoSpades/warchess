@@ -1,0 +1,5 @@
+__pycache__
+.claude/
+.venv/
+ngrok_domain.txt
+warchess-game.zip
