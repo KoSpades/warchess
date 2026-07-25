@@ -399,6 +399,7 @@ function unitHTML(u, pending){
   const act = currentAction();
   if (act && act.targeting.kind==='unit' && u.side!==SIDE) cls.push('clickable');
   if (act && act.targeting.kind==='ally' && u.side===SIDE) cls.push('clickable');
+  if (S.phase==='opening' && S.opening.task && S.opening.task.targeting.kind==='ally' && u.side===SIDE) cls.push('clickable');
   if (draft && draft.target===u.id) cls.push('tgt');
   if (S.phase==='commit' && !S.commit.sealed && !S.commit.selected &&
       u.side===SIDE && !u.acted && u.alive) cls.push('clickable');
@@ -509,6 +510,7 @@ function clickableCell(cell){
   if (!draft.destination && !draft.held) return has(S.commit.legal_moves,cell);
   const act = currentAction(); if (!act) return false;
   if (act.targeting.kind==='cells'){
+    if (S.mode==='self') return false;   // solo mode auto-aims — no manual marking
     const o = originCell();
     return Math.abs(o[0]-cell[0])+Math.abs(o[1]-cell[1]) <= act.targeting.range;
   }
@@ -531,6 +533,14 @@ function onCell(c,r){
     if (u && S.victim.needed && S.victim.options.includes(u.id)) return cmd({cmd:'victim', entity:u.id});
     return;
   }
+  if (S.phase==='opening'){
+    const o=S.opening;
+    if (o.task && o.task.targeting.kind==='ally'){
+      const u=unitAt(cell);
+      if (u && u.side===SIDE && u.alive) return cmd({cmd:'opening', target:u.id});
+    }
+    return;
+  }
   if (S.phase!=='commit' || S.commit.sealed) return;
   if (!S.commit.selected){
     // Click your own un-acted piece to start its turn.
@@ -545,6 +555,7 @@ function onCell(c,r){
   }
   const act = currentAction(); if (!act) return;
   if (act.targeting.kind==='cells'){
+    if (S.mode==='self') return;   // solo mode auto-aims — clicks do nothing here
     const o=originCell();
     if (Math.abs(o[0]-c)+Math.abs(o[1]-r) > act.targeting.range){ err="Out of range."; return render(); }
     const sh = draft.shots[draft.shotIndex] || (draft.shots[draft.shotIndex]=[]);
@@ -593,7 +604,8 @@ function sealFromKeyboard(){
   if (!act) return;
   // Normal attack: any marked grids seal it; nothing marked = hold.
   if (act.key==='attack' && act.targeting.kind==='cells'){
-    if (!(draft.shots||[]).some(s=>s.length>0)) draft.actionKey='none';
+    // Solo mode fires a random attack; otherwise no grids marked = hold.
+    if (S.mode!=='self' && !(draft.shots||[]).some(s=>s.length>0)) draft.actionKey='none';
     return sealOrder();
   }
   if (act.key==='attack' && act.targeting.kind==='unit'){
@@ -643,7 +655,7 @@ function orderReady(){
   const act = currentAction(); if (!act) return false;
   const t = act.targeting;
   if (t.kind==='none') return true;
-  if (t.kind==='cells') return draft.shots.length===t.shots && draft.shots.every(s=>s.length<=t.count);
+  if (t.kind==='cells') return S.mode==='self' || (draft.shots.length===t.shots && draft.shots.every(s=>s.length<=t.count));
   if (t.kind==='unit') return draft.target!=null;
   if (t.kind==='ally') return draft.target!=null;
   if (t.kind==='magnitude') return draft.amount>=1;
@@ -674,6 +686,7 @@ function render(){
   document.getElementById('clock').innerHTML =
       S.phase==='draft' ? 'Draft'
     : S.phase==='setup' ? 'Deployment'
+    : S.phase==='opening' ? 'Opening'
     : `Round <b>${S.round}</b> · exchange <b>${S.exchange}</b> · <b>${S.phase}</b>`;
   document.getElementById('linkline').innerHTML =
     `Two players, two tabs. This is the <b>${SIDE==='L'?'Left':'Right'}</b> seat — open `
@@ -683,6 +696,7 @@ function render(){
   renderRHS();
   if (S.phase==='draft') renderDraft();
   else if (S.phase==='setup') renderSetup();
+  else if (S.phase==='opening') renderOpening();
   else if (S.phase==='commit') renderCommit();
   else if (S.phase==='victim') renderVictim();
   else renderOver();
@@ -743,6 +757,29 @@ function renderDraft(){
     </div>`;
 }
 function draftPick(k){ cmd({cmd:'draft', hero:k}); }
+
+function renderOpening(){
+  document.getElementById('leftheading').textContent = 'Opening';
+  const o = S.opening;
+  let h = '';
+  if (o.task){
+    const t = o.task;
+    h += `<p class="note"><b>${t.hero}</b> · ${t.ability}</p>`;
+    if (t.text) h += `<p class="note">${t.text}</p>`;
+    if (t.targeting.kind==='ally'){
+      h += `<div class="step">Choose an ally</div>`;
+      for (const u of myUnits().filter(u=>u.alive)){
+        h += `<button class="btn" onclick="cmd({cmd:'opening', target:${u.id}})">
+                ${u.name} <span class="cost">${cn(u.cell)} · ${u.hp}/${u.max_hp} HP</span></button>`;
+      }
+      h += `<p class="note">Or click the ally on the board.</p>`;
+    }
+  } else {
+    h += `<div class="waiting">Waiting for the other seat</div>`;
+  }
+  h += `<p class="err">${err}</p>`;
+  document.getElementById('leftbody').innerHTML = h;
+}
 
 function renderSetup(){
   document.getElementById('leftheading').textContent = 'Deployment';
@@ -826,6 +863,9 @@ function targetingHTML(act){
   if (t.kind==='none') return '';
   let h = `<div class="step">3 · Target</div>`;
   if (t.kind==='cells'){
+    if (S.mode==='self'){
+      return `<div class="step">3 · Target</div><p class="note">Solo mode aims for you — grids are chosen at random within range. Press <b>Enter</b> to fire.</p>`;
+    }
     h += `<p class="note">Mark up to ${t.count} cells within ${t.range}, then <b>Enter</b> to register (no marks = hold). You pick which enemy is hit after everyone moves.</p>`;
     for (let i=0;i<t.shots;i++){
       const n=(draft.shots[i]||[]).length;

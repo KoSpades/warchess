@@ -12,13 +12,14 @@ STATIC = os.path.dirname(__file__)
 
 
 class Game:
-    def __init__(self):
+    def __init__(self, mode="pvp"):
         self.lock = threading.Lock()
-        self.match = Match()
+        self.mode = mode
+        self.match = Match(mode=mode)
 
     def reset(self):
         with self.lock:
-            self.match = Match()
+            self.match = Match(mode=self.mode)
 
     def state(self, side):
         with self.lock:
@@ -37,6 +38,8 @@ class Game:
                 return m.unplace(side, body["cell"])
             if cmd == "lock":
                 return m.lock_force(side)
+            if cmd == "opening":
+                return m.opening_choose(side, body)
             if cmd == "select":
                 return m.select_hero(side, body["entity"])
             if cmd == "deselect":
@@ -94,6 +97,8 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, {"error": "not found"})
 
 
-def serve(host="127.0.0.1", port=8000):
+def serve(host="127.0.0.1", port=8000, mode="pvp"):
+    GAME.mode = mode
+    GAME.reset()
     httpd = ThreadingHTTPServer((host, port), Handler)
     return httpd

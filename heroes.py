@@ -20,6 +20,7 @@ class Ability:
     name = ""
     ap_cost = 0
     use_limit = None  # None = unlimited; an int caps total uses per match
+    opening = False   # True = fires once at game start (the opening phase), not on a turn
     targeting = {"kind": "none"}
     blurb = ""
 
@@ -58,6 +59,51 @@ class Sweep(Ability):
                     )
                 )
         return out
+
+
+class Ray(Ability):
+    key = "ray"
+    name = "射线 Ray"
+    ap_cost = 2
+    targeting = {"kind": "none"}
+    blurb = "5 damage to every enemy in the caster's row. Travels with it if bounced."
+
+    def build_damage(self, match, actor, params):
+        cells = set(match.topology.row(actor.cell[1]))
+        return [
+            DMG.DamageEvent(source=actor, target=e, amount=5, category=DMG.ABILITY)
+            for e in match.living()
+            if e.side != actor.side and (e.cells & cells)
+        ]
+
+
+class Inspire(Ability):
+    key = "inspire"
+    name = "鼓舞 Inspire"
+    ap_cost = 3
+    targeting = {"kind": "none"}
+    blurb = "Every ally gains +1 attack, permanently. Casts stack."
+
+    def side_effects(self, match, actor, params):
+        for e in match.living():
+            if e.side == actor.side:
+                e.add_modifier(Modifier("atk", "add", 1))
+        match.log_line(f"{match.label(actor)} inspires the line — +1 attack to all allies.")
+
+
+class Incite(Ability):
+    key = "incite"
+    name = "激励 Incite"
+    ap_cost = 3
+    use_limit = 1
+    targeting = {"kind": "none"}
+    blurb = "Once per match: every ally gains +1 movement, permanently."
+
+    def side_effects(self, match, actor, params):
+        for e in match.living():
+            if e.side == actor.side:
+                e.add_modifier(Modifier("move", "add", 1))
+        match.log_line(f"{match.label(actor)} rallies the line — +1 movement to all allies.")
 
 
 class Thunderstorm(Ability):
@@ -135,6 +181,23 @@ class BloodRite(Ability):
         )
 
 
+class AncientGuard(Ability):
+    key = "ancient_guard"
+    name = "远古守护 Ancient Guard"
+    ap_cost = 0
+    use_limit = 1
+    opening = True
+    targeting = {"kind": "ally"}
+    blurb = "At game start, grant one ally (yourself included) a permanent −1 to all damage taken."
+
+    def side_effects(self, match, actor, params):
+        tgt = match.entity(params.get("target"))
+        if tgt is None or not tgt.alive or tgt.side != actor.side:
+            return
+        tgt.vars["damage_reduction"] = tgt.vars.get("damage_reduction", 0) + 1
+        match.log_line(f"{match.label(actor)} guards {match.label(tgt)} — −1 to all damage taken.")
+
+
 # ---------------------------------------------------------------- passives
 
 
@@ -174,6 +237,20 @@ class SelfRepair:
             healed = DMG.heal(match, owner, 4, source=owner)
             if healed:
                 match.log_line(f"{match.label(owner)} self-repairs {healed}.")
+
+
+class KeenEdge:
+    describe = "At the end of its own turn, Atk +2 (up to a maximum of 10)."
+    CAP = 10
+
+    def on_turn_end(self, match, owner, ctx):
+        if ctx.get("entity") is not owner or not owner.alive:
+            return
+        gain = min(2, self.CAP - owner.atk)
+        if gain <= 0:
+            return
+        owner.add_modifier(Modifier("atk", "add", gain))
+        match.log_line(f"{match.label(owner)} sharpens — Atk now {owner.atk}.")
 
 
 class TwinGuns:
@@ -394,9 +471,76 @@ ROSTER = [
         abilities=[BloodRite()],
         blurb="Once, trades life for lasting power.",
     ),
+    HeroDef(
+        key="forest_child",
+        name="森林之子",
+        name_en="Forest Child",
+        max_hp=18,
+        atk=4,
+        move=1,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 3, "range": 3},
+        abilities=[AncientGuard()],
+        blurb="Blesses one ally with lasting protection before the first move.",
+    ),
+    HeroDef(
+        key="imp",
+        name="小鬼",
+        name_en="Imp",
+        max_hp=16,
+        atk=1,
+        move=1,
+        max_ap=3,
+        attack={"mode": CELL, "cells": 4, "range": 4},
+        abilities=[Ray()],
+        blurb="Sears its entire row for 5 — no aim, no escape sideways.",
+    ),
+    HeroDef(
+        key="woodcutter",
+        name="樵夫",
+        name_en="Woodcutter",
+        max_hp=20,
+        atk=2,
+        move=1,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 2, "range": 2},
+        passives=[KeenEdge],
+        blurb="Hits harder every turn it survives — +2 attack, up to 10.",
+    ),
+    HeroDef(
+        key="victory_goddess",
+        name="胜利女神",
+        name_en="Victory Goddess",
+        max_hp=14,
+        atk=1,
+        move=1,
+        max_ap=6,
+        attack={"mode": CELL, "cells": 3, "range": 5},
+        abilities=[Inspire(), Incite()],
+        blurb="Lifts the whole army — sharper blades, and once, longer strides.",
+    ),
 ]
 
 BY_KEY = {h.key: h for h in ROSTER}
+
+# A punching-bag for --test mode: one-enemy attack (you pick the target), no
+# ability. Not in ROSTER, so it can never be drafted in a real game.
+DUMMY = HeroDef(
+    key="dummy",
+    name="木桩",
+    name_en="Dummy",
+    max_hp=10,
+    atk=2,
+    move=1,
+    max_ap=0,
+    attack={"mode": UNIT, "range": None},
+    blurb="A training dummy — strikes one chosen enemy for 2.",
+)
+BY_KEY[DUMMY.key] = DUMMY
+
+# The champions --test puts under your control (the current batch). Update this
+# whenever you add heroes; --test fills the rest of your side with dummies.
+TEST_HEROES = ["victory_goddess"]
 
 
 def describe(hero):

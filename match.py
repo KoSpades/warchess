@@ -21,6 +21,7 @@ COLUMN_LETTERS = "ABCDEFGHI"
 
 DRAFT = "draft"
 SETUP = "setup"
+OPENING = "opening"
 COMMIT = "commit"
 VICTIM = "victim"
 GAMEOVER = "gameover"
@@ -32,11 +33,12 @@ DRAFT_ORDER = [LEFT, RIGHT, LEFT]
 
 
 class Match:
-    def __init__(self, force_size=3):
+    def __init__(self, force_size=3, mode="pvp"):
+        self.mode = mode  # "pvp" or "self" (solo hotseat: normal attacks auto-aim)
         self.topology = Topology()
         self.board = Board(self.topology)
         self.bus = EV.EventBus(self)
-        self.global_rules = [DMG.HalvingRule()]
+        self.global_rules = [DMG.FlatReduction(), DMG.HalvingRule()]
 
         self.entities = []
         self._ids = itertools.count(1)
@@ -60,14 +62,22 @@ class Match:
         # Heroes each side owns after the draft; placement is restricted to these.
         self.drafted = {LEFT: [], RIGHT: []}
         self.draft = None
-        self._begin_draft()
+        self.opening = None
 
+        self.phase = SETUP
         self.selected = {LEFT: None, RIGHT: None}
         self.commits = {LEFT: None, RIGHT: None}
         self.turn_started = {LEFT: False, RIGHT: False}
         self.snapshot = {}
         self.res = None
         self.last_reveal = None
+
+        # Kicks off draft (pvp/self) or auto-setup (test); must come last so all
+        # state above exists before an opening ability or first exchange runs.
+        if self.mode == "test":
+            self._begin_test()
+        else:
+            self._begin_draft()
 
     # ------------------------------------------------------------ helpers
 
@@ -113,9 +123,47 @@ class Match:
 
     def both_present(self):
         """True only if both seats have polled within the last few seconds — i.e.
-        both players actually have the page open right now."""
+        both players actually have the page open right now. Always true in the
+        single-driver modes (solo / test), where one person drives both seats."""
+        if self.mode != "pvp":
+            return True
         now = time.time()
         return all(now - t < 4.0 for t in self.present.values())
+
+    def random_shots(self, e, dest):
+        """Solo mode: pick the cell-locked attack's grids at random within range
+        of where the hero will stand, one net per shot."""
+        spec = e.hero.attack
+        pool = [list(c) for c in self.topology.cells_within(tuple(dest), e.rng)]
+        out = []
+        for _ in range(e.hero.attacks_per_turn):
+            k = min(spec["cells"], len(pool))
+            out.append(random.sample(pool, k) if k else [])
+        return out
+
+    # --------------------------------------------------------------- test
+
+    def _begin_test(self):
+        """Skip draft/deploy: a 2v2 with the current test champions (padded with
+        dummies) on the Left, two dummies on the Right, auto-placed, then straight
+        into the opening/first round."""
+        self.force_size = 2
+        left = list(HEROES.TEST_HEROES)[:2]
+        left += ["dummy"] * (2 - len(left))
+        right = ["dummy", "dummy"]
+        self.drafted = {LEFT: left, RIGHT: right}
+        cells = {LEFT: [(2, 2), (2, 4)], RIGHT: [(8, 2), (8, 4)]}
+        for s, keys in ((LEFT, left), (RIGHT, right)):
+            self.setup_state[s]["placements"] = [
+                {"key": k, "cell": list(c)} for k, c in zip(keys, cells[s])
+            ]
+            self.setup_state[s]["ready"] = True
+        self.begin()
+        # Start the champions under test with full AP so abilities are usable
+        # right away (dummies have none anyway).
+        for e in self.entities:
+            if e.key in HEROES.TEST_HEROES:
+                e.ap = e.max_ap
 
     # -------------------------------------------------------------- draft
 
@@ -227,7 +275,75 @@ class Match:
                 self.entities.append(e)
         self.log_line("Forces deployed. The board is live.")
         self.bus.emit(EV.MATCH_START, {})
-        self.start_round()
+        self.begin_opening()
+
+    # ------------------------------------------------------------ opening
+    # Abilities flagged `opening=True` fire once, after deployment but before the
+    # first turn. Choice-free ones apply immediately; the rest queue a pick each
+    # side resolves independently. Add a hero with an opening ability and it just
+    # works — no changes here needed.
+
+    def begin_opening(self):
+        pending = {LEFT: [], RIGHT: []}
+        for e in self.living():
+            for ab in e.abilities:
+                if not getattr(ab, "opening", False):
+                    continue
+                if ab.targeting.get("kind", "none") == "none":
+                    self._apply_opening(e, ab, {})
+                else:
+                    pending[e.side].append({"entity": e.id, "ability_key": ab.key})
+        self.opening = {"pending": pending}
+        if not pending[LEFT] and not pending[RIGHT]:
+            self.opening = None
+            self.start_round()
+        else:
+            self.phase = OPENING
+            self.bump()
+
+    def _apply_opening(self, e, ab, params):
+        ab.side_effects(self, e, params)
+        if ab.use_limit is not None:
+            uses = e.vars.setdefault("ability_uses", {})
+            uses[ab.key] = uses.get(ab.key, 0) + 1
+
+    def opening_choose(self, side, params):
+        if self.phase != OPENING or not self.opening:
+            return "Not the opening phase."
+        pend = self.opening["pending"][side]
+        if not pend:
+            return "Nothing to choose."
+        e = self.entity(pend[0]["entity"])
+        ab = next(a for a in e.abilities if a.key == pend[0]["ability_key"])
+        err = self._validate_targeting(e, ab.targeting, params)
+        if err:
+            return err
+        self._apply_opening(e, ab, params)
+        pend.pop(0)
+        self.bump()
+        if not self.opening["pending"][LEFT] and not self.opening["pending"][RIGHT]:
+            self.opening = None
+            self.start_round()
+        return None
+
+    def _validate_targeting(self, e, t, params):
+        """Shared targeting checks for opening picks (and any future non-turn
+        choice). Mirrors the ability cases in validate_action."""
+        kind = t.get("kind", "none")
+        if kind == "ally":
+            tt = self.entity(params.get("target"))
+            if tt is None or not tt.alive or tt.side != e.side:
+                return "Choose a living ally."
+        elif kind == "any_cell":
+            cell = params.get("cell")
+            if not cell or not self.topology.in_bounds(tuple(cell)):
+                return "Choose a cell on the board."
+        elif kind == "magnitude":
+            x = params.get("amount")
+            cap = min(e.hp, e.max_hp - 1)
+            if not isinstance(x, int) or x < 1 or x > cap:
+                return f"Choose an amount between 1 and {cap}."
+        return None
 
     # -------------------------------------------------------------- round
 
@@ -327,13 +443,27 @@ class Match:
                 self.maybe_resolve()
 
     def legal_moves(self, e):
+        """Every cell reachable within the hero's move allowance, walking one step
+        at a time through cells empty in the current snapshot (you cannot move
+        through an occupied square). Most heroes move 1, but the budget is the
+        `move` stat, so buffs like 激励 just work."""
         if not e.alive or not e.cells:
             return []
-        return [
-            list(c)
-            for c in self.topology.neighbours(e.cell, e)
-            if self.occupant(c) is None
-        ]
+        start = e.cell
+        seen = {start}
+        frontier = [start]
+        out = []
+        for _ in range(max(0, e.move_allowance)):
+            nxt = []
+            for cell in frontier:
+                for n in self.topology.neighbours(cell, e):
+                    if n in seen or self.occupant(n) is not None:
+                        continue
+                    seen.add(n)
+                    nxt.append(n)
+                    out.append(list(n))
+            frontier = nxt
+        return out
 
     def action_menu(self, e):
         """What this hero could commit to, given its AP right now."""
@@ -365,6 +495,8 @@ class Match:
                 }
             )
         for ab in e.abilities:
+            if getattr(ab, "opening", False):
+                continue  # opening abilities fire once at game start, not on a turn
             out.append(
                 {
                     "key": "ability:" + ab.key,
@@ -395,6 +527,9 @@ class Match:
 
         action = payload.get("action") or {"key": "none"}
         key = action.get("key", "none")
+        # Solo mode aims normal attacks for you — random grids within range.
+        if self.mode == "self" and key == "attack" and e.hero.attack["mode"] == HEROES.CELL:
+            action = dict(action, shots=self.random_shots(e, dest))
         err = self.validate_action(e, dest, action)
         if err:
             return err
@@ -442,6 +577,8 @@ class Match:
             ab = next((a for a in e.abilities if a.key == abkey), None)
             if ab is None:
                 return "This hero has no such ability."
+            if getattr(ab, "opening", False):
+                return "That ability only fires at the opening."
             if e.ap < ab.ap_cost:
                 return f"Needs {ab.ap_cost} AP."
             if ab.use_limit is not None and e.vars.get("ability_uses", {}).get(ab.key, 0) >= ab.use_limit:

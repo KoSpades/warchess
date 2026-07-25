@@ -91,11 +91,18 @@ def main():
                          "so --share gives the same link every time. Defaults to "
                          "WARCHESS_NGROK_DOMAIN or the ngrok_domain.txt file next to "
                          "this script.")
+    ap.add_argument("--self", dest="solo", action="store_true",
+                    help="Solo mode: you drive both seats yourself, and normal "
+                         "attacks auto-aim at random grids to keep it quick.")
+    ap.add_argument("--test", action="store_true",
+                    help="Test mode: an auto-set-up 2v2 with your newest champions "
+                         "(plus dummies) vs two dummies, so you can try a new hero fast.")
     ap.add_argument("--no-browser", action="store_true")
     args = ap.parse_args()
 
+    mode = "test" if args.test else "self" if args.solo else "pvp"
     try:
-        httpd = serve(args.host, args.port)
+        httpd = serve(args.host, args.port, mode)
     except OSError as e:
         if e.errno in (48, 98):  # EADDRINUSE — 48 on macOS, 98 on Linux
             holder = ""
@@ -120,7 +127,20 @@ def main():
 
     local = f"http://127.0.0.1:{args.port}"
     print("Warchess is running.\n")
-    if args.share:
+    if args.test:
+        print("  Test mode — your newest champions (+ dummies) vs two dummies,")
+        print("  already deployed. You drive both sides.\n")
+        print(f"    Your side   {local}/?side=L")
+        print(f"    Dummies     {local}/?side=R")
+        open_url = f"{local}/?side=L"
+    elif args.solo:
+        print("  Solo mode — you play both sides. Normal attacks auto-aim at")
+        print("  random grids, so just move and hit Enter.\n")
+        print(f"    Left seat   {local}/?side=L")
+        print(f"    Right seat  {local}/?side=R")
+        print("\n  Open both in separate tabs and drive each in turn.")
+        open_url = f"{local}/?side=L"
+    elif args.share:
         public = start_tunnel(args.port, args.domain or configured_domain())
         if public:
             print("  Anyone, anywhere — no shared Wi-Fi needed.\n")

@@ -11,23 +11,24 @@ import match as M
 from topology import LEFT, RIGHT, other_side
 
 
+def hero_card(h):
+    return {
+        "key": h.key,
+        "name": h.name,
+        "name_en": h.name_en,
+        "hp": h.max_hp,
+        "atk": h.atk,
+        "move": h.move,
+        "max_ap": h.max_ap,
+        "attack": h.attack,
+        "shots": h.attacks_per_turn,
+        "blurb": h.blurb,
+        "traits": HEROES.describe(h),
+    }
+
+
 def roster_payload():
-    return [
-        {
-            "key": h.key,
-            "name": h.name,
-            "name_en": h.name_en,
-            "hp": h.max_hp,
-            "atk": h.atk,
-            "move": h.move,
-            "max_ap": h.max_ap,
-            "attack": h.attack,
-            "shots": h.attacks_per_turn,
-            "blurb": h.blurb,
-            "traits": HEROES.describe(h),
-        }
-        for h in HEROES.ROSTER
-    ]
+    return [hero_card(h) for h in HEROES.ROSTER]
 
 
 def unit_payload(m, e, live):
@@ -70,8 +71,9 @@ def state_for(m, side):
         "exchange": m.exchange,
         "you": side,
         "winner": m.winner,
+        "mode": m.mode,
         "both_present": m.both_present(),
-        "codex": {c["key"]: c for c in roster_payload()},
+        "codex": {k: hero_card(h) for k, h in HEROES.BY_KEY.items()},
         "board": {"cols": m.topology.cols, "rows": m.topology.rows},
         "zone": [list(c) for c in m.topology.deployment_zone(side)],
         "tiles": m.board.serialise(),
@@ -104,6 +106,20 @@ def state_for(m, side):
             "placements": m.setup_state[side]["placements"],
             "ready": m.setup_state[side]["ready"],
             "opponent_ready": m.setup_state[foe]["ready"],
+        }
+        return out
+
+    if m.phase == M.OPENING:
+        pend = m.opening["pending"][side]
+        task = None
+        if pend:
+            e = m.entity(pend[0]["entity"])
+            ab = next(a for a in e.abilities if a.key == pend[0]["ability_key"])
+            task = {"entity": e.id, "hero": e.name, "hero_en": e.name_en,
+                    "ability": ab.name, "text": ab.blurb, "targeting": ab.targeting}
+        out["opening"] = {
+            "task": task,
+            "waiting_on_opponent": (not pend) and bool(m.opening["pending"][foe]),
         }
         return out
 

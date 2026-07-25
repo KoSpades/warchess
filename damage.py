@@ -40,6 +40,18 @@ class DamageEvent:
         self.cancel_reason = reason
 
 
+class FlatReduction:
+    """A flat per-target cut on all incoming damage — the target's accumulated
+    `damage_reduction` (e.g. 森林之子's guard). Applies to every category and
+    never takes an instance below zero."""
+
+    @EV.hook(priority=40)
+    def on_before_damage(self, match, ev):
+        dr = ev.target.vars.get("damage_reduction", 0)
+        if dr and not ev.cancelled and ev.amount > 0:
+            ev.amount = max(0, ev.amount - dr)
+
+
 class HalvingRule:
     """The gunslinger's second shot halves *after* every other modifier, so it
     sits at the very end of the pipeline rather than being folded into the
