@@ -271,6 +271,20 @@ class KeenEdge:
         match.log_line(f"{match.label(owner)} sharpens — Atk now {owner.atk}.")
 
 
+class Regrowth:
+    describe = "At the start of its own turn, every ally recovers 1 HP."
+
+    def on_turn_start(self, match, owner, ctx):
+        if ctx.get("entity") is not owner or not owner.alive:
+            return
+        total = sum(
+            DMG.heal(match, e, 1, source=owner)
+            for e in match.living() if e.side == owner.side
+        )
+        if total:
+            match.log_line(f"{match.label(owner)}'s grove restores the line (+1 to each ally).")
+
+
 class BattleFury:
     """Below a health threshold, hits harder and reaches further. Conditional on
     current HP, so it is recomputed (spec 7.3) whenever HP can change."""
@@ -634,6 +648,18 @@ ROSTER = [
         passives=[BattleFury],
         blurb="Wounded and dangerous — +2 attack and +1 range at 11 HP or below.",
     ),
+    HeroDef(
+        key="tree_spirit",
+        name="树灵",
+        name_en="Tree Spirit",
+        max_hp=14,
+        atk=1,
+        move=1,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 3, "range": 5},
+        passives=[Regrowth],
+        blurb="Regrows the army — every ally recovers 1 HP at the start of its turn.",
+    ),
 ]
 
 BY_KEY = {h.key: h for h in ROSTER}
@@ -655,7 +681,7 @@ BY_KEY[DUMMY.key] = DUMMY
 
 # The champions --test puts under your control (the current batch). Update this
 # whenever you add heroes; --test fills the rest of your side with dummies.
-TEST_HEROES = ["berserker"]
+TEST_HEROES = ["tree_spirit"]
 
 
 def describe(hero):
