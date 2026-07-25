@@ -49,6 +49,8 @@ def unit_payload(m, e, live):
         "cell": cell,
         "acted": acted,
         "alive": alive,
+        "atk": e.atk,
+        "rng": e.rng,
         "shots": e.hero.attacks_per_turn,
         "attack": e.hero.attack,
     }
@@ -69,6 +71,7 @@ def state_for(m, side):
         "you": side,
         "winner": m.winner,
         "both_present": m.both_present(),
+        "codex": {c["key"]: c for c in roster_payload()},
         "board": {"cols": m.topology.cols, "rows": m.topology.rows},
         "zone": [list(c) for c in m.topology.deployment_zone(side)],
         "tiles": m.board.serialise(),

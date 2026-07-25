@@ -25,13 +25,14 @@ COMMIT = "commit"
 VICTIM = "victim"
 GAMEOVER = "gameover"
 
-# Whose pick each draft step is. Four picks, alternating, and each pick also
-# hands the unchosen hero to the opponent — so both sides end with four.
-DRAFT_ORDER = [LEFT, RIGHT, LEFT, RIGHT]
+# Whose pick each draft step is. Each pick also hands the unchosen hero to the
+# opponent, so N picks give each side ceil(N/2)... here 3 picks, alternating,
+# leave both sides with three heroes.
+DRAFT_ORDER = [LEFT, RIGHT, LEFT]
 
 
 class Match:
-    def __init__(self, force_size=4):
+    def __init__(self, force_size=3):
         self.topology = Topology()
         self.board = Board(self.topology)
         self.bus = EV.EventBus(self)
@@ -443,6 +444,8 @@ class Match:
                 return "This hero has no such ability."
             if e.ap < ab.ap_cost:
                 return f"Needs {ab.ap_cost} AP."
+            if ab.use_limit is not None and e.vars.get("ability_uses", {}).get(ab.key, 0) >= ab.use_limit:
+                return "That ability is spent for the match."
             t = ab.targeting
             if t["kind"] == "direction" and action.get("direction") not in t["options"]:
                 return "Choose a direction."
@@ -450,6 +453,15 @@ class Match:
                 cell = action.get("cell")
                 if not cell or not self.topology.in_bounds(tuple(cell)):
                     return "Choose a cell on the board."
+            if t["kind"] == "ally":
+                tt = self.entity(action.get("target"))
+                if tt is None or not tt.alive or tt.side != e.side:
+                    return "Choose a living ally."
+            if t["kind"] == "magnitude":
+                x = action.get("amount")
+                cap = min(e.hp, e.max_hp - 1)
+                if not isinstance(x, int) or x < 1 or x > cap:
+                    return f"Choose an amount between 1 and {cap}."
             return None
         return "Unknown action."
 
@@ -538,6 +550,9 @@ class Match:
             abkey = key.split(":", 1)[1]
             ab = next(a for a in e.abilities if a.key == abkey)
             e.ap = max(0, e.ap - ab.ap_cost)
+            if ab.use_limit is not None:
+                uses = e.vars.setdefault("ability_uses", {})
+                uses[ab.key] = uses.get(ab.key, 0) + 1
             self.log_line(f"{self.label(e)} spends {ab.ap_cost} AP on {ab.name}.")
             return [ACT.AbilityAction(e, ab, action, 0)]
         return [ACT.NullAction()]

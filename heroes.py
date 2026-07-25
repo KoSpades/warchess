@@ -19,6 +19,7 @@ class Ability:
     key = ""
     name = ""
     ap_cost = 0
+    use_limit = None  # None = unlimited; an int caps total uses per match
     targeting = {"kind": "none"}
     blurb = ""
 
@@ -93,6 +94,44 @@ class Ignite(Ability):
         match.log_line(
             f"{match.label(actor)} ignites {match.cell_name(cell)} "
             f"(now x{tile.stacks}, {tile.damage} fire)."
+        )
+
+
+class Heal(Ability):
+    key = "heal"
+    name = "治疗 Heal"
+    ap_cost = 2
+    targeting = {"kind": "ally"}
+    blurb = "Restore 6 HP to one ally — herself included."
+
+    def side_effects(self, match, actor, params):
+        tgt = match.entity(params.get("target"))
+        if tgt is None or not tgt.alive or tgt.side != actor.side:
+            return
+        healed = DMG.heal(match, tgt, 6, source=actor)
+        if healed:
+            match.log_line(f"{match.label(actor)} heals {match.label(tgt)} for {healed}.")
+
+
+class BloodRite(Ability):
+    key = "blood_rite"
+    name = "血祭 Blood Rite"
+    ap_cost = 1
+    use_limit = 1
+    targeting = {"kind": "magnitude"}
+    blurb = "Once per match: sacrifice up to your current HP in max HP for that much permanent attack."
+
+    def side_effects(self, match, actor, params):
+        # Never enough to self-kill: leave at least 1 max HP; current HP clamps
+        # down to the new max.
+        x = max(1, min(int(params.get("amount") or 0), actor.hp, actor.max_hp - 1))
+        actor.max_hp -= x
+        if actor.hp > actor.max_hp:
+            actor.hp = actor.max_hp
+        actor.add_modifier(Modifier("atk", "add", x))
+        match.log_line(
+            f"{match.label(actor)} sacrifices {x} max HP for +{x} attack "
+            f"(now {actor.atk} atk, {actor.hp}/{actor.max_hp} HP)."
         )
 
 
@@ -330,6 +369,30 @@ ROSTER = [
         attack={"mode": CELL, "cells": 3, "range": 2},
         passives=[MountainGuard],
         blurb="Allies in his column cannot be struck by attacks or abilities.",
+    ),
+    HeroDef(
+        key="tide_goddess",
+        name="潮汐女神",
+        name_en="Tide Goddess",
+        max_hp=14,
+        atk=2,
+        move=1,
+        max_ap=4,
+        attack={"mode": CELL, "cells": 3, "range": 3},
+        abilities=[Heal()],
+        blurb="Keeps the line standing — a 6-point heal every other turn.",
+    ),
+    HeroDef(
+        key="blood_mage",
+        name="血魔法师",
+        name_en="Blood Mage",
+        max_hp=20,
+        atk=4,
+        move=1,
+        max_ap=1,
+        attack={"mode": CELL, "cells": 3, "range": 2},
+        abilities=[BloodRite()],
+        blurb="Once, trades life for lasting power.",
     ),
 ]
 

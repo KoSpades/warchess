@@ -90,6 +90,9 @@ main{display:grid;grid-template-columns:250px minmax(0,1fr) 250px;gap:16px;paddi
 .unit .hpn{font-family:var(--mono);font-size:9px;color:var(--dim)}
 .unit.sel{box-shadow:0 0 0 2px var(--verdigris),0 0 14px rgba(87,160,142,.3)}
 .unit.pending{opacity:.62;border-style:dashed}
+.cell.reachL{box-shadow:inset 0 0 0 2px rgba(87,160,142,.55)}
+.cell.reachR{box-shadow:inset 0 0 0 2px rgba(201,154,62,.55)}
+.unit{cursor:default}
 .cell.movefrom{box-shadow:inset 0 0 0 1px var(--dimmer)}
 .cell.movefrom::before{content:"";position:absolute;inset:0;margin:auto;width:8px;height:8px;
   border:1px dashed var(--dimmer);border-radius:50%}
@@ -219,7 +222,7 @@ body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
     <div id="rows"></div>
   </section>
 
-  <section class="panel"><h3>Field log</h3><div class="body log" id="log"></div></section>
+  <section class="panel"><h3 id="rhshead">Field log</h3><div class="body log" id="rhsbody"></div></section>
 </main>
 
 <div class="linkline" id="linkline"></div>
@@ -230,6 +233,7 @@ body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
 const SIDE = (new URLSearchParams(location.search).get('side') || 'L').toUpperCase().startsWith('R') ? 'R' : 'L';
 const COLS = "ABCDEFGHI";
 let S = null, armed = null, draft = null, err = "", lastVersion = -1, pendingMove = null;
+let hoverId = null, inspected = null;
 
 const cn = c => COLS[c[0]-1] + c[1];
 const eq = (a,b) => a && b && a[0]===b[0] && a[1]===b[1];
@@ -245,7 +249,7 @@ async function cmd(body){
   err = res.error || "";
   await poll(true);
 }
-async function resetMatch(){ await api('/api/reset'); draft=null; armed=null; pendingMove=null; err=""; await poll(true); }
+async function resetMatch(){ await api('/api/reset'); draft=null; armed=null; pendingMove=null; inspected=null; hoverId=null; err=""; await poll(true); }
 
 async function poll(force){
   const r = await fetch('/api/state?side='+SIDE, {cache:'no-store', headers:{'ngrok-skip-browser-warning':'1'}});
@@ -268,7 +272,7 @@ function syncDraft(){
 }
 function blankDraft(entity){
   return {entity, destination:null, held:false, tentative:null, actionKey:null, shots:[], shotIndex:0,
-          target:null, direction:null, cell:null};
+          target:null, direction:null, cell:null, amount:null};
 }
 
 function unitAt(cell){ return (S.units||[]).find(u => u.alive && u.cell && eq(u.cell, cell)); }
@@ -350,7 +354,7 @@ function renderBoard(){
           + ` ondragleave="dragLeaveCell(event)" ondrop="dropCell(event,${c},${r})"`
         : '';
       const live = cls.includes('pick');
-      html += `<button type="button" class="${cls.join(' ')}" data-mark="${mark}"`
+      html += `<button type="button" class="${cls.join(' ')}" data-mark="${mark}" data-cell="${c},${r}"`
             + ` ${live?'':'tabindex="-1"'} aria-label="${cn(cell)}${u?' — '+u.name:''}"`
             + ` onclick="onCell(${c},${r})"${dnd}>`
             + `<span class="tick"></span>${extra}`
@@ -360,7 +364,30 @@ function renderBoard(){
     html += '</div></div>';
   }
   document.getElementById('rows').innerHTML = html;
+  applyHover();
 }
+
+/* ---- hover a hero to preview its auto-attack reach; click to inspect ---- */
+function reachCells(origin, rng){
+  if (rng==null) return [];
+  const out=[];
+  for (let c=1;c<=S.board.cols;c++) for (let r=1;r<=S.board.rows;r++)
+    if (Math.abs(origin[0]-c)+Math.abs(origin[1]-r) <= rng) out.push([c,r]);
+  return out;
+}
+function applyHover(){
+  document.querySelectorAll('.cell.reachL,.cell.reachR').forEach(el=>el.classList.remove('reachL','reachR'));
+  if (hoverId==null) return;
+  const u = (S.units||[]).find(x=>x.id===hoverId);
+  if (!u || !u.cell) return;
+  const cls = u.side==='L' ? 'reachL' : 'reachR';
+  for (const [c,r] of reachCells(u.cell, u.rng)){
+    const el = document.querySelector(`#rows .cell[data-cell="${c},${r}"]`);
+    if (el) el.classList.add(cls);
+  }
+}
+function setHover(id){ hoverId = (id==null ? null : id); applyHover(); }
+function inspect(id){ inspected = id; renderRHS(); }
 
 function unitHTML(u, pending){
   const cls=['unit',u.side];
@@ -371,12 +398,13 @@ function unitHTML(u, pending){
   if (S.phase==='victim' && S.victim && S.victim.needed && S.victim.options.includes(u.id)) cls.push('tgt');
   const act = currentAction();
   if (act && act.targeting.kind==='unit' && u.side!==SIDE) cls.push('clickable');
+  if (act && act.targeting.kind==='ally' && u.side===SIDE) cls.push('clickable');
   if (draft && draft.target===u.id) cls.push('tgt');
   if (S.phase==='commit' && !S.commit.sealed && !S.commit.selected &&
       u.side===SIDE && !u.acted && u.alive) cls.push('clickable');
   const pct = Math.max(0,Math.round(100*u.hp/u.max_hp));
   const pips = u.max_ap>0 ? `<span class="pips">${Array.from({length:u.max_ap},(_,i)=>`<i class="${i<u.ap?'on':''}"></i>`).join('')}</span>` : '';
-  return `<span class="${cls.join(' ')}">`
+  return `<span class="${cls.join(' ')}" onmouseenter="setHover(${u.id})" onmouseleave="setHover(null)" onclick="inspect(${u.id})">`
        + (u.acted && !pending ? `<span class="done">✓</span>` : '')
        + `<span class="nm">${u.name.slice(0,4)}</span>`
        + `<span class="hpbar"><i class="${pct<40?'hurt':''}" style="width:${pct}%"></i></span>`
@@ -512,7 +540,7 @@ function onCell(c,r){
   }
   if (!draft) return;
   if (!draft.destination && !draft.held){
-    if (has(S.commit.legal_moves,cell)){ draft.destination=cell; draft.tentative=null; err=""; return render(); }
+    if (has(S.commit.legal_moves,cell)){ draft.destination=cell; draft.tentative=null; err=""; return finishMove(); }
     return;
   }
   const act = currentAction(); if (!act) return;
@@ -527,6 +555,11 @@ function onCell(c,r){
     err=""; return render();
   }
   if (act.targeting.kind==='any_cell'){ draft.cell=cell; err=""; return render(); }
+  if (act.targeting.kind==='unit' || act.targeting.kind==='ally'){
+    const tu = unitAt(cell); if (!tu || !tu.alive) return;
+    const wantAlly = act.targeting.kind==='ally';
+    if (wantAlly ? tu.side===SIDE : tu.side!==SIDE){ draft.target=tu.id; err=""; return render(); }
+  }
 }
 
 function onUnitPick(id){
@@ -547,25 +580,37 @@ function confirmMove(){
   if (draft.tentative) draft.destination = draft.tentative;
   else draft.held = true;              // Enter with no move = hold position
   draft.tentative = null; err="";
-  // Default straight into the normal attack so grids can be marked immediately,
-  // and a second Enter registers them (or holds if none are marked).
+  finishMove();
+}
+function finishMove(){
+  // Arm the normal attack the moment the move is set — from arrow+Enter, a click,
+  // or hold — so grids are immediately clickable without picking "Normal attack".
   const atk = (S.commit.actions||[]).find(a=>a.key==='attack');
   if (atk) chooseAction('attack'); else render();
 }
 function sealFromKeyboard(){
   const act = currentAction();
-  if (act && act.targeting.kind==='cells'){
-    const any = (draft.shots||[]).some(s=>s.length>0);
-    if (!any) draft.actionKey='none';         // no grids marked → hold
+  if (!act) return;
+  // Normal attack: any marked grids seal it; nothing marked = hold.
+  if (act.key==='attack' && act.targeting.kind==='cells'){
+    if (!(draft.shots||[]).some(s=>s.length>0)) draft.actionKey='none';
     return sealOrder();
   }
-  if (act && act.targeting.kind==='unit' && draft.target==null){
-    draft.actionKey='none'; return sealOrder();
+  if (act.key==='attack' && act.targeting.kind==='unit'){
+    if (draft.target==null) draft.actionKey='none';
+    return sealOrder();
   }
-  if (orderReady()) return sealOrder();
-  draft.actionKey='none'; sealOrder();         // otherwise Enter holds
+  // Hold, or an ability whose parameters are set. A half-chosen ability waits.
+  if (act.key==='none' || orderReady()) sealOrder();
 }
 function onKey(e){
+  // Deployment: Enter seals once all heroes are placed.
+  if (S && S.phase==='setup' && !S.setup.ready){
+    if (e.key==='Enter' && S.setup.placements.length===S.setup.force_size){
+      e.preventDefault(); cmd({cmd:'lock'});
+    }
+    return;
+  }
   if (!commitActive()) return;
   const moving = !draft.destination && !draft.held;
   const dirs = {ArrowUp:[0,-1], ArrowDown:[0,1], ArrowLeft:[-1,0], ArrowRight:[1,0]};
@@ -587,8 +632,9 @@ function onKey(e){
 
 function chooseAction(key){
   const act = S.commit.actions.find(a=>a.key===key);
-  draft.actionKey=key; draft.shots=[]; draft.shotIndex=0; draft.target=null; draft.direction=null; draft.cell=null;
+  draft.actionKey=key; draft.shots=[]; draft.shotIndex=0; draft.target=null; draft.direction=null; draft.cell=null; draft.amount=null;
   if (act.targeting.kind==='cells') draft.shots = Array.from({length:act.targeting.shots},()=>[]);
+  if (act.targeting.kind==='magnitude') draft.amount = 1;
   err=""; render();
 }
 
@@ -599,6 +645,8 @@ function orderReady(){
   if (t.kind==='none') return true;
   if (t.kind==='cells') return draft.shots.length===t.shots && draft.shots.every(s=>s.length<=t.count);
   if (t.kind==='unit') return draft.target!=null;
+  if (t.kind==='ally') return draft.target!=null;
+  if (t.kind==='magnitude') return draft.amount>=1;
   if (t.kind==='direction') return draft.direction!=null;
   if (t.kind==='any_cell') return draft.cell!=null;
   return false;
@@ -608,6 +656,8 @@ function sealOrder(){
   const act=currentAction(), t=act.targeting, action={key:draft.actionKey};
   if (t.kind==='cells') action.shots = draft.shots;
   if (t.kind==='unit') action.target = draft.target;
+  if (t.kind==='ally') action.target = draft.target;
+  if (t.kind==='magnitude') action.amount = draft.amount;
   if (t.kind==='direction') action.direction = draft.direction;
   if (t.kind==='any_cell') action.cell = draft.cell;
   // Remember the intended move so the ghost persists after the slip is sealed,
@@ -630,7 +680,7 @@ function render(){
     + `<a href="?side=${SIDE==='L'?'R':'L'}">the ${SIDE==='L'?'Right':'Left'} seat</a> in another tab or window.`;
   document.getElementById('modal').innerHTML = '';
   renderBoard();
-  renderLog();
+  renderRHS();
   if (S.phase==='draft') renderDraft();
   else if (S.phase==='setup') renderSetup();
   else if (S.phase==='commit') renderCommit();
@@ -715,7 +765,9 @@ function renderSetup(){
         ${hero.traits.map(t=>`<div class="trait"><b>${t.name}${t.ap_cost?` (${t.ap_cost} AP)`:''}</b> — ${t.text}</div>`).join('')}
       </div>`;
     }
-    h += `<button class="btn primary" ${st.placements.length===st.force_size?'':'disabled'} onclick="cmd({cmd:'lock'})">Seal deployment</button>`;
+    h += st.placements.length===st.force_size
+      ? `<p class="note">All heroes placed — press <b>Enter</b> to seal your deployment.</p>`
+      : `<p class="note">Place all ${st.force_size} heroes, then press <b>Enter</b> to seal.</p>`;
   }
   h += `<p class="err">${err}</p>`;
   document.getElementById('leftbody').innerHTML = h;
@@ -796,8 +848,28 @@ function targetingHTML(act){
   } else if (t.kind==='any_cell'){
     h += `<p class="note">Click any cell on the board to set it alight.</p>`;
     if (draft.cell) h += `<button class="btn on">Igniting ${cn(draft.cell)}</button>`;
+  } else if (t.kind==='ally'){
+    h += `<p class="note">Choose an ally to heal (yourself included). <b>Enter</b> registers.</p>`;
+    for (const u of myUnits().filter(u=>u.alive)){
+      h += `<button class="btn ${draft.target===u.id?'on':''}" onclick="draft.target=${u.id};err='';render()">
+              ${u.name} <span class="cost">${cn(u.cell)} · ${u.hp}/${u.max_hp} HP</span></button>`;
+    }
+  } else if (t.kind==='magnitude'){
+    const su = selectedUnit();
+    const maxX = Math.max(1, Math.min(su.hp, su.max_hp-1));
+    if (draft.amount==null || draft.amount>maxX) draft.amount = Math.min(draft.amount||1, maxX);
+    h += `<p class="note">Sacrifice max HP for the same amount of permanent attack, then <b>Enter</b>.</p>
+          <input type="range" min="1" max="${maxX}" value="${draft.amount}" style="width:100%"
+                 oninput="magUpdate(this.value)">
+          <p class="note">Sacrifice <b id="magv">${draft.amount}</b> → <span id="magres">+${draft.amount} atk, ${su.max_hp-draft.amount} max HP</span></p>`;
   }
   return h;
+}
+function magUpdate(v){
+  draft.amount = +v;
+  const su = selectedUnit();
+  document.getElementById('magv').textContent = v;
+  document.getElementById('magres').textContent = `+${v} atk, ${su.max_hp - (+v)} max HP`;
 }
 
 function slipHTML(u, act){
@@ -846,13 +918,31 @@ function renderOver(){
     `<div class="banner ${cls}">${txt}</div><button class="btn primary" onclick="resetMatch()">New match</button>`;
 }
 
-function renderLog(){
-  const el=document.getElementById('log');
-  el.innerHTML=(S.log||[]).map(l=>{
+function heroDetailHTML(u){
+  const h = (S.codex||{})[u.key] || {};
+  const a = h.attack || {};
+  const reach = a.mode==='cell_locked' ? `${a.cells} cells @ range ${u.rng}` : 'any one enemy';
+  return `<div class="hero" style="margin:0 0 12px">
+      <div class="top"><span class="cn">${u.name}</span><span class="en">${u.name_en} · ${u.cell?cn(u.cell):'—'}</span></div>
+      <div class="stats">HP ${u.hp}/${u.max_hp} · ATK ${u.atk} · MOVE ${h.move} · AP ${u.ap}/${u.max_ap} · ${reach}${u.shots>1?` · ${u.shots} shots`:''}</div>
+    </div>
+    ${h.blurb?`<p class="note">${h.blurb}</p>`:''}
+    ${(h.traits||[]).map(t=>`<div class="trait"><b>${t.name}${t.ap_cost?` (${t.ap_cost} AP)`:''}</b> — ${t.text}</div>`).join('')}
+    <button class="btn" style="margin-top:12px" onclick="inspected=null;renderRHS()">← Back to field log</button>`;
+}
+function renderRHS(){
+  const head=document.getElementById('rhshead'), body=document.getElementById('rhsbody');
+  if (inspected!=null){
+    const u=(S.units||[]).find(x=>x.id===inspected);
+    if (u){ head.textContent='Hero'; body.className='body'; body.innerHTML=heroDetailHTML(u); return; }
+    inspected=null;
+  }
+  head.textContent='Field log'; body.className='body log';
+  body.innerHTML=(S.log||[]).map(l=>{
     const isRound = l.text.startsWith('—');
     return `<div class="${isRound?'rd':(l.quiet?'quiet':'')}">${l.text}</div>`;
   }).join('');
-  el.scrollTop = el.scrollHeight;
+  body.scrollTop = body.scrollHeight;
 }
 
 document.addEventListener('dragend', endDrag);
