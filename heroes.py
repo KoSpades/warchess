@@ -271,6 +271,35 @@ class KeenEdge:
         match.log_line(f"{match.label(owner)} sharpens — Atk now {owner.atk}.")
 
 
+class BattleFury:
+    """Below a health threshold, hits harder and reaches further. Conditional on
+    current HP, so it is recomputed (spec 7.3) whenever HP can change."""
+
+    describe = "While at 11 HP or below, Atk +2 and Rng +1."
+    THRESHOLD = 11
+
+    def _recompute(self, match, owner):
+        owner.modifiers = [m for m in owner.modifiers if m.source is not self]
+        if owner.alive and owner.hp <= self.THRESHOLD:
+            owner.add_modifier(Modifier("atk", "add", 2, source=self))
+            owner.add_modifier(Modifier("rng", "add", 1, source=self))
+
+    def on_after_damage(self, match, owner, ev):
+        self._recompute(match, owner)
+
+    def on_heal(self, match, owner, ctx):
+        self._recompute(match, owner)
+
+    def on_round_start(self, match, owner, ctx):
+        self._recompute(match, owner)
+
+    def on_turn_start(self, match, owner, ctx):
+        self._recompute(match, owner)
+
+    def on_match_start(self, match, owner, ctx):
+        self._recompute(match, owner)
+
+
 class TwinGuns:
     describe = "Two normal attacks per turn, resolved in sequence. The second deals half damage, rounded down."
 
@@ -593,6 +622,18 @@ ROSTER = [
         weapons=WEAPONS,
         blurb="Swaps weapons every turn — five attacks, two stances.",
     ),
+    HeroDef(
+        key="berserker",
+        name="狂战士",
+        name_en="Berserker",
+        max_hp=22,
+        atk=4,
+        move=1,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 2, "range": 2},
+        passives=[BattleFury],
+        blurb="Wounded and dangerous — +2 attack and +1 range at 11 HP or below.",
+    ),
 ]
 
 BY_KEY = {h.key: h for h in ROSTER}
@@ -614,7 +655,7 @@ BY_KEY[DUMMY.key] = DUMMY
 
 # The champions --test puts under your control (the current batch). Update this
 # whenever you add heroes; --test fills the rest of your side with dummies.
-TEST_HEROES = ["weapon_master"]
+TEST_HEROES = ["berserker"]
 
 
 def describe(hero):

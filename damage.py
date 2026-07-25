@@ -108,4 +108,6 @@ def heal(match, target, amount, source=None):
         return 0
     before = target.hp
     target.hp = min(target.max_hp, target.hp + amount)
+    if target.hp != before:
+        match.bus.emit(EV.HEAL, {"entity": target, "source": source})
     return target.hp - before
