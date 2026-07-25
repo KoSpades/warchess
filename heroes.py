@@ -671,6 +671,17 @@ ROSTER = [
         attack={"mode": CELL, "cells": 2, "range": 2},
         blurb="A wall of a hero — 32 HP and a solid swing.",
     ),
+    HeroDef(
+        key="wind_rider",
+        name="御风使",
+        name_en="Wind Rider",
+        max_hp=20,
+        atk=4,
+        move=2,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 3, "range": 2},
+        blurb="Covers ground fast — moves 2 cells a turn.",
+    ),
 ]
 
 BY_KEY = {h.key: h for h in ROSTER}
@@ -692,7 +703,7 @@ BY_KEY[DUMMY.key] = DUMMY
 
 # The champions --test puts under your control (the current batch). Update this
 # whenever you add heroes; --test fills the rest of your side with dummies.
-TEST_HEROES = ["gatekeeper"]
+TEST_HEROES = ["wind_rider"]
 
 
 def describe(hero):

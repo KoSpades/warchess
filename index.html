@@ -162,11 +162,14 @@ body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
 .modal-sub{color:var(--dim);font-size:13px;text-align:center;margin:8px 0 20px}
 .pair-row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
 .pair-row .hero{margin:0}
-.modal-wide{max-width:900px}
-.offer-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.modal-wide{max-width:1180px}
+.offer-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px}
 .offer-grid .hero{margin:0}
 .offer-grid .hero.pickable{cursor:pointer}
 .offer-grid .hero.pickable:hover{transform:translateY(-2px);box-shadow:0 8px 20px rgba(0,0,0,.35)}
+.draft-card{padding:18px 16px;min-height:150px}
+.dc-name{font-size:23px;font-weight:600;line-height:1.15;margin-bottom:12px}
+.dc-desc{font-size:14px;line-height:1.6;color:var(--dim)}
 .modal-wait{text-align:center;color:var(--dim);font-family:var(--mono);font-size:11px;
   letter-spacing:.16em;text-transform:uppercase;margin-top:18px}
 .modal-taken{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:22px;
@@ -754,12 +757,9 @@ function render(){
 }
 
 function heroCard(hero, clickable, onclick){
-  return `<div class="hero ${clickable?'pickable':''}" ${clickable?`onclick="${onclick}"`:''}>
-    <div class="top"><span class="cn">${hero.name}</span><span class="en">${hero.name_en}</span></div>
-    <div class="stats">HP ${hero.hp} · ATK ${hero.atk} · MOVE ${hero.move} · AP ${hero.max_ap}
-      · ${hero.attack.mode==='cell_locked'?`${hero.attack.cells} cells @ ${hero.attack.range}`:'any one enemy'}
-      ${hero.shots>1?` · ${hero.shots} shots`:''}</div>
-    ${hero.traits.map(t=>`<div class="trait"><b>${t.name}${t.ap_cost?` (${t.ap_cost} AP)`:''}</b> — ${t.text}</div>`).join('')}
+  return `<div class="hero draft-card ${clickable?'pickable':''}" ${clickable?`onclick="${onclick}"`:''}>
+    <div class="dc-name">${hero.name}</div>
+    <div class="dc-desc">${hero.blurb||''}</div>
   </div>`;
 }
 
