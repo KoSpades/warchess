@@ -458,8 +458,8 @@ ROSTER = [
         key="robot",
         name="机器人",
         name_en="Robot",
-        max_hp=24,
-        atk=3,
+        max_hp=22,
+        atk=2,
         move=1,
         max_ap=0,
         attack={"mode": CELL, "cells": 3, "range": 2},
@@ -660,6 +660,17 @@ ROSTER = [
         passives=[Regrowth],
         blurb="Regrows the army — every ally recovers 1 HP at the start of its turn.",
     ),
+    HeroDef(
+        key="gatekeeper",
+        name="门神",
+        name_en="Gatekeeper",
+        max_hp=32,
+        atk=3,
+        move=1,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 2, "range": 2},
+        blurb="A wall of a hero — 32 HP and a solid swing.",
+    ),
 ]
 
 BY_KEY = {h.key: h for h in ROSTER}
@@ -681,7 +692,7 @@ BY_KEY[DUMMY.key] = DUMMY
 
 # The champions --test puts under your control (the current batch). Update this
 # whenever you add heroes; --test fills the rest of your side with dummies.
-TEST_HEROES = ["tree_spirit"]
+TEST_HEROES = ["gatekeeper"]
 
 
 def describe(hero):

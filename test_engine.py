@@ -129,10 +129,11 @@ m.board.add_burning((3, 3), RIGHT)
 m.board.add_burning((3, 3), RIGHT)
 m.board.add_burning((7, 3), RIGHT)
 m.select_hero(LEFT, 3)
-ok("stacked enemy tile deals 4 at turn start", m.entity(3).hp == 20, f"hp {m.entity(3).hp}")
+took = m.entity(3).max_hp - m.entity(3).hp
+ok("stacked enemy tile deals 4 at turn start", took == 4, f"took {took}")
 m.commit(LEFT, {"destination": None, "action": {"key": "none"}})
 m.select_hero(RIGHT, 7)
-ok("a tile never burns its owner's own side", m.entity(7).hp == 24)
+ok("a tile never burns its owner's own side", m.entity(7).hp == m.entity(7).max_hp)
 
 # 9 — AP: none on round one, granted at end of turn
 m = build()
@@ -147,8 +148,8 @@ m = build()
 m.entity(6).ap = 3
 turn(m, 1, {"destination": None, "action": {"key": "none"}},
      6, {"destination": None, "action": {"key": "ability:thunderstorm"}})
-hps = [m.entity(i).hp for i in (1, 2, 3, 4)]
-ok("thunderstorm hits all four enemies", hps == [16, 23, 21, 13], str(hps))
+took = [m.entity(i).max_hp - m.entity(i).hp for i in (1, 2, 3, 4)]
+ok("thunderstorm hits all four enemies for 3", all(t == 3 for t in took), str(took))
 
 # 11 — unit-locked attack ignores movement entirely
 m = build()
