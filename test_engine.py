@@ -133,11 +133,12 @@ m = build()
 one = m.board.add_burning((3, 3), RIGHT).damage      # damage from a single stack
 m.board.add_burning((3, 3), RIGHT)                   # now two stacks
 m.board.add_burning((7, 3), RIGHT)
-m.select_hero(LEFT, 3)
+m.select_hero(LEFT, 3)                     # fire resolves at commit, not select
+m.commit(LEFT, {"destination": None, "action": {"key": "none"}})
 took = m.entity(3).max_hp - m.entity(3).hp
 ok("stacked enemy tile deals two stacks at turn start", took == 2 * one, f"took {took}, stack {one}")
-m.commit(LEFT, {"destination": None, "action": {"key": "none"}})
 m.select_hero(RIGHT, 7)
+m.commit(RIGHT, {"destination": None, "action": {"key": "none"}})
 ok("a tile never burns its owner's own side", m.entity(7).hp == m.entity(7).max_hp)
 
 # 9 — AP: none on round one, granted at end of turn
@@ -165,13 +166,15 @@ turn(m, 1, {"destination": [4, 1], "action": {"key": "none"}},
 ok("unbounded one_chosen lands after the target moves", before - tgt.hp == dragon.atk,
    f"took {before - tgt.hp}, dragon atk {dragon.atk}")
 
-# 12 — a hero killed by fire at turn start loses its action
+# 12 — a hero killed by fire at turn start (committing it) loses its action
 m = build()
 rob = m.entity(3)
 rob.hp = 1
 m.board.add_burning((3, 3), RIGHT)
-m.select_hero(LEFT, 3)
-ok("fire kills before the hero acts", not rob.alive and m.commits[LEFT]["kind"] == "dead")
+m.select_hero(LEFT, 3)               # tentative: no fire yet
+assert rob.alive, "fire should not fire on select"
+m.commit(LEFT, {"destination": None, "action": {"key": "none"}})   # now the turn starts
+ok("fire kills when the hero is committed", not rob.alive and m.commits[LEFT]["kind"] == "dead")
 
 # 13 — a plain cell attack lands for the attacker's atk (dummy target: no passives)
 m = arena([("cannoneer", (3, 3))], [("dummy", (7, 3))])

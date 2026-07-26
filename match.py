@@ -412,19 +412,19 @@ class Match:
             return "Not one of your heroes."
         if e.has_acted:
             return "That hero has already acted this round."
+        # Tentative: picking a hero is reversible — you can switch to another (or
+        # deselect) freely until you commit. The turn only truly starts (and fire
+        # resolves) at commit time.
         self.selected[side] = eid
-        if not self.turn_started[side]:
-            self.turn_started[side] = True
-            self.run_turn_start(e)
         self.bump()
         return None
 
     def deselect(self, side):
-        if self.phase == COMMIT and self.commits[side] is None and not self.turn_started[side]:
+        if self.phase == COMMIT and self.commits[side] is None:
             self.selected[side] = None
             self.bump()
             return None
-        return "Turn already begun for that hero."
+        return "Order already sealed."
 
     def run_turn_start(self, e):
         """Board effects resolve before the hero decides anything. A hero killed
@@ -532,6 +532,16 @@ class Match:
         if eid is None:
             return "Choose a hero first."
         e = self.entity(eid)
+        if e is None or not e.alive or e.side != side or e.has_acted:
+            return "Choose a living, un-acted hero."
+
+        # Committing is the point of no return: the turn starts now and board
+        # effects (fire) resolve. A hero killed here forfeits its action.
+        if not self.turn_started[side]:
+            self.turn_started[side] = True
+            self.run_turn_start(e)
+            if self.commits[side] is not None:  # fire killed it — dead commit already set
+                return None
 
         dest = payload.get("destination")
         dest = tuple(dest) if dest else e.cell
@@ -693,11 +703,11 @@ class Match:
                 continue
             e = self.entity(c["entity"])
             reveal[side] = {
+                "key": e.key,
                 "hero": e.name,
                 "hero_en": e.name_en,
-                "from": list(e.cell),
-                "to": list(c["destination"]),
                 "action": c["action"],
+                "hits": [],   # filled during resolution: [{target, amount}, ...]
             }
             moves[side] = (e, tuple(c["destination"]))
         self.last_reveal = reveal
@@ -829,6 +839,12 @@ class Match:
                         f"{inst.label}: {self.label(ev.target)} blocks it ({ev.cancel_reason})."
                     )
                 elif ev.amount > 0:
+                    # Record the outcome on the reveal so the pause screen can show
+                    # "X damage to Y" for the acting hero.
+                    if self.last_reveal and self.last_reveal.get(side):
+                        self.last_reveal[side].setdefault("hits", []).append(
+                            {"target": ev.target.name, "amount": ev.amount}
+                        )
                     src = self.label(ev.source) if ev.source else "The board"
                     self.log_line(
                         f"{src} hits {self.label(ev.target)} for {ev.amount}"

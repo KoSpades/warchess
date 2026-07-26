@@ -58,7 +58,9 @@ def start_tunnel(port, domain=None):
     atexit.register(proc.terminate)
 
     # ngrok exposes a local API listing active tunnels once it has connected.
-    deadline = time.time() + 15
+    # A claimed static domain can take a while to register, so wait generously.
+    timeout = 45
+    deadline = time.time() + timeout
     while time.time() < deadline:
         if proc.poll() is not None:
             print("  ngrok exited immediately. Check `ngrok http %d` by hand —" % port)
@@ -74,7 +76,7 @@ def start_tunnel(port, domain=None):
             pass
         time.sleep(0.5)
 
-    print("  Tunnel did not come up within 15s. Is ngrok configured?")
+    print(f"  Tunnel did not come up within {timeout}s. Is ngrok configured?")
     return None
 
 

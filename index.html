@@ -163,9 +163,11 @@ body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
 .pair-row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
 .pair-row .hero{margin:0}
 .modal-h{margin-bottom:16px}
-.modal-wide{max-width:min(1560px,95vw)}
-.offer-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:8px;margin-top:4px}
-.offer-grid .hero{margin:0}
+/* Cards are always the 5-across size; the modal shrinks to wrap fewer of them. */
+.modal-wide{width:fit-content;max-width:95vw}
+.offer-grid{display:flex;justify-content:center;gap:8px;margin-top:4px;
+  --card:calc((min(1560px,95vw) - 80px)/5)}
+.offer-grid .hero{margin:0;width:var(--card);flex:0 0 auto}
 .offer-grid .hero.pickable{cursor:pointer}
 .offer-grid .hero.pickable:hover{transform:translateY(-2px);box-shadow:0 8px 20px rgba(0,0,0,.35)}
 .draft-card{position:relative;aspect-ratio:3/4;padding:0;overflow:hidden;
@@ -180,6 +182,25 @@ body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
 .modal-taken{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:22px;
   padding-top:16px;border-top:1px solid var(--rule)}
 @media(max-width:520px){.pair-row{grid-template-columns:1fr}}
+
+/* ---------- resolution reveal ---------- */
+.reveal-back{z-index:60;cursor:pointer}
+.reveal-box{background:var(--panel);border:1px solid var(--rule);border-radius:6px;
+  padding:26px 30px;box-shadow:0 24px 70px rgba(0,0,0,.6);max-width:min(1080px,95vw)}
+.rv-row{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:28px;margin-top:18px}
+.rv-vs{font-family:var(--mono);font-size:14px;letter-spacing:.2em;color:var(--dim)}
+.rv-side{text-align:center}
+.rv-img{aspect-ratio:3/4;width:100%;max-width:360px;margin:0 auto;border-radius:4px;
+  background:var(--panel-2);background-size:cover;background-position:center top;border:1px solid var(--rule)}
+.rv-side.sideL .rv-img.has-img{border-color:var(--verdigris)}
+.rv-side.sideR .rv-img.has-img{border-color:var(--brass)}
+.rv-name{font-size:26px;font-weight:600;margin-top:14px}
+.rv-order{margin-top:10px}
+.rv-hit{font-size:19px;line-height:1.5;color:var(--text)}
+.rv-hit b{color:var(--oxide);font-weight:700}
+.rv-none{color:var(--dim);font-size:16px}
+.rv-hint{text-align:center;font-family:var(--mono);font-size:10px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--dimmer);margin-top:16px}
 
 /* ---------- order slip: the signature ---------- */
 .slip{background:#F0EBE1;color:#1a1a1a;border-radius:2px;position:relative;
@@ -263,7 +284,7 @@ body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
 const SIDE = (new URLSearchParams(location.search).get('side') || 'L').toUpperCase().startsWith('R') ? 'R' : 'L';
 const COLS = "ABCDEFGHI";
 let S = null, armed = null, draft = null, err = "", lastVersion = -1, pendingMove = null;
-let hoverId = null, inspected = null;
+let hoverId = null, inspected = null, revealActive = false, shownReveal = "";
 
 const cn = c => COLS[c[0]-1] + c[1];
 const eq = (a,b) => a && b && a[0]===b[0] && a[1]===b[1];
@@ -279,7 +300,7 @@ async function cmd(body){
   err = res.error || "";
   await poll(true);
 }
-async function resetMatch(){ await api('/api/reset'); draft=null; armed=null; pendingMove=null; inspected=null; hoverId=null; err=""; await poll(true); }
+async function resetMatch(){ await api('/api/reset'); draft=null; armed=null; pendingMove=null; inspected=null; hoverId=null; revealActive=false; shownReveal=""; err=""; await poll(true); }
 
 async function poll(force){
   const r = await fetch('/api/state?side='+SIDE, {cache:'no-store', headers:{'ngrok-skip-browser-warning':'1'}});
@@ -291,6 +312,16 @@ async function poll(force){
   // Drop the pending-move ghost once its order is no longer the live selection
   // (i.e. the exchange resolved and the board updated to the real position).
   if (pendingMove && (S.phase!=='commit' || !S.commit || S.commit.selected!==pendingMove.id)) pendingMove = null;
+  // A fresh, fully-resolved exchange: flash the reveal overlay (both heroes +
+  // what they did) for a beat so the resolution is readable.
+  if (S.reveal && (S.phase==='commit' || S.phase==='gameover')){
+    const key = JSON.stringify(S.reveal);
+    if (key !== shownReveal){
+      shownReveal = key; revealActive = true;
+      clearTimeout(window._revealT);
+      window._revealT = setTimeout(() => { revealActive = false; render(); }, 3600);
+    }
+  }
   if (changed || force) { syncDraft(); render(); }
 }
 
@@ -425,8 +456,14 @@ function applyHover(){
   if (hoverId==null) return;
   const u = (S.units||[]).find(x=>x.id===hoverId);
   if (!u || !u.cell) return;
+  // Project from where the hero will stand: if it's the one you're moving, use
+  // its planned destination (confirmed or tentative), else its current cell.
+  let origin = u.cell;
+  if (S.phase==='commit' && S.commit && S.commit.selected===u.id && draft){
+    origin = draft.destination || draft.tentative || u.cell;
+  }
   const cls = u.side==='L' ? 'reachL' : 'reachR';
-  for (const [c,r] of reachCells(u.cell, u.rng)){
+  for (const [c,r] of reachCells(origin, u.rng)){
     const el = document.querySelector(`#rows .cell[data-cell="${c},${r}"]`);
     if (el) el.classList.add(cls);
   }
@@ -589,13 +626,20 @@ function onCell(c,r){
   }
   if (S.phase!=='commit' || S.commit.sealed) return;
   if (!S.commit.selected){
-    // Click your own un-acted piece to start its turn.
+    // Click your own un-acted piece to tentatively pick it (reversible).
     const u = unitAt(cell);
     if (u && u.side===SIDE && !u.acted && u.alive) return cmd({cmd:'select', entity:u.id});
     return;
   }
   if (!draft) return;
   if (!draft.destination && !draft.held){
+    // Before movement is confirmed you may still switch heroes: click another to
+    // pick it, or click the current one to back out. Nothing is locked until you
+    // confirm movement (Enter / click a square).
+    const u = unitAt(cell);
+    if (u && u.side===SIDE && u.alive && !u.acted){
+      return u.id === S.commit.selected ? cmd({cmd:'deselect'}) : cmd({cmd:'select', entity:u.id});
+    }
     if (has(S.commit.legal_moves,cell)){ draft.destination=cell; draft.tentative=null; err=""; return finishMove(); }
     return;
   }
@@ -755,10 +799,36 @@ function render(){
   else if (S.phase==='commit') renderCommit();
   else if (S.phase==='victim') renderVictim();
   else renderOver();
-  document.querySelectorAll('.unit.clickable, .unit.tgt').forEach(el=>{
-    const cell = el.parentElement;
-    cell.onclick = cell.onclick; // board handler already routes
-  });
+  if (revealActive) renderReveal();   // sits on top of everything
+}
+
+function dismissReveal(){ revealActive = false; clearTimeout(window._revealT); render(); }
+
+function revealHits(o){
+  const hits = o.hits || [];
+  if (!hits.length) return `<div class="rv-hit rv-none">no damage</div>`;
+  return hits.map(h => `<div class="rv-hit"><b>${h.amount}</b> damage → ${h.target}</div>`).join('');
+}
+function revealSide(side){
+  const o = S.reveal[side];
+  if (!o) return `<div class="rv-side"><div class="rv-img"></div><div class="rv-name">—</div></div>`;
+  const cx = (S.codex||{})[o.key] || {};
+  const bg = cx.image ? ` style="background-image:url('${cx.image}')"` : '';
+  return `<div class="rv-side side${side}">
+    <div class="rv-img ${cx.image?'has-img':''}"${bg}></div>
+    <div class="rv-name">${o.hero}</div>
+    <div class="rv-order">${revealHits(o)}</div>
+  </div>`;
+}
+function renderReveal(){
+  document.getElementById('modal').innerHTML = `
+    <div class="modal-backdrop reveal-back" onclick="dismissReveal()">
+      <div class="reveal-box" onclick="event.stopPropagation()">
+        <div class="modal-h">Exchange resolved</div>
+        <div class="rv-row">${revealSide('L')}<div class="rv-vs">VS</div>${revealSide('R')}</div>
+        <div class="rv-hint">click to continue</div>
+      </div>
+    </div>`;
 }
 
 function heroCard(hero, clickable, onclick){
@@ -874,7 +944,7 @@ function renderCommit(){
     document.getElementById('leftbody').innerHTML = h; return;
   }
   if (!c.selected){
-    h += `<p class="note">Choose the hero to send in. Its turn begins the moment you pick it — board effects resolve at once and the choice is final.</p>`;
+    h += `<p class="note">Click a hero (on the board or below) to inspect and tentatively pick it. Its turn only begins — and board effects like fire resolve — once you confirm its movement.</p>`;
     for (const u of myUnits().filter(u=>u.alive && !u.acted)){
       h += `<div class="hero pickable" onclick="onUnitPick(${u.id})">
         <div class="top"><span class="cn">${u.name}</span><span class="en">${u.name_en} · ${cn(u.cell)}</span></div>
@@ -890,7 +960,7 @@ function renderCommit(){
   h += slipHTML(u, act);
   h += `<div class="step">1 · Movement</div>`;
   if (!draft.destination && !draft.held){
-    h += `<p class="note">Arrow keys move ${u.name}; <b>Enter</b> confirms. Enter without moving holds position. (Or click a marked square.)</p>
+    h += `<p class="note">Arrow keys move ${u.name}; <b>Enter</b> confirms (and locks in this hero). Enter without moving holds position. Or click another hero to switch — nothing is committed yet.</p>
           <button class="btn primary" onclick="confirmMove()">${draft.tentative?'Confirm move to '+cn(draft.tentative):'Confirm — hold position'}</button>`;
   } else {
     h += `<button class="btn on" onclick="draft.destination=null;draft.held=false;draft.tentative=null;draft.actionKey=null;render()">
