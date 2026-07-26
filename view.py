@@ -6,9 +6,18 @@ snapshot taken at the start of the exchange, so a turn-start fire tick cannot
 betray which hero the opponent picked up.
 """
 
+import os
+
 import heroes as HEROES
 import match as M
 from topology import LEFT, RIGHT, other_side
+
+IMAGE_DIR = os.path.join(os.path.dirname(__file__), "image")
+
+
+def hero_image(name_en):
+    """URL for a hero's art (image/<name_en>.png, camelCase), or None if absent."""
+    return f"/image/{name_en}.png" if os.path.isfile(os.path.join(IMAGE_DIR, f"{name_en}.png")) else None
 
 
 def hero_card(h):
@@ -24,6 +33,7 @@ def hero_card(h):
         "shots": h.attacks_per_turn,
         "blurb": h.blurb,
         "traits": HEROES.describe(h),
+        "image": hero_image(h.name_en),
     }
 
 

@@ -433,7 +433,7 @@ ROSTER = [
     HeroDef(
         key="spearman",
         name="枪兵",
-        name_en="Spearman",
+        name_en="lancer",
         max_hp=19,
         atk=4,
         move=1,
@@ -445,7 +445,7 @@ ROSTER = [
     HeroDef(
         key="rock_giant",
         name="岩石巨人",
-        name_en="Rock Giant",
+        name_en="rockGiant",
         max_hp=26,
         atk=2,
         move=1,
@@ -457,7 +457,7 @@ ROSTER = [
     HeroDef(
         key="robot",
         name="机器人",
-        name_en="Robot",
+        name_en="robot",
         max_hp=22,
         atk=2,
         move=1,
@@ -469,7 +469,7 @@ ROSTER = [
     HeroDef(
         key="thunder_dragon",
         name="雷霆龙",
-        name_en="Thunder Dragon",
+        name_en="thunderDragon",
         max_hp=17,
         atk=1,
         move=1,
@@ -481,7 +481,7 @@ ROSTER = [
     HeroDef(
         key="fire_mage",
         name="火法师",
-        name_en="Fire Mage",
+        name_en="fireMage",
         max_hp=17,
         atk=2,
         move=1,
@@ -493,7 +493,7 @@ ROSTER = [
     HeroDef(
         key="gunslinger",
         name="双枪手",
-        name_en="Gunslinger",
+        name_en="gunslinger",
         max_hp=16,
         atk=4,
         move=1,
@@ -507,7 +507,7 @@ ROSTER = [
     HeroDef(
         key="mars",
         name="马尔斯",
-        name_en="Mars",
+        name_en="mars",
         max_hp=18,
         atk=4,
         move=1,
@@ -519,9 +519,9 @@ ROSTER = [
     HeroDef(
         key="cannoneer",
         name="炮手",
-        name_en="Cannoneer",
+        name_en="cannoneer",
         max_hp=16,
-        atk=3,
+        atk=4,
         move=1,
         max_ap=0,
         attack={"mode": CELL, "cells": 4, "range": 7},
@@ -530,7 +530,7 @@ ROSTER = [
     HeroDef(
         key="mountain_god",
         name="山神",
-        name_en="Mountain God",
+        name_en="mountainGod",
         max_hp=25,
         atk=2,
         move=1,
@@ -542,7 +542,7 @@ ROSTER = [
     HeroDef(
         key="tide_goddess",
         name="潮汐女神",
-        name_en="Tide Goddess",
+        name_en="tideGoddess",
         max_hp=14,
         atk=2,
         move=1,
@@ -554,7 +554,7 @@ ROSTER = [
     HeroDef(
         key="blood_mage",
         name="血魔法师",
-        name_en="Blood Mage",
+        name_en="bloodMage",
         max_hp=20,
         atk=4,
         move=1,
@@ -566,7 +566,7 @@ ROSTER = [
     HeroDef(
         key="forest_child",
         name="森林之子",
-        name_en="Forest Child",
+        name_en="forestChild",
         max_hp=18,
         atk=4,
         move=1,
@@ -578,7 +578,7 @@ ROSTER = [
     HeroDef(
         key="imp",
         name="小鬼",
-        name_en="Imp",
+        name_en="imp",
         max_hp=16,
         atk=1,
         move=1,
@@ -590,7 +590,7 @@ ROSTER = [
     HeroDef(
         key="woodcutter",
         name="樵夫",
-        name_en="Woodcutter",
+        name_en="woodcutter",
         max_hp=20,
         atk=2,
         move=1,
@@ -602,7 +602,7 @@ ROSTER = [
     HeroDef(
         key="victory_goddess",
         name="胜利女神",
-        name_en="Victory Goddess",
+        name_en="victoryGoddess",
         max_hp=14,
         atk=1,
         move=1,
@@ -614,7 +614,7 @@ ROSTER = [
     HeroDef(
         key="druid",
         name="德鲁伊",
-        name_en="Druid",
+        name_en="druid",
         max_hp=17,
         atk=1,
         move=1,
@@ -626,7 +626,7 @@ ROSTER = [
     HeroDef(
         key="weapon_master",
         name="武器大师",
-        name_en="Weapon Master",
+        name_en="weaponMaster",
         max_hp=23,
         atk=2,
         move=1,
@@ -639,7 +639,7 @@ ROSTER = [
     HeroDef(
         key="berserker",
         name="狂战士",
-        name_en="Berserker",
+        name_en="berserker",
         max_hp=22,
         atk=4,
         move=1,
@@ -651,9 +651,9 @@ ROSTER = [
     HeroDef(
         key="tree_spirit",
         name="树灵",
-        name_en="Tree Spirit",
+        name_en="treeSpirit",
         max_hp=14,
-        atk=1,
+        atk=2,
         move=1,
         max_ap=0,
         attack={"mode": CELL, "cells": 3, "range": 5},
@@ -663,7 +663,7 @@ ROSTER = [
     HeroDef(
         key="gatekeeper",
         name="门神",
-        name_en="Gatekeeper",
+        name_en="gatekeeper",
         max_hp=32,
         atk=3,
         move=1,
@@ -674,7 +674,7 @@ ROSTER = [
     HeroDef(
         key="wind_rider",
         name="御风使",
-        name_en="Wind Rider",
+        name_en="windRider",
         max_hp=20,
         atk=4,
         move=2,
@@ -691,7 +691,7 @@ BY_KEY = {h.key: h for h in ROSTER}
 DUMMY = HeroDef(
     key="dummy",
     name="木桩",
-    name_en="Dummy",
+    name_en="dummy",
     max_hp=10,
     atk=2,
     move=1,

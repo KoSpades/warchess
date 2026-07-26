@@ -76,6 +76,13 @@ class Handler(BaseHTTPRequestHandler):
         if url.path in ("/", "/index.html"):
             with open(os.path.join(STATIC, "index.html"), "rb") as fh:
                 return self._send(200, fh.read(), "text/html; charset=utf-8")
+        if url.path.startswith("/image/"):
+            fname = os.path.basename(url.path)  # basename blocks path traversal
+            fpath = os.path.join(STATIC, "image", fname)
+            if fname.lower().endswith(".png") and os.path.isfile(fpath):
+                with open(fpath, "rb") as fh:
+                    return self._send(200, fh.read(), "image/png")
+            return self._send(404, {"error": "not found"})
         if url.path == "/api/state":
             q = parse_qs(url.query)
             side = (q.get("side") or ["L"])[0]

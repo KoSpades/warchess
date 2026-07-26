@@ -167,9 +167,13 @@ body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
 .offer-grid .hero{margin:0}
 .offer-grid .hero.pickable{cursor:pointer}
 .offer-grid .hero.pickable:hover{transform:translateY(-2px);box-shadow:0 8px 20px rgba(0,0,0,.35)}
-.draft-card{padding:18px 16px;min-height:150px}
-.dc-name{font-size:23px;font-weight:600;line-height:1.15;margin-bottom:12px}
-.dc-desc{font-size:14px;line-height:1.6;color:var(--dim)}
+.draft-card{position:relative;aspect-ratio:3/4;padding:0;overflow:hidden;
+  background-size:cover;background-position:center top}
+.draft-card .dc-body{position:absolute;left:0;right:0;bottom:0;padding:14px 14px 16px}
+.draft-card.has-img .dc-body{background:linear-gradient(transparent,rgba(9,13,17,.55) 35%,rgba(9,13,17,.95))}
+.dc-name{font-size:23px;font-weight:600;line-height:1.15;margin-bottom:8px}
+.dc-desc{font-size:13px;line-height:1.55;color:var(--dim)}
+.draft-card.has-img .dc-desc{color:var(--text)}
 .modal-wait{text-align:center;color:var(--dim);font-family:var(--mono);font-size:11px;
   letter-spacing:.16em;text-transform:uppercase;margin-top:18px}
 .modal-taken{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:22px;
@@ -757,9 +761,12 @@ function render(){
 }
 
 function heroCard(hero, clickable, onclick){
-  return `<div class="hero draft-card ${clickable?'pickable':''}" ${clickable?`onclick="${onclick}"`:''}>
-    <div class="dc-name">${hero.name}</div>
-    <div class="dc-desc">${hero.blurb||''}</div>
+  const bg = hero.image ? ` style="background-image:url('${hero.image}')"` : '';
+  return `<div class="hero draft-card ${hero.image?'has-img':''} ${clickable?'pickable':''}"${bg} ${clickable?`onclick="${onclick}"`:''}>
+    <div class="dc-body">
+      <div class="dc-name">${hero.name}</div>
+      <div class="dc-desc">${hero.blurb||''}</div>
+    </div>
   </div>`;
 }
 
