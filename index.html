@@ -80,7 +80,11 @@ main{display:grid;grid-template-columns:240px auto minmax(320px,1fr);gap:16px;pa
 .unit.L{border-color:var(--verdigris);background:linear-gradient(180deg,#1c2e2b,#16232a)}
 .unit.R{border-color:var(--brass);background:linear-gradient(180deg,#302a1c,#1f2229)}
 .unit.acted{opacity:1}
-.unit.acted .done{position:absolute;top:2px;right:4px;font-size:9px;color:var(--dim);line-height:1}
+.unit.acted .done{position:absolute;top:2px;right:2px;width:18px;height:18px;border-radius:50%;
+  background:rgba(9,13,17,.85);border:1px solid var(--verdigris);color:var(--verdigris);
+  font-size:13px;font-weight:700;line-height:1;display:flex;align-items:center;justify-content:center;
+  box-shadow:0 1px 3px rgba(0,0,0,.4)}
+.unit.R.acted .done{border-color:var(--brass);color:var(--brass)}
 .unit.dead{display:none}
 .unit .nm{font-weight:600;line-height:1.05;font-size:12px;text-align:center}
 .unit .hpbar{width:78%;height:3px;background:#0d1418;border-radius:2px;overflow:hidden}
@@ -285,6 +289,7 @@ const SIDE = (new URLSearchParams(location.search).get('side') || 'L').toUpperCa
 const COLS = "ABCDEFGHI";
 let S = null, armed = null, draft = null, err = "", lastVersion = -1, pendingMove = null;
 let hoverId = null, inspected = null, revealActive = false, shownReveal = "";
+let codex = {};   // all hero cards, fetched once from /api/codex (not per poll)
 
 const cn = c => COLS[c[0]-1] + c[1];
 const eq = (a,b) => a && b && a[0]===b[0] && a[1]===b[1];
@@ -302,7 +307,14 @@ async function cmd(body){
 }
 async function resetMatch(){ await api('/api/reset'); draft=null; armed=null; pendingMove=null; inspected=null; hoverId=null; revealActive=false; shownReveal=""; err=""; await poll(true); }
 
+async function loadCodex(){
+  try {
+    const r = await fetch('/api/codex', {headers:{'ngrok-skip-browser-warning':'1'}});
+    codex = (await r.json()).codex || {};
+  } catch (e) {}
+}
 async function poll(force){
+  if (document.hidden && !force) return;   // don't poll a backgrounded tab
   const r = await fetch('/api/state?side='+SIDE, {cache:'no-store', headers:{'ngrok-skip-browser-warning':'1'}});
   const next = await r.json();
   // Presence isn't part of the version counter, so compare it explicitly —
@@ -633,14 +645,14 @@ function onCell(c,r){
   }
   if (!draft) return;
   if (!draft.destination && !draft.held){
-    // Before movement is confirmed you may still switch heroes: click another to
-    // pick it, or click the current one to back out. Nothing is locked until you
-    // confirm movement (Enter / click a square).
+    // Nothing is locked until you press Enter. Click another hero to switch, the
+    // current one to back out, or a legal square to *tentatively* aim the move —
+    // just like the arrow keys. Enter then confirms and locks this hero in.
     const u = unitAt(cell);
     if (u && u.side===SIDE && u.alive && !u.acted){
       return u.id === S.commit.selected ? cmd({cmd:'deselect'}) : cmd({cmd:'select', entity:u.id});
     }
-    if (has(S.commit.legal_moves,cell)){ draft.destination=cell; draft.tentative=null; err=""; return finishMove(); }
+    if (has(S.commit.legal_moves,cell)){ draft.tentative=cell; err=""; return render(); }
     return;
   }
   const act = currentAction(); if (!act) return;
@@ -812,7 +824,7 @@ function revealHits(o){
 function revealSide(side){
   const o = S.reveal[side];
   if (!o) return `<div class="rv-side"><div class="rv-img"></div><div class="rv-name">—</div></div>`;
-  const cx = (S.codex||{})[o.key] || {};
+  const cx = codex[o.key] || {};
   const bg = cx.image ? ` style="background-image:url('${cx.image}')"` : '';
   return `<div class="rv-side side${side}">
     <div class="rv-img ${cx.image?'has-img':''}"${bg}></div>
@@ -960,7 +972,7 @@ function renderCommit(){
   h += slipHTML(u, act);
   h += `<div class="step">1 · Movement</div>`;
   if (!draft.destination && !draft.held){
-    h += `<p class="note">Arrow keys move ${u.name}; <b>Enter</b> confirms (and locks in this hero). Enter without moving holds position. Or click another hero to switch — nothing is committed yet.</p>
+    h += `<p class="note">Arrow keys or click a square to aim ${u.name}; <b>Enter</b> confirms and locks this hero in. Enter without moving holds position. Click another hero to switch — nothing is committed until Enter.</p>
           <button class="btn primary" onclick="confirmMove()">${draft.tentative?'Confirm move to '+cn(draft.tentative):'Confirm — hold position'}</button>`;
   } else {
     h += `<button class="btn on" onclick="draft.destination=null;draft.held=false;draft.tentative=null;draft.actionKey=null;render()">
@@ -1104,12 +1116,13 @@ function renderOver(){
 }
 
 function heroDetailHTML(u){
-  const h = (S.codex||{})[u.key] || {};
-  const a = h.attack || {};
+  const h = codex[u.key] || {};
+  const a = u.attack || {};   // stats come from the unit itself — robust if codex hasn't loaded
   const pct = Math.max(0, Math.round(100*u.hp/u.max_hp));
   const tile = (k,v) => `<div class="hd-tile"><div class="k">${k}</div><div class="v">${v}</div></div>`;
-  let tiles = tile('Attack', u.atk) + tile('Move', h.move);
+  let tiles = tile('Attack', u.atk) + tile('Move', u.move);
   if (a.mode==='cell_locked') tiles += tile('Grids', a.cells) + tile('Range', u.rng);
+  else if (a.mode==='weapon') tiles += tile('Weapon', 'varies');
   else tiles += tile('Reach', 'any enemy');
   return `<div class="hd">
     <div class="hd-name">${u.name}<span class="en">${u.name_en}</span></div>
@@ -1139,8 +1152,9 @@ function renderRHS(){
 
 document.addEventListener('dragend', endDrag);
 document.addEventListener('keydown', onKey);
-poll(true);
-setInterval(poll, 700);
+loadCodex().then(() => poll(true));
+setInterval(poll, 1200);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(true); });
 </script>
 </body>
 </html>

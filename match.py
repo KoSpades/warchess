@@ -508,9 +508,12 @@ class Match:
                     "targeting": {"kind": "unit", "range": spec.get("range")},
                 }
             )
+        uses = e.vars.get("ability_uses", {})
         for ab in e.abilities:
             if getattr(ab, "opening", False):
                 continue  # opening abilities fire once at game start, not on a turn
+            if ab.use_limit is not None and uses.get(ab.key, 0) >= ab.use_limit:
+                continue  # a spent limited ability disappears from the menu
             out.append(
                 {
                     "key": "ability:" + ab.key,

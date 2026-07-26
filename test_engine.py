@@ -201,22 +201,22 @@ m.sweep_deaths()
 ok("马尔斯 gains atk when one enemy remains",
    mars.rng == base_rng + 1 and mars.atk == base_atk + 1)
 
-# 15 — 山神: shields column allies from attacks/abilities, but not tiles, and only allies
+# 15 — 山神: allies in his column take 2 less; he isn't covered himself
 m = arena([("mountain_god", (2, 3)), ("dummy", (2, 1))],
           [("dummy", (7, 1)), ("gatekeeper", (7, 2))])
 sg, ally, src = unit(m, LEFT, "mountain_god"), unit(m, LEFT, "dummy"), unit(m, RIGHT, "dummy")
-hit = lambda cat: DMG.deal(m, DMG.DamageEvent(source=src, target=ally, amount=5, category=cat))
+hit = lambda who: DMG.deal(m, DMG.DamageEvent(source=src, target=who, amount=5, category=DMG.NORMAL_ATTACK))
 
 h = ally.hp
-hit(DMG.NORMAL_ATTACK)
-ok("山神 shields an ally in his column", ally.hp == h, f"took {h - ally.hp}")
-h = ally.hp
-DMG.deal(m, DMG.DamageEvent(source=src, target=ally, amount=2, category=DMG.TILE))
-ok("山神's shield lets tile damage burn through", h - ally.hp == 2, f"took {h - ally.hp}")
+hit(ally)
+ok("山神 cuts damage to a column ally by 2", h - ally.hp == 3, f"took {h - ally.hp}")
 ally.set_cell((5, 1))  # step out of 山神's column
 h = ally.hp
-hit(DMG.NORMAL_ATTACK)
-ok("山神 leaves an out-of-column ally exposed", h - ally.hp == 5, f"took {h - ally.hp}")
+hit(ally)
+ok("山神 doesn't cover an out-of-column ally", h - ally.hp == 5, f"took {h - ally.hp}")
+h = sg.hp
+hit(sg)
+ok("山神 does not cover himself", h - sg.hp == 5, f"took {h - sg.hp}")
 
 print("\nlog tail:")
 for line in m.log[-5:]:

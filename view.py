@@ -41,6 +41,12 @@ def roster_payload():
     return [hero_card(h) for h in HEROES.ROSTER]
 
 
+def codex():
+    """All heroes (including the dummy) keyed by key — static per session, so the
+    client fetches it once from /api/codex rather than in every state poll."""
+    return {k: hero_card(h) for k, h in HEROES.BY_KEY.items()}
+
+
 def unit_payload(m, e, live):
     if live or e.id not in m.snapshot:
         hp, ap, cell, acted, alive = e.hp, e.ap, list(e.cell) if e.cells else None, e.has_acted, e.alive
@@ -62,6 +68,7 @@ def unit_payload(m, e, live):
         "alive": alive,
         "atk": e.atk,
         "rng": e.rng,
+        "move": e.move_allowance,
         "shots": e.hero.attacks_per_turn,
         "attack": e.hero.attack,
     }
@@ -83,7 +90,6 @@ def state_for(m, side):
         "winner": m.winner,
         "mode": m.mode,
         "both_present": m.both_present(),
-        "codex": {k: hero_card(h) for k, h in HEROES.BY_KEY.items()},
         "board": {"cols": m.topology.cols, "rows": m.topology.rows},
         "zone": [list(c) for c in m.topology.deployment_zone(side)],
         "tiles": m.board.serialise(),

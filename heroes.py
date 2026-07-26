@@ -66,12 +66,12 @@ class Ray(Ability):
     name = "射线 Ray"
     ap_cost = 2
     targeting = {"kind": "none"}
-    blurb = "5 damage to every enemy in the caster's row. Travels with it if bounced."
+    blurb = "6 damage to every enemy in the caster's row. Travels with it if bounced."
 
     def build_damage(self, match, actor, params):
         cells = set(match.topology.row(actor.cell[1]))
         return [
-            DMG.DamageEvent(source=actor, target=e, amount=5, category=DMG.ABILITY)
+            DMG.DamageEvent(source=actor, target=e, amount=6, category=DMG.ABILITY)
             for e in match.living()
             if e.side != actor.side and (e.cells & cells)
         ]
@@ -127,16 +127,16 @@ class Pierce(Ability):
 class Thunderstorm(Ability):
     key = "thunderstorm"
     name = "雷暴 Thunderstorm"
-    ap_cost = 3
+    ap_cost = 2
     targeting = {"kind": "none"}
-    blurb = "3 damage to every living enemy. No targeting, no counterplay."
+    blurb = "2 damage to every living enemy. No targeting, no counterplay."
 
     def build_damage(self, match, actor, params):
         return [
             DMG.DamageEvent(
                 source=actor,
                 target=e,
-                amount=3,
+                amount=2,
                 category=DMG.ABILITY,
                 element=DMG.THUNDER,
             )
@@ -258,13 +258,13 @@ class SelfRepair:
 
 
 class KeenEdge:
-    describe = "At the end of its own turn, Atk +2 (up to a maximum of 10)."
+    describe = "At the end of its own turn, Atk +1 (up to a maximum of 10)."
     CAP = 10
 
     def on_turn_end(self, match, owner, ctx):
         if ctx.get("entity") is not owner or not owner.alive:
             return
-        gain = min(2, self.CAP - owner.atk)
+        gain = min(1, self.CAP - owner.atk)
         if gain <= 0:
             return
         owner.add_modifier(Modifier("atk", "add", gain))
@@ -354,16 +354,15 @@ class Warlord:
 
 
 class MountainGuard:
-    """山神 shelters his line. Allied units sharing his column take no attack or
-    ability damage; he himself is not covered, and tile damage (fire) burns
-    through — mirroring how 圣骑士's aegis leaves tiles alone."""
+    """山神 shelters his line. Allied units sharing his column take 2 less from
+    every hit (all damage, fire included). He himself is not covered. Positional —
+    re-checked at damage time, so it follows units as they move."""
 
-    TRIGGERS = (DMG.NORMAL_ATTACK, DMG.ABILITY)
-    describe = "Allied units in his column take no attack or ability damage. He is not covered; fire still burns."
+    describe = "Allied units in his column take 2 less from every hit. He is not covered."
 
     @EV.hook(priority=20)
     def on_before_damage(self, match, owner, ev):
-        if ev.cancelled or ev.category not in self.TRIGGERS:
+        if ev.cancelled or ev.amount <= 0:
             return
         tgt = ev.target
         if tgt is owner or tgt.side != owner.side:
@@ -372,7 +371,7 @@ class MountainGuard:
             return
         column = set(match.topology.column(owner.cell[0]))
         if tgt.cells & column:
-            ev.cancel("shielded by 山神")
+            ev.amount = max(0, ev.amount - 2)
 
 
 # ---------------------------------------------------------------- hero defs
@@ -471,12 +470,12 @@ ROSTER = [
         name="雷霆龙",
         name_en="thunderDragon",
         max_hp=17,
-        atk=1,
+        atk=2,
         move=1,
         max_ap=6,
         attack={"mode": UNIT, "range": None},
         abilities=[Thunderstorm()],
-        blurb="Reaches the whole board. Banks two storms.",
+        blurb="Reaches the whole board. Banks three storms.",
     ),
     HeroDef(
         key="fire_mage",
@@ -531,13 +530,13 @@ ROSTER = [
         key="mountain_god",
         name="山神",
         name_en="mountainGod",
-        max_hp=22,
+        max_hp=19,
         atk=2,
         move=1,
         max_ap=0,
         attack={"mode": CELL, "cells": 3, "range": 2},
         passives=[MountainGuard],
-        blurb="Allies in his column cannot be struck by attacks or abilities.",
+        blurb="Allies sharing his column take 2 less from every hit.",
     ),
     HeroDef(
         key="tide_goddess",
@@ -555,10 +554,10 @@ ROSTER = [
         key="blood_mage",
         name="血魔法师",
         name_en="bloodMage",
-        max_hp=20,
-        atk=4,
+        max_hp=16,
+        atk=3,
         move=1,
-        max_ap=1,
+        max_ap=2,
         attack={"mode": CELL, "cells": 3, "range": 2},
         abilities=[BloodRite()],
         blurb="Once, trades life for lasting power.",
