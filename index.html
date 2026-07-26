@@ -162,8 +162,9 @@ body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
 .modal-sub{color:var(--dim);font-size:13px;text-align:center;margin:8px 0 20px}
 .pair-row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
 .pair-row .hero{margin:0}
-.modal-wide{max-width:1180px}
-.offer-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px}
+.modal-h{margin-bottom:16px}
+.modal-wide{max-width:min(1560px,95vw)}
+.offer-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:8px;margin-top:4px}
 .offer-grid .hero{margin:0}
 .offer-grid .hero.pickable{cursor:pointer}
 .offer-grid .hero.pickable:hover{transform:translateY(-2px);box-shadow:0 8px 20px rgba(0,0,0,.35)}
@@ -791,15 +792,13 @@ function renderDraft(){
         <span class="cn">${x.name}</span> <span class="en">${x.name_en}</span></div>`).join('')
     : `<p class="note">—</p>`;
 
-  const sub = d.your_pick
-    ? 'Choose one hero from the offer.'
-    : `<b class="side${d.picker}">${whose}</b> is choosing…`;
+  const sub = d.your_pick ? '' : `<div class="modal-sub"><b class="side${d.picker}">${whose}</b> is choosing…</div>`;
 
   document.getElementById('modal').innerHTML = `
     <div class="modal-backdrop">
       <div class="modal modal-wide">
         <div class="modal-h">Draft · batch ${d.batch} of ${d.batches_total}</div>
-        <div class="modal-sub">${sub}</div>
+        ${sub}
         <div class="offer-grid">${cards}</div>
         ${d.your_pick ? '' : `<div class="modal-wait">Waiting for ${whose} to choose</div>`}
         <div class="modal-taken">

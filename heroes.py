@@ -219,9 +219,9 @@ class AncientGuard(Ability):
 # ---------------------------------------------------------------- passives
 
 
-class RockSkin:
+class DivineAegis:
     """First damage of the round from an attack or ability lands in full; every
-    later instance of those categories is blocked for the rest of the round.
+    later instance of those categories is turned aside for the rest of the round.
     Tile damage neither triggers it nor is blocked by it."""
 
     TRIGGERS = (DMG.NORMAL_ATTACK, DMG.ABILITY)
@@ -233,18 +233,18 @@ class RockSkin:
             return
         if ev.category not in self.TRIGGERS:
             return
-        if owner.vars.get("rockskin_spent"):
-            ev.cancel("stone immunity")
+        if owner.vars.get("aegis_spent"):
+            ev.cancel("holy shield")
 
     @EV.hook(priority=60)
     def on_after_damage(self, match, owner, ev):
         if ev.target is owner and ev.category in self.TRIGGERS:
-            if not owner.vars.get("rockskin_spent"):
-                owner.vars["rockskin_spent"] = True
-                match.log_line(f"{match.label(owner)} hardens — immune for the rest of round {match.round}.")
+            if not owner.vars.get("aegis_spent"):
+                owner.vars["aegis_spent"] = True
+                match.log_line(f"{match.label(owner)} raises a holy shield — immune for the rest of round {match.round}.")
 
     def on_round_start(self, match, owner, ctx):
-        owner.vars["rockskin_spent"] = False
+        owner.vars["aegis_spent"] = False
 
 
 class SelfRepair:
@@ -282,7 +282,7 @@ class Regrowth:
             for e in match.living() if e.side == owner.side
         )
         if total:
-            match.log_line(f"{match.label(owner)}'s grove restores the line (+1 to each ally).")
+            match.log_line(f"{match.label(owner)}'s blessing restores the line (+1 to each ally).")
 
 
 class BattleFury:
@@ -356,7 +356,7 @@ class Warlord:
 class MountainGuard:
     """山神 shelters his line. Allied units sharing his column take no attack or
     ability damage; he himself is not covered, and tile damage (fire) burns
-    through — mirroring how 岩石巨人's immunity leaves tiles alone."""
+    through — mirroring how 圣骑士's aegis leaves tiles alone."""
 
     TRIGGERS = (DMG.NORMAL_ATTACK, DMG.ABILITY)
     describe = "Allied units in his column take no attack or ability damage. He is not covered; fire still burns."
@@ -443,16 +443,16 @@ ROSTER = [
         blurb="A wall of reach. Sweep hits a 2x5 block and cannot miss.",
     ),
     HeroDef(
-        key="rock_giant",
-        name="岩石巨人",
-        name_en="rockGiant",
+        key="paladin",
+        name="圣骑士",
+        name_en="paladin",
         max_hp=26,
         atk=2,
         move=1,
         max_ap=0,
         attack={"mode": CELL, "cells": 3, "range": 2},
-        passives=[RockSkin],
-        blurb="Takes one hit per round and shrugs off the rest.",
+        passives=[DivineAegis],
+        blurb="Takes one blow per round; a holy shield turns aside the rest.",
     ),
     HeroDef(
         key="robot",
@@ -498,7 +498,7 @@ ROSTER = [
         atk=4,
         move=1,
         max_ap=0,
-        attack={"mode": CELL, "cells": 4, "range": 7},
+        attack={"mode": CELL, "cells": 4, "range": 5},
         attacks_per_turn=2,
         halve_from_index=1,
         passives=[TwinGuns],
@@ -531,7 +531,7 @@ ROSTER = [
         key="mountain_god",
         name="山神",
         name_en="mountainGod",
-        max_hp=25,
+        max_hp=22,
         atk=2,
         move=1,
         max_ap=0,
@@ -649,16 +649,16 @@ ROSTER = [
         blurb="Wounded and dangerous — +2 attack and +1 range at 11 HP or below.",
     ),
     HeroDef(
-        key="tree_spirit",
-        name="树灵",
-        name_en="treeSpirit",
+        key="fairy",
+        name="妖精",
+        name_en="fairy",
         max_hp=14,
         atk=2,
         move=1,
         max_ap=0,
         attack={"mode": CELL, "cells": 3, "range": 5},
         passives=[Regrowth],
-        blurb="Regrows the army — every ally recovers 1 HP at the start of its turn.",
+        blurb="Mends the army — every ally recovers 1 HP at the start of its turn.",
     ),
     HeroDef(
         key="gatekeeper",
@@ -675,7 +675,7 @@ ROSTER = [
         key="wind_rider",
         name="御风使",
         name_en="windRider",
-        max_hp=20,
+        max_hp=19,
         atk=4,
         move=2,
         max_ap=0,
