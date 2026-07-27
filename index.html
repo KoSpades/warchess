@@ -92,6 +92,20 @@ main{display:grid;grid-template-columns:240px auto minmax(320px,1fr);gap:16px;pa
 .unit.R .hpbar i{background:var(--brass)}
 .unit .hpbar i.hurt{background:var(--oxide)}
 .unit .hpn{font-family:var(--mono);font-size:9px;color:var(--dim)}
+/* Status badges (蛮王's 背水 rage). Bottom-left, opposite the acted ✓. */
+.unit .st{position:absolute;bottom:2px;left:2px;min-width:16px;height:16px;padding:0 2px;
+  border-radius:3px;background:rgba(9,13,17,.85);border:1px solid var(--oxide);color:var(--oxide);
+  font-size:10px;font-weight:700;line-height:1;display:flex;align-items:center;justify-content:center;
+  box-shadow:0 1px 3px rgba(0,0,0,.4)}
+/* Gang queue: the number this goblin acts on, top-left. */
+.unit .qn{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;
+  background:var(--verdigris);color:#0b1417;font-size:10px;font-weight:700;line-height:1;
+  display:flex;align-items:center;justify-content:center;box-shadow:0 1px 3px rgba(0,0,0,.4)}
+.unit.R .qn{background:var(--brass)}
+.unit.queued{border-style:dashed}
+.unit.st-rage{border-color:var(--oxide);animation:ragepulse 1.6s ease-in-out infinite}
+@keyframes ragepulse{0%,100%{box-shadow:0 0 0 1px var(--oxide),0 0 6px rgba(180,74,52,.35)}
+  50%{box-shadow:0 0 0 2px var(--oxide),0 0 16px rgba(180,74,52,.75)}}
 .unit.sel{box-shadow:0 0 0 2px var(--verdigris),0 0 14px rgba(87,160,142,.3)}
 .unit.pending{opacity:.62;border-style:dashed}
 .cell.reachL{box-shadow:inset 0 0 0 2px rgba(87,160,142,.55)}
@@ -150,6 +164,11 @@ body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
 .hd-tile{background:var(--panel-2);border:1px solid var(--rule);border-radius:3px;padding:10px 12px}
 .hd-tile .k{font-family:var(--mono);font-size:9px;letter-spacing:.18em;text-transform:uppercase;color:var(--dim)}
 .hd-tile .v{font-size:18px;font-weight:600;margin-top:4px;letter-spacing:.01em}
+/* Live status (背水 rage): same shape as a trait, but in the alarm colour. */
+.hd-status{border-left:2px solid var(--oxide);background:rgba(180,74,52,.10);border-radius:0 3px 3px 0;
+  padding:8px 12px 8px 14px;margin:16px 0;font-size:14px;line-height:1.6;color:var(--text)}
+.hd-status b{display:block;color:var(--oxide);font-weight:700;margin-bottom:4px;
+  font-family:var(--mono);font-size:12px;letter-spacing:.12em;text-transform:uppercase}
 .hd-trait{border-left:2px solid var(--verdigris);padding:4px 0 4px 14px;margin:18px 0;
   font-size:15px;line-height:1.65;color:var(--text)}
 .hd-trait b{display:block;color:var(--verdigris);font-weight:600;margin-bottom:6px;font-size:15px}
@@ -189,22 +208,30 @@ body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
 
 /* ---------- resolution reveal ---------- */
 .reveal-back{z-index:60;cursor:pointer}
+/* An explicit width, not just a cap: the box is a flex item and the portraits
+   are background-image divs with no intrinsic size, so shrink-to-fit would size
+   the whole screen off the text and the portrait cap would never apply. */
 .reveal-box{background:var(--panel);border:1px solid var(--rule);border-radius:6px;
-  padding:26px 30px;box-shadow:0 24px 70px rgba(0,0,0,.6);max-width:min(1080px,95vw)}
-.rv-row{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:28px;margin-top:18px}
-.rv-vs{font-family:var(--mono);font-size:14px;letter-spacing:.2em;color:var(--dim)}
+  width:min(1050px,96vw);max-width:96vw;
+  padding:34px 39px;box-shadow:0 24px 70px rgba(0,0,0,.6)}
+.reveal-box .modal-h{font-size:16px;margin-bottom:21px}
+.rv-row{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:36px;margin-top:23px}
+.rv-vs{font-family:var(--mono);font-size:18px;letter-spacing:.2em;color:var(--dim)}
 .rv-side{text-align:center}
-.rv-img{aspect-ratio:3/4;width:100%;max-width:360px;margin:0 auto;border-radius:4px;
+/* Capped by screen height too (3:4 portrait ⇒ height = width × 4/3), so a big
+   monitor gets a big portrait and a laptop still fits the whole card. */
+.rv-img{aspect-ratio:3/4;width:100%;max-width:min(448px,35vh);margin:0 auto;border-radius:4px;
   background:var(--panel-2);background-size:cover;background-position:center top;border:1px solid var(--rule)}
 .rv-side.sideL .rv-img.has-img{border-color:var(--verdigris)}
 .rv-side.sideR .rv-img.has-img{border-color:var(--brass)}
-.rv-name{font-size:26px;font-weight:600;margin-top:14px}
-.rv-order{margin-top:10px}
-.rv-hit{font-size:19px;line-height:1.5;color:var(--text)}
+.rv-name{font-size:34px;font-weight:600;margin-top:18px}
+.rv-crew{font-size:18px;color:var(--dim);margin-top:6px}
+.rv-order{margin-top:13px}
+.rv-hit{font-size:25px;line-height:1.5;color:var(--text)}
 .rv-hit b{color:var(--oxide);font-weight:700}
-.rv-none{color:var(--dim);font-size:16px}
-.rv-hint{text-align:center;font-family:var(--mono);font-size:10px;letter-spacing:.18em;
-  text-transform:uppercase;color:var(--dimmer);margin-top:16px}
+.rv-none{color:var(--dim);font-size:21px}
+.rv-hint{text-align:center;font-family:var(--mono);font-size:13px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--dimmer);margin-top:21px}
 
 /* ---------- order slip: the signature ---------- */
 .slip{background:#F0EBE1;color:#1a1a1a;border-radius:2px;position:relative;
@@ -247,6 +274,15 @@ body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
   color:var(--dim);margin:12px 0 7px;padding-bottom:4px;border-bottom:1px solid var(--rule)}
 .step:first-child{margin-top:0}
 
+/* ---------- gang order queue ---------- */
+.gang-done{margin:0 0 10px}
+.gang-row{display:flex;align-items:baseline;gap:8px;padding:6px 8px;margin-bottom:4px;
+  background:var(--panel-2);border:1px solid var(--rule);border-radius:3px;font-size:13px}
+.gang-row .n{font-family:var(--mono);font-size:10px;width:16px;height:16px;flex:0 0 auto;
+  border-radius:50%;background:var(--verdigris);color:#0b1417;display:flex;
+  align-items:center;justify-content:center;font-weight:700}
+.gang-row small{color:var(--dim);font-size:11px}
+
 /* ---------- log ---------- */
 .log{max-height:52vh;overflow-y:auto;font-size:12px}
 .log div{padding:3px 0;border-bottom:1px solid #1f2a33;color:var(--text)}
@@ -287,7 +323,7 @@ body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
 <script>
 const SIDE = (new URLSearchParams(location.search).get('side') || 'L').toUpperCase().startsWith('R') ? 'R' : 'L';
 const COLS = "ABCDEFGHI";
-let S = null, armed = null, draft = null, err = "", lastVersion = -1, pendingMove = null;
+let S = null, armed = null, draft = null, err = "", lastVersion = -1, pendingMoves = [];
 let hoverId = null, inspected = null, revealActive = false, shownReveal = "";
 let codex = {};   // all hero cards, fetched once from /api/codex (not per poll)
 
@@ -305,7 +341,7 @@ async function cmd(body){
   err = res.error || "";
   await poll(true);
 }
-async function resetMatch(){ await api('/api/reset'); draft=null; armed=null; pendingMove=null; inspected=null; hoverId=null; revealActive=false; shownReveal=""; err=""; await poll(true); }
+async function resetMatch(){ await api('/api/reset'); draft=null; armed=null; pendingMoves=[]; inspected=null; hoverId=null; revealActive=false; shownReveal=""; err=""; await poll(true); }
 
 async function loadCodex(){
   try {
@@ -323,7 +359,7 @@ async function poll(force){
   S = next; lastVersion = next.version;
   // Drop the pending-move ghost once its order is no longer the live selection
   // (i.e. the exchange resolved and the board updated to the real position).
-  if (pendingMove && (S.phase!=='commit' || !S.commit || S.commit.selected!==pendingMove.id)) pendingMove = null;
+  if (pendingMoves.length && (S.phase!=='commit' || !S.commit || !S.commit.sealed)) pendingMoves = [];
   // A fresh, fully-resolved exchange: flash the reveal overlay (both heroes +
   // what they did) for a beat so the resolution is readable.
   if (S.reveal && (S.phase==='commit' || S.phase==='gameover')){
@@ -341,20 +377,56 @@ function syncDraft(){
   if (S.phase !== 'commit') { draft = null; return; }
   const sel = S.commit && S.commit.selected;
   if (!sel || (S.commit && S.commit.sealed)) { draft = null; return; }
-  if (!draft || draft.entity !== sel) draft = blankDraft(sel);
+  if (!draft) { draft = blankDraft(sel); return; }
+  // A gang keeps its own idea of which goblin is being ordered right now — the
+  // server's `selected` only records which one opened the gang's turn.
+  if (isGang()) { draft.gangOrders = draft.gangOrders || []; return; }
+  if (draft.entity !== sel) draft = blankDraft(sel);
 }
 function blankDraft(entity){
   return {entity, destination:null, held:false, tentative:null, actionKey:null, shots:[], shotIndex:0,
-          target:null, direction:null, cell:null, amount:null, weapon:null};
+          target:null, direction:null, cell:null, amount:null, weapon:null, gangOrders:[]};
+}
+function resetLeg(){
+  // Clear one unit's half-built order, keeping the gang's sealed-so-far list.
+  Object.assign(draft, {destination:null, held:false, tentative:null, actionKey:null, shots:[],
+                        shotIndex:0, target:null, direction:null, cell:null, amount:null, weapon:null});
+}
+
+/* ---------------- goblin gang ---------------- */
+function gangBlock(){ return (S && S.commit && S.commit.gang) || null; }
+function isGang(){ return !!gangBlock(); }
+function gangMembers(){ return gangBlock() ? gangBlock().members : []; }
+function gangMember(id){ return gangMembers().find(x => x.entity === id) || null; }
+function gangOrders(){ return (draft && draft.gangOrders) || []; }
+function isOrdered(id){ return gangOrders().some(o => o.entity === id); }
+function gangPending(){ return gangMembers().filter(x => !isOrdered(x.entity)); }
+// The move list / action menu for whoever is being ordered right now.
+function curMoves(){
+  if (isGang()){
+    const g = gangMember(draft && draft.entity);
+    return g ? g.legal_moves : [];
+  }
+  return (S.commit && S.commit.legal_moves) || [];
+}
+function curActions(){
+  if (isGang()){
+    const g = gangMember(draft && draft.entity);
+    return g ? g.actions : [];
+  }
+  return (S.commit && S.commit.actions) || [];
 }
 
 function unitAt(cell){ return (S.units||[]).find(u => u.alive && u.cell && eq(u.cell, cell)); }
 function myUnits(){ return (S.units||[]).filter(u => u.side === SIDE); }
 function foeUnits(){ return (S.units||[]).filter(u => u.side !== SIDE); }
-function selectedUnit(){ return S.commit && S.commit.selected ? (S.units||[]).find(u=>u.id===S.commit.selected) : null; }
+function selectedUnit(){
+  const id = (draft && draft.entity) || (S.commit && S.commit.selected);
+  return id ? (S.units||[]).find(u=>u.id===id) : null;
+}
 function currentAction(){
-  if (!draft || !draft.actionKey || !S.commit || !S.commit.actions) return null;
-  return S.commit.actions.find(a => a.key === draft.actionKey);
+  if (!draft || !draft.actionKey || !S.commit) return null;
+  return curActions().find(a => a.key === draft.actionKey);
 }
 function originCell(){
   const u = selectedUnit(); if (!u) return null;
@@ -391,17 +463,20 @@ function renderBoard(){
   // intended square rather than where it currently stands. Covers the tentative
   // (arrow-key) square, the confirmed destination, and a sealed-but-unresolved
   // order — all cleared once the move actually resolves on the board.
-  let movePreview = null;
+  let previews = [];
+  const ghostFor = (id, to) => {
+    const su = (S.units||[]).find(x=>x.id===id);
+    if (su && to && !eq(to, su.cell)) previews.push({u:su, to});
+  };
   if (S.phase==='commit' && draft){
-    const to = draft.destination || draft.tentative;
     const su = selectedUnit();
-    if (to && su && !eq(to, su.cell)) movePreview = {u:su, to};
-  } else if (pendingMove && S.phase==='commit' && S.commit && S.commit.sealed
-             && S.commit.selected===pendingMove.id){
-    // Only during the exact sealed-and-waiting window of the order that set it —
-    // once the exchange resolves the seal clears, so the ghost never lingers.
-    const su = (S.units||[]).find(x=>x.id===pendingMove.id);
-    if (su && !eq(pendingMove.to, su.cell)) movePreview = {u:su, to:pendingMove.to};
+    if (su) ghostFor(su.id, draft.destination || draft.tentative);
+    // Goblins already ordered keep their ghost while the rest of the gang is aimed.
+    for (const o of gangOrders()) ghostFor(o.entity, o.destination);
+  } else if (pendingMoves.length && S.phase==='commit' && S.commit && S.commit.sealed){
+    // Only during the exact sealed-and-waiting window of the order that set them —
+    // once the exchange resolves the seal clears, so ghosts never linger.
+    for (const p of pendingMoves) ghostFor(p.id, p.to);
   }
 
   let html = '';
@@ -418,7 +493,7 @@ function renderBoard(){
           Math.abs(origin[0]-c)+Math.abs(origin[1]-r) <= cspec.range) cls.push('inrange');
       if (draft && ((draft.destination && eq(draft.destination,cell)) || (draft.tentative && eq(draft.tentative,cell)))) cls.push('dest');
       if (S.phase==='commit' && draft && !draft.destination && !draft.held &&
-          S.commit.legal_moves && has(S.commit.legal_moves,cell)) cls.push('legal','pick');
+          has(curMoves(),cell)) cls.push('legal','pick');
       if (has(sweepCells,cell)) cls.push('preview');
       if (draft && draft.shots){
         draft.shots.forEach((sh,i)=>{ if (has(sh,cell)){ cls.push('marked'); mark = draft.shots.length>1?(i+1):'x'; }});
@@ -428,9 +503,9 @@ function renderBoard(){
       if (clickableCell(cell)) cls.push('pick');
 
       let u = unitAt(cell), ghost = false;
-      if (movePreview){
-        if (u && u.id===movePreview.u.id){ u = null; cls.push('movefrom'); }  // vacate + mark origin
-        if (eq(cell, movePreview.to)){ u = movePreview.u; ghost = true; }       // ghost at target
+      for (const mp of previews){
+        if (u && u.id===mp.u.id){ u = null; cls.push('movefrom'); }   // vacate + mark origin
+        if (eq(cell, mp.to)){ u = mp.u; ghost = true; }                // ghost at target
       }
       if (u) extra = unitHTML(u, ghost);
       if (S.phase==='setup'){
@@ -488,7 +563,10 @@ function unitHTML(u, pending){
   if (pending) cls.push('pending');
   if (u.acted) cls.push('acted');
   if (!u.alive) cls.push('dead');
-  if (S.commit && S.commit.selected===u.id) cls.push('sel');
+  const curId = draft ? draft.entity : (S.commit && S.commit.selected);
+  if (curId===u.id) cls.push('sel');
+  const qi = gangOrders().findIndex(o=>o.entity===u.id);
+  if (qi>=0) cls.push('queued');
   if (S.phase==='victim' && S.victim && S.victim.needed && S.victim.options.includes(u.id)) cls.push('tgt');
   const act = currentAction();
   if (act && act.targeting.kind==='unit' && u.side!==SIDE) cls.push('clickable');
@@ -499,7 +577,12 @@ function unitHTML(u, pending){
       u.side===SIDE && !u.acted && u.alive) cls.push('clickable');
   const pct = Math.max(0,Math.round(100*u.hp/u.max_hp));
   const pips = u.max_ap>0 ? `<span class="pips">${Array.from({length:u.max_ap},(_,i)=>`<i class="${i<u.ap?'on':''}"></i>`).join('')}</span>` : '';
+  const st = u.status || [];
+  for (const s of st) cls.push('st-'+s.key);
+  const badges = st.map(s => `<span class="st" title="${s.label} — ${s.text}">${s.badge}</span>`).join('');
   return `<span class="${cls.join(' ')}" onmouseenter="setHover(${u.id})" onmouseleave="setHover(null)" onclick="inspect(${u.id})">`
+       + (qi>=0 ? `<span class="qn" title="acts ${qi+1}${'st,nd,rd'.split(',')[qi]||'th'} this gang turn">${qi+1}</span>` : '')
+       + badges
        + (u.acted && !pending ? `<span class="done">✓</span>` : '')
        + `<span class="nm">${u.name.slice(0,4)}</span>`
        + `<span class="hpbar"><i class="${pct<40?'hurt':''}" style="width:${pct}%"></i></span>`
@@ -536,7 +619,9 @@ function setDragChip(e, key){
 }
 function startDragHero(e, key){
   if (S.phase!=='setup' || S.setup.ready) { e.preventDefault(); return; }
-  if (S.setup.placements.some(p=>p.key===key)) { e.preventDefault(); return; }
+  // A squad can owe several copies of the same body, so compare counts.
+  const owed = (S.roster||[]).filter(x=>x.key===key).length;
+  if (S.setup.placements.filter(p=>p.key===key).length >= owed) { e.preventDefault(); return; }
   dragHero = {key, fromCell:null};
   e.dataTransfer.setData('text/plain', key);
   e.dataTransfer.effectAllowed='move';
@@ -601,7 +686,7 @@ function sweepPreview(){
 function clickableCell(cell){
   if (S.phase==='setup') return !S.setup.ready && has(S.zone,cell);
   if (S.phase!=='commit' || !draft || S.commit.sealed) return false;
-  if (!draft.destination && !draft.held) return has(S.commit.legal_moves,cell);
+  if (!draft.destination && !draft.held) return has(curMoves(),cell);
   const act = currentAction(); if (!act) return false;
   const cs = cellSpec();
   if (cs){
@@ -644,6 +729,18 @@ function onCell(c,r){
     return;
   }
   if (!draft) return;
+  if (isGang() && !draft.destination && !draft.held){
+    const u = unitAt(cell);
+    if (u && u.side===SIDE && u.alive && gangMember(u.id) && !isOrdered(u.id)){
+      // Clicking a goblin says "this one acts next" — the click order IS the
+      // acting order. Clicking the one you are aiming puts it back in the queue.
+      draft.entity = (u.id===draft.entity) ? null : u.id;
+      resetLeg(); err=""; return render();
+    }
+    if (!draft.entity) return;              // nobody is up yet — squares do nothing
+    if (has(curMoves(),cell)){ draft.tentative=cell; err=""; return render(); }
+    return;
+  }
   if (!draft.destination && !draft.held){
     // Nothing is locked until you press Enter. Click another hero to switch, the
     // current one to back out, or a legal square to *tentatively* aim the move —
@@ -652,7 +749,7 @@ function onCell(c,r){
     if (u && u.side===SIDE && u.alive && !u.acted){
       return u.id === S.commit.selected ? cmd({cmd:'deselect'}) : cmd({cmd:'select', entity:u.id});
     }
-    if (has(S.commit.legal_moves,cell)){ draft.tentative=cell; err=""; return render(); }
+    if (has(curMoves(),cell)){ draft.tentative=cell; err=""; return render(); }
     return;
   }
   const act = currentAction(); if (!act) return;
@@ -687,7 +784,8 @@ function commitActive(){
   return S && S.phase==='commit' && S.commit && !S.commit.sealed && S.commit.selected && draft;
 }
 function moveInputActive(){
-  return commitActive() && !draft.destination && !draft.held;
+  return commitActive() && !draft.destination && !draft.held
+      && (!isGang() || !!draft.entity);
 }
 function confirmMove(){
   if (!moveInputActive()) return;
@@ -699,7 +797,7 @@ function confirmMove(){
 function finishMove(){
   // Arm the normal attack the moment the move is set — from arrow+Enter, a click,
   // or hold — so grids are immediately clickable without picking "Normal attack".
-  const atk = (S.commit.actions||[]).find(a=>a.key==='attack');
+  const atk = curActions().find(a=>a.key==='attack');
   if (atk) chooseAction('attack'); else render();
 }
 function sealFromKeyboard(){
@@ -736,7 +834,7 @@ function onKey(e){
     const [dx,dy] = dirs[e.key];
     const cand = [cur[0]+dx, cur[1]+dy];
     if (eq(cand, u.cell)){ draft.tentative=null; err=""; return render(); }   // step back to origin
-    if ((S.commit.legal_moves||[]).some(m=>eq(m,cand))){ draft.tentative=cand; err=""; return render(); }
+    if (curMoves().some(m=>eq(m,cand))){ draft.tentative=cand; err=""; return render(); }
     return;                                     // off-limits — ignore
   }
   if (e.key==='Enter'){
@@ -746,7 +844,7 @@ function onKey(e){
 }
 
 function chooseAction(key){
-  const act = S.commit.actions.find(a=>a.key===key);
+  const act = curActions().find(a=>a.key===key);
   draft.actionKey=key; draft.shots=[]; draft.shotIndex=0; draft.target=null; draft.direction=null; draft.cell=null; draft.amount=null; draft.weapon=null;
   if (act.targeting.kind==='cells') draft.shots = Array.from({length:act.targeting.shots},()=>[]);
   if (act.targeting.kind==='magnitude') draft.amount = 1;
@@ -783,10 +881,26 @@ function sealOrder(){
   if (t.kind==='direction') action.direction = draft.direction;
   if (t.kind==='any_cell') action.cell = draft.cell;
   if (t.kind==='weapon'){ action.weapon = draft.weapon; const w=currentWeapon(); if (w && w.mode==='cells') action.shots = draft.shots; }
+  if (isGang()){
+    draft.gangOrders.push({entity: draft.entity, destination: draft.destination, action});
+    draft.entity = null; resetLeg(); err="";
+    if (gangPending().length) return render();     // on to the next goblin
+    pendingMoves = gangOrders().filter(o=>o.destination).map(o=>({id:o.entity, to:o.destination}));
+    return cmd({cmd:'commit', payload:{orders: gangOrders()}});
+  }
   // Remember the intended move so the ghost persists after the slip is sealed,
   // until the exchange actually resolves.
-  pendingMove = draft.destination ? {id: draft.entity, to: draft.destination} : null;
+  pendingMoves = draft.destination ? [{id: draft.entity, to: draft.destination}] : [];
   cmd({cmd:'commit', payload:{destination: draft.destination, action}});
+}
+
+function pickGoblin(id){
+  if (!isGang() || isOrdered(id)) return;
+  draft.entity = id; resetLeg(); err=""; render();
+}
+function resetGang(){
+  if (!isGang()) return;
+  draft.gangOrders = []; draft.entity = null; resetLeg(); err=""; render();
 }
 
 /* ---------------- panels ---------------- */
@@ -829,6 +943,7 @@ function revealSide(side){
   return `<div class="rv-side side${side}">
     <div class="rv-img ${cx.image?'has-img':''}"${bg}></div>
     <div class="rv-name">${o.hero}</div>
+    ${o.crew ? `<div class="rv-crew">${o.crew.join(' → ')}</div>` : ''}
     <div class="rv-order">${revealHits(o)}</div>
   </div>`;
 }
@@ -918,7 +1033,11 @@ function renderOpening(){
 
 function renderSetup(){
   document.getElementById('leftheading').textContent = 'Deployment';
-  const st = S.setup, used = new Set(st.placements.map(p=>p.key));
+  const st = S.setup;
+  // The roster lists one entry per *body*, so a squad shows up as its members and
+  // 投矛手 appears twice — mark copies used by count, not by key.
+  const placedCount = {}, shownCount = {};
+  for (const p of st.placements) placedCount[p.key] = (placedCount[p.key]||0)+1;
   let h = '';
   if (st.ready){
     h += `<div class="waiting">Deployment sealed<br>Waiting for the other seat</div>`;
@@ -927,7 +1046,8 @@ function renderSetup(){
     h += `<p class="note">Drag each hero onto a square in your shaded zone. <b>${left}</b> left to place.</p>`;
     h += `<p class="dzHint">Drag a placed hero to move it · drop onto another to swap · click it to remove.</p>`;
     for (const hero of S.roster){
-      const on = used.has(hero.key);
+      shownCount[hero.key] = (shownCount[hero.key]||0)+1;
+      const on = shownCount[hero.key] <= (placedCount[hero.key]||0);
       const drag = on ? '' : `draggable="true" ondragstart="startDragHero(event,'${hero.key}')" ondragend="endDrag()"`;
       h += `<div class="hero ${on?'used':'pickable'} ${armed===hero.key?'armed':''}" ${drag} onclick="armHero('${hero.key}')">
         <div class="top"><span class="cn">${hero.name}</span><span class="en">${hero.name_en}</span>${on?'':'<span class="grip">⠿</span>'}</div>
@@ -969,6 +1089,13 @@ function renderCommit(){
   }
 
   const u = selectedUnit(), act = currentAction();
+  if (isGang()){
+    h += gangHeaderHTML();
+    if (!draft.entity){                       // nobody up: choose who acts next
+      h += `<p class="err">${err}</p>`;
+      document.getElementById('leftbody').innerHTML = h; return;
+    }
+  }
   h += slipHTML(u, act);
   h += `<div class="step">1 · Movement</div>`;
   if (!draft.destination && !draft.held){
@@ -987,10 +1114,38 @@ function renderCommit(){
              ${a.text?`<small>${a.text}</small>`:''}</button>`;
     }
     if (act) h += targetingHTML(act);
-    h += `<button class="btn primary" ${orderReady()?'':'disabled'} onclick="sealFromKeyboard()">Seal order — <b>Enter</b></button>`;
+    const last = isGang() && gangPending().length===1;
+    const label = !isGang() ? 'Seal order' : (last ? 'Seal the gang’s orders' : 'Lock this goblin in');
+    h += `<button class="btn primary" ${orderReady()?'':'disabled'} onclick="sealFromKeyboard()">${label} — <b>Enter</b></button>`;
   }
   h += `<p class="err">${err}</p>`;
   document.getElementById('leftbody').innerHTML = h;
+}
+
+function gangActionLabel(m, action){
+  if (!action || action.key==='none') return 'holds';
+  if (action.key==='attack') return 'attacks';
+  const a = ((m && m.actions)||[]).find(x=>x.key===action.key);
+  return a ? a.name : action.key;
+}
+function gangHeaderHTML(){
+  const done = gangOrders(), pending = gangPending(), all = gangMembers();
+  let h = `<div class="step">Gang turn · ${done.length}/${all.length} ordered</div>`;
+  h += `<p class="note">Every living goblin acts this turn, in the order you pick them.
+        Click a goblin on the board or below to give it its orders — nothing is sent until all ${all.length} are set.</p>`;
+  if (done.length){
+    h += `<div class="gang-done">` + done.map((o,i)=>{
+      const m = gangMember(o.entity) || {};
+      return `<div class="gang-row"><span class="n">${i+1}</span>
+        <b>${m.name||''}</b><small>${o.destination?('moves to '+cn(o.destination)):'holds'} · ${gangActionLabel(m,o.action)}</small></div>`;
+    }).join('') + `</div>`;
+    h += `<button class="btn" onclick="resetGang()">Clear the gang’s orders</button>`;
+  }
+  for (const m of pending){
+    h += `<button class="btn ${draft.entity===m.entity?'on':''}" onclick="pickGoblin(${m.entity})">
+            ${m.name} <small>${cn(m.cell)} · AP ${m.ap}</small></button>`;
+  }
+  return h;
 }
 
 function targetingHTML(act){
@@ -1121,15 +1276,18 @@ function heroDetailHTML(u){
   const pct = Math.max(0, Math.round(100*u.hp/u.max_hp));
   const tile = (k,v) => `<div class="hd-tile"><div class="k">${k}</div><div class="v">${v}</div></div>`;
   let tiles = tile('Attack', u.atk) + tile('Move', u.move);
-  if (a.mode==='cell_locked') tiles += tile('Grids', a.cells) + tile('Range', u.rng);
+  if (a.mode==='cell_locked') tiles += tile('Grids', u.grid ?? a.cells) + tile('Range', u.rng);
   else if (a.mode==='weapon') tiles += tile('Weapon', 'varies');
   else tiles += tile('Reach', 'any enemy');
+  const status = (u.status||[]).map(s =>
+    `<div class="hd-status"><b>${s.badge} ${s.label}</b>${s.text}</div>`).join('');
   return `<div class="hd">
     <div class="hd-name">${u.name}<span class="en">${u.name_en}</span></div>
     <div class="hd-hp side${u.side}">
       <div class="lbl"><span>HP</span><b>${u.hp} / ${u.max_hp}</b></div>
       <div class="bar"><i class="${pct<40?'hurt':''}" style="width:${pct}%"></i></div>
     </div>
+    ${status}
     <div class="hd-grid">${tiles}</div>
     ${(h.traits||[]).map(t=>`<div class="hd-trait"><b>${t.name}${t.ap_cost?` · ${t.ap_cost} AP`:''}</b>${t.text}</div>`).join('')}
     <button class="btn" style="margin-top:18px" onclick="inspected=null;renderRHS()">← Back to field log</button>

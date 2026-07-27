@@ -14,7 +14,7 @@ import damage as DMG
 import events as EV
 import heroes as HEROES
 from board import Board
-from entities import Entity
+from entities import Entity, UNTIL_TURN_END
 from topology import LEFT, RIGHT, Topology, other_side
 
 COLUMN_LETTERS = "ABCDEFGHI"
@@ -28,13 +28,14 @@ GAMEOVER = "gameover"
 
 # The draft plays out in batches: each batch shows a fresh set of never-seen
 # champions, and the listed sides each pick one (in order); leftover cards are
-# discarded, not handed to anyone. 5+3+5+3 = 16 shown, 4 picked per side, so the
-# roster must stay at least 16 heroes.
+# discarded, not handed to anyone. 4x4 = 16 shown, 4 picked per side, so the
+# roster must stay at least 16 heroes. Every pick is a choice of 4 then 3 — the
+# side picking second alternates, so both sides face the same choice counts.
 DRAFT_BATCHES = [
-    (5, [LEFT, RIGHT]),
-    (3, [RIGHT, LEFT]),
-    (5, [RIGHT, LEFT]),
-    (3, [LEFT, RIGHT]),
+    (4, [LEFT, RIGHT]),
+    (4, [RIGHT, LEFT]),
+    (4, [RIGHT, LEFT]),
+    (4, [LEFT, RIGHT]),
 ]
 
 
@@ -139,11 +140,10 @@ class Match:
     def random_shots(self, e, dest):
         """Solo mode: pick the cell-locked attack's grids at random within range
         of where the hero will stand, one net per shot."""
-        spec = e.hero.attack
         pool = [list(c) for c in self.topology.cells_within(tuple(dest), e.rng)]
         out = []
         for _ in range(e.hero.attacks_per_turn):
-            k = min(spec["cells"], len(pool))
+            k = min(e.grid, len(pool))
             out.append(random.sample(pool, k) if k else [])
         return out
 
@@ -158,17 +158,23 @@ class Match:
         left += ["dummy"] * (2 - len(left))
         right = ["dummy", "dummy"]
         self.drafted = {LEFT: left, RIGHT: right}
-        cells = {LEFT: [(2, 2), (2, 4)], RIGHT: [(8, 2), (8, 4)]}
-        for s, keys in ((LEFT, left), (RIGHT, right)):
+        for s in (LEFT, RIGHT):
+            # Down a column, so a squad's bodies land adjacent to each other.
+            col = 2 if s == LEFT else 8
+            free = [(col, r) for r in range(1, self.topology.rows + 1)]
             self.setup_state[s]["placements"] = [
-                {"key": k, "cell": list(c)} for k, c in zip(keys, cells[s])
+                {"key": k, "cell": list(c)} for k, c in zip(self.deploy_bodies(s), free)
             ]
             self.setup_state[s]["ready"] = True
         self.begin()
         # Start the champions under test with full AP so abilities are usable
         # right away (dummies have none anyway).
+        under_test = set()
+        for k in HEROES.TEST_HEROES:
+            hero = HEROES.BY_KEY[k]
+            under_test.update(hero.squad or [k])
         for e in self.entities:
-            if e.key in HEROES.TEST_HEROES:
+            if e.key in under_test:
                 e.ap = e.max_ap
 
     # -------------------------------------------------------------- draft
@@ -231,6 +237,19 @@ class Match:
 
     # -------------------------------------------------------------- setup
 
+    def deploy_bodies(self, side):
+        """Every body the side must put on the board. A normal card contributes
+        itself; a squad card (哥布林团伙) contributes its members, duplicates and
+        all — so the force is 4 cards but can be 6 units."""
+        out = []
+        for k in self.drafted[side]:
+            hero = HEROES.BY_KEY[k]
+            out.extend(hero.squad or [k])
+        return out
+
+    def bodies_needed(self, side):
+        return len(self.deploy_bodies(side))
+
     def place(self, side, hero_key, cell):
         cell = tuple(cell)
         st = self.setup_state[side]
@@ -242,12 +261,16 @@ class Match:
             return "A hero already holds that cell."
         if hero_key not in HEROES.BY_KEY:
             return "No such hero."
-        if hero_key not in self.drafted[side]:
+        bodies = self.deploy_bodies(side)
+        copies = bodies.count(hero_key)
+        if not copies:
             return "That hero was not drafted to you."
-        if any(p["key"] == hero_key for p in st["placements"]):
+        # Squads deploy several identical bodies, so the check is "how many of
+        # this body do you still owe", not "is it already down".
+        if sum(1 for p in st["placements"] if p["key"] == hero_key) >= copies:
             return "That hero is already deployed."
-        if len(st["placements"]) >= self.force_size:
-            return f"Your force is full at {self.force_size}."
+        if len(st["placements"]) >= len(bodies):
+            return f"Your force is full at {len(bodies)}."
         st["placements"].append({"key": hero_key, "cell": list(cell)})
         self.bump()
         return None
@@ -261,10 +284,38 @@ class Match:
         self.bump()
         return None
 
+    def gang_placement_error(self, side):
+        """初始位置：3相邻格 — a squad's bodies must go down as one connected
+        blob (each touching at least one other), not scattered across the zone."""
+        st = self.setup_state[side]
+        for key in self.drafted[side]:
+            hero = HEROES.BY_KEY[key]
+            if not hero.squad:
+                continue
+            cells = [tuple(p["cell"]) for p in st["placements"] if p["key"] in hero.squad]
+            if len(cells) < 2:
+                continue
+            seen = {cells[0]}
+            frontier = [cells[0]]
+            pool = set(cells)
+            while frontier:
+                cur = frontier.pop()
+                for n in self.topology.neighbours(cur):
+                    if n in pool and n not in seen:
+                        seen.add(n)
+                        frontier.append(n)
+            if len(seen) != len(cells):
+                return f"{hero.name} must deploy on adjacent cells — keep the group connected."
+        return None
+
     def lock_force(self, side):
         st = self.setup_state[side]
-        if len(st["placements"]) != self.force_size:
-            return f"Deploy {self.force_size} heroes first."
+        need = self.bodies_needed(side)
+        if len(st["placements"]) != need:
+            return f"Deploy {need} heroes first."
+        err = self.gang_placement_error(side)
+        if err:
+            return err
         st["ready"] = True
         self.bump()
         if all(s["ready"] for s in self.setup_state.values()):
@@ -396,6 +447,9 @@ class Match:
                 "cell": list(e.cell) if e.cells else None,
                 "acted": e.has_acted,
                 "alive": e.alive,
+                # Snapshotted like HP: 蛮王's rage counter ticks at turn start, so
+                # a live badge would betray which hero the opponent picked up.
+                "status": HEROES.status_of(self, e),
             }
             for e in self.entities
         }
@@ -426,9 +480,27 @@ class Match:
             return None
         return "Order already sealed."
 
+    def gang_of(self, e):
+        """The squad key this unit belongs to, or None for a lone hero."""
+        return e.hero.gang if e is not None else None
+
+    def gang_members(self, side, gang):
+        """Living members of one gang, in a stable order (deployment order)."""
+        return [e for e in self.living(side) if e.hero.gang == gang]
+
+    def turn_actors(self, e):
+        """Everyone whose turn it is when this unit is picked up: a gang brings
+        its whole living crew, anyone else brings only themselves."""
+        gang = self.gang_of(e)
+        return self.gang_members(e.side, gang) if gang else [e]
+
+    def forfeit_turn(self, side):
+        self.commits[side] = {"kind": "dead"}
+        self.maybe_resolve()
+
     def run_turn_start(self, e):
-        """Board effects resolve before the hero decides anything. A hero killed
-        here loses its action entirely."""
+        """Board effects resolve before the hero decides anything. Returns False
+        if the unit died here — it forfeits its action."""
         self.bus.emit(EV.TURN_START, {"entity": e})
         burn = self.board.burning_damage_for(e.cell, e)
         if burn:
@@ -441,10 +513,12 @@ class Match:
             )
             DMG.apply_batch(self, [ev])
             self.log_line(f"{self.label(e)} starts its turn burning: {burn} fire.")
-            if not e.alive:
-                self.log_line(f"{self.label(e)} is destroyed before it can act.")
-                self.commits[e.side] = {"kind": "dead"}
-                self.maybe_resolve()
+        # Anything that can kill at turn start forfeits the turn — a burning tile,
+        # or a passive that expires lethally (蛮王's 背水 burnout).
+        if not e.alive:
+            self.log_line(f"{self.label(e)} is destroyed before it can act.")
+            return False
+        return True
 
     def legal_moves(self, e):
         """Every cell reachable within the hero's move allowance, walking one step
@@ -483,7 +557,7 @@ class Match:
                     "ap_cost": 0,
                     "targeting": {
                         "kind": "cells",
-                        "count": spec["cells"],
+                        "count": e.grid,
                         "range": e.rng,
                         "shots": e.hero.attacks_per_turn,
                     },
@@ -539,18 +613,36 @@ class Match:
             return "Choose a living, un-acted hero."
 
         # Committing is the point of no return: the turn starts now and board
-        # effects (fire) resolve. A hero killed here forfeits its action.
+        # effects (fire) resolve. A unit killed here forfeits its action; a gang
+        # only forfeits if the board wipes out every goblin at once.
+        actors = self.turn_actors(e)
         if not self.turn_started[side]:
             self.turn_started[side] = True
-            self.run_turn_start(e)
-            if self.commits[side] is not None:  # fire killed it — dead commit already set
+            survivors = [a for a in actors if self.run_turn_start(a)]
+            if not survivors:
+                self.forfeit_turn(side)
                 return None
+            actors = survivors
 
+        if self.gang_of(e):
+            return self._commit_gang(side, e, actors, payload)
+
+        order, err = self._build_order(e, payload)
+        if err:
+            return err
+
+        self.commits[side] = dict(order, kind="action")
+        self.bump()
+        self.maybe_resolve()
+        return None
+
+    def _build_order(self, e, payload):
+        """Validate one unit's move + action. Returns (order, error)."""
         dest = payload.get("destination")
         dest = tuple(dest) if dest else e.cell
         if dest != e.cell:
             if dest not in [tuple(c) for c in self.legal_moves(e)]:
-                return "That cell is not an open adjacent square."
+                return None, "That cell is not an open adjacent square."
 
         action = payload.get("action") or {"key": "none"}
         key = action.get("key", "none")
@@ -559,13 +651,43 @@ class Match:
             action = dict(action, shots=self.random_shots(e, dest))
         err = self.validate_action(e, dest, action)
         if err:
-            return err
+            return None, err
+        return {"entity": e.id, "destination": list(dest), "action": action}, None
+
+    def _commit_gang(self, side, picked, actors, payload):
+        """A gang seals one order per living goblin. The list order IS the acting
+        order (团伙回合内，所有存活哥布林按你选择的顺序行动)."""
+        raw = payload.get("orders")
+        if not isinstance(raw, list) or not raw:
+            return "Give every goblin an order."
+        living = {a.id: a for a in actors}
+        seen = []
+        orders = []
+        for item in raw:
+            e = self.entity(item.get("entity"))
+            if e is None or e.side != side or self.gang_of(e) != self.gang_of(picked):
+                return "That goblin cannot act this turn."
+            if e.id not in living:
+                # Burned down by a tile the instant the turn started: its order is
+                # dropped and the rest of the gang carries on. The client cannot
+                # have known — fire only resolves at commit.
+                continue
+            if e.id in seen:
+                return "Each goblin acts once."
+            seen.append(e.id)
+            order, err = self._build_order(e, item)
+            if err:
+                return f"{e.name}: {err}"
+            orders.append(order)
+        missing = [a for a in actors if a.id not in seen]
+        if missing:
+            return f"Still waiting on orders for {', '.join(a.name for a in missing)}."
 
         self.commits[side] = {
-            "kind": "action",
-            "entity": eid,
-            "destination": list(dest),
-            "action": action,
+            "kind": "gang",
+            "gang": self.gang_of(picked),
+            "entity": orders[0]["entity"],
+            "orders": orders,
         }
         self.bump()
         self.maybe_resolve()
@@ -586,8 +708,8 @@ class Match:
                 for cells in shots:
                     # Any number of cells up to the max — a smaller net is the
                     # attacker's choice; an empty net simply hits nothing.
-                    if len(cells) > spec["cells"]:
-                        return f"At most {spec['cells']} cells per shot."
+                    if len(cells) > e.grid:
+                        return f"At most {e.grid} cells per shot."
                     for c in cells:
                         c = tuple(c)
                         if not self.topology.in_bounds(c):
@@ -696,33 +818,57 @@ class Match:
 
     # ---------------------------------------------------------- resolution
 
+    def orders_of(self, commit):
+        """Every unit order in a commit — one for a lone hero, one per goblin for
+        a gang, none for an absent or dead side."""
+        if commit["kind"] == "action":
+            return [commit]
+        if commit["kind"] == "gang":
+            return commit["orders"]
+        return []
+
     def resolve(self):
         reveal = {}
-        moves = {}
+        movers = []
         for side in (LEFT, RIGHT):
             c = self.commits[side]
-            if c["kind"] != "action":
+            orders = self.orders_of(c)
+            if not orders:
                 reveal[side] = None
                 continue
-            e = self.entity(c["entity"])
-            reveal[side] = {
-                "key": e.key,
-                "hero": e.name,
-                "hero_en": e.name_en,
-                "action": c["action"],
-                "hits": [],   # filled during resolution: [{target, amount}, ...]
-            }
-            moves[side] = (e, tuple(c["destination"]))
+            actors = [self.entity(o["entity"]) for o in orders]
+            lead = actors[0]
+            if c["kind"] == "gang":
+                card = HEROES.BY_KEY[c["gang"]]
+                reveal[side] = {
+                    "key": card.key,
+                    "hero": card.name,
+                    "hero_en": card.name_en,
+                    "action": orders[0]["action"],
+                    "crew": [a.name for a in actors],
+                    "hits": [],
+                }
+            else:
+                reveal[side] = {
+                    "key": lead.key,
+                    "hero": lead.name,
+                    "hero_en": lead.name_en,
+                    "action": c["action"],
+                    "hits": [],   # filled during resolution: [{target, amount}, ...]
+                }
+            for o, a in zip(orders, actors):
+                movers.append((side, a, tuple(o["destination"])))
         self.last_reveal = reveal
 
-        self.apply_movement(moves)
+        self.apply_movement(movers)
 
         plan = {LEFT: [], RIGHT: []}
         for side in (LEFT, RIGHT):
             c = self.commits[side]
-            if c["kind"] != "action":
-                continue
-            plan[side] = self.build_instances(self.entity(c["entity"]), c)
+            for o in self.orders_of(c):
+                # Sequential: goblin #1's instances sit at index 0 alongside the
+                # enemy's action, #2's after them, and so on.
+                plan[side].extend(self.build_instances(self.entity(o["entity"]), o))
 
         self.res = {
             "plan": plan,
@@ -732,18 +878,20 @@ class Match:
         }
         self.advance_resolution()
 
-    def apply_movement(self, moves):
-        dests = {s: d for s, (e, d) in moves.items()}
-        entities = {s: e for s, (e, d) in moves.items()}
-        if len(dests) == 2 and dests[LEFT] == dests[RIGHT] and dests[LEFT] != entities[LEFT].cell:
-            for s in (LEFT, RIGHT):
-                if dests[s] != entities[s].cell:
-                    self.log_line(
-                        f"{self.label(entities[s])} is blocked at {self.cell_name(dests[s])} — no movement."
-                    )
-            return
-        for s, (e, d) in moves.items():
-            if d == e.cell:
+    def apply_movement(self, movers):
+        """Everyone moves in the same instant — one hero a side normally, but a
+        gang turn puts several movers on one side. Two units reaching for the
+        same square collide and neither goes (whichever sides they are on), and
+        a square that is still occupied when a mover arrives blocks it, so units
+        can never swap or chain through each other."""
+        going = [(e, d) for _s, e, d in movers if d != e.cell]
+        contested = {
+            d for i, (_e, d) in enumerate(going)
+            if any(d2 == d for j, (_e2, d2) in enumerate(going) if j != i)
+        }
+        for e, d in going:
+            if d in contested:
+                self.log_line(f"{self.label(e)} is blocked at {self.cell_name(d)} — no movement.")
                 continue
             if self.occupant(d) is not None:
                 self.log_line(f"{self.label(e)} is blocked at {self.cell_name(d)} — no movement.")
@@ -893,18 +1041,32 @@ class Match:
                 self.bus.emit(EV.DEATH, {"entity": e})
                 self.log_line(f"{self.label(e)} is destroyed.")
 
+    def turn_units(self, side, c):
+        """Whose turn just ended. A gang turn ends for the whole gang at once,
+        including goblins that died in it and, on a wipe, ones that never acted."""
+        if c["kind"] == "gang":
+            return [e for e in self.entities if e.side == side and e.hero.gang == c["gang"]]
+        eid = c.get("entity") or self.selected[side]
+        e = self.entity(eid) if eid else None
+        if e is None:
+            return []
+        gang = self.gang_of(e)
+        if gang:
+            return [x for x in self.entities if x.side == side and x.hero.gang == gang]
+        return [e]
+
     def finish_exchange(self):
         for side in (LEFT, RIGHT):
             c = self.commits[side]
-            if c["kind"] not in ("action", "dead"):
+            if c["kind"] not in ("action", "gang", "dead"):
                 continue
-            eid = c.get("entity") or self.selected[side]
-            e = self.entity(eid) if eid else None
-            if e is None:
-                continue
-            e.has_acted = True
-            if e.alive:
+            for e in self.turn_units(side, c):
+                e.has_acted = True
+                if not e.alive:
+                    continue
                 self.bus.emit(EV.TURN_END, {"entity": e})
+                # "本回合" buffs (哥布林鼓舞) die with the turn that granted them.
+                e.expire_modifiers(UNTIL_TURN_END)
                 before = e.ap
                 e.gain_ap(1)
                 if e.ap != before:

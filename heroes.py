@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 import damage as DMG
 import events as EV
-from entities import Modifier
+from entities import Modifier, UNTIL_TURN_END
 from topology import other_side
 
 
@@ -199,6 +199,44 @@ class BloodRite(Ability):
         )
 
 
+class GoblinRally(Ability):
+    key = "goblin_rally"
+    name = "哥布林鼓舞 Goblin Rally"
+    ap_cost = 2
+    targeting = {"kind": "none"}
+    blurb = ("Every living goblin in the gang gets +2 attack for the rest of this "
+             "gang turn — so cast it before the javelins throw.")
+
+    def side_effects(self, match, actor, params):
+        crew = [e for e in match.living(actor.side) if e.hero.gang == actor.hero.gang]
+        for e in crew:
+            e.add_modifier(Modifier("atk", "add", 2, source=self, duration=UNTIL_TURN_END))
+        match.log_line(
+            f"{match.label(actor)} whips up the gang — +2 attack to {len(crew)} goblin(s) this turn."
+        )
+
+
+class BeastForm(Ability):
+    key = "beast_form"
+    name = "野兽化 Beast Form"
+    ap_cost = 3
+    use_limit = 1
+    targeting = {"kind": "none"}
+    blurb = ("Once per match: turn beast, permanently. Heal 4, Atk +3, Move +1 — "
+             "but one grid less and 2 less range.")
+
+    def side_effects(self, match, actor, params):
+        healed = DMG.heal(match, actor, 4, source=actor)
+        for stat, delta in (("atk", 3), ("move", 1), ("grid", -1), ("rng", -2)):
+            actor.add_modifier(Modifier(stat, "add", delta))
+        actor.vars["beast_form"] = True
+        match.log_line(
+            f"{match.label(actor)} turns beast — heals {healed}, "
+            f"Atk {actor.atk}, Move {actor.move_allowance}, "
+            f"{actor.grid} grids @ {actor.rng}."
+        )
+
+
 class AncientGuard(Ability):
     key = "ancient_guard"
     name = "远古守护 Ancient Guard"
@@ -353,6 +391,80 @@ class Warlord:
         self._recompute(match, owner)
 
 
+class LastStand:
+    """背水: once per match, the blow that would kill 蛮王 leaves him at 1 HP and
+    sends him berserk instead. Rage makes him untouchable and stronger, but it
+    burns him out — he drops dead at the start of his third turn in it, so the
+    rage buys exactly two turns of action."""
+
+    describe = ("Once: a lethal hit leaves him at 1 HP and enrages him instead — "
+                "immune to all damage and Atk +3, but he burns out at the start of "
+                "his third turn enraged (two turns of action).")
+    RAGE_TURNS = 3
+    RAGE_ATK = 3
+
+    # Earliest slot in the pipeline: rage beats reductions, wards, everything.
+    @EV.hook(priority=10)
+    def on_before_damage(self, match, owner, ev):
+        if ev.target is owner and not ev.cancelled and owner.vars.get("rage"):
+            ev.cancel("背水 rage")
+
+    def on_before_death(self, match, owner, ctx):
+        if ctx["entity"] is not owner or ctx.get("prevented"):
+            return
+        if owner.vars.get("last_stand_spent"):
+            return  # already used once — and the burnout death must not be blocked
+        ctx["prevented"] = True
+        owner.vars["last_stand_spent"] = True
+        owner.vars["rage"] = True
+        owner.vars["rage_turns"] = 0
+        owner.hp = 1
+        owner.add_modifier(Modifier("atk", "add", self.RAGE_ATK))
+        match.log_line(
+            f"{match.label(owner)} refuses to fall — 背水! 1 HP, immune to all damage, "
+            f"Atk now {owner.atk}. Two turns before the rage burns him out."
+        )
+
+    def status(self, match, owner):
+        if not owner.vars.get("rage"):
+            return None
+        left = max(0, self.RAGE_TURNS - 1 - owner.vars.get("rage_turns", 0))
+        tail = (f"{left} more turn{'' if left == 1 else 's'} of action"
+                if left else "burns out at the start of its next turn")
+        return {
+            "key": "rage",
+            "badge": "怒",
+            "label": "背水 RAGE",
+            "text": f"Immune to all damage · Atk +{self.RAGE_ATK} · {tail}",
+        }
+
+    def on_turn_start(self, match, owner, ctx):
+        if ctx.get("entity") is not owner or not owner.vars.get("rage"):
+            return
+        turns = owner.vars.get("rage_turns", 0) + 1
+        owner.vars["rage_turns"] = turns
+        if turns < self.RAGE_TURNS:
+            left = self.RAGE_TURNS - 1 - turns
+            match.log_line(
+                f"{match.label(owner)} rages on — {left} turn{'' if left == 1 else 's'} left."
+            )
+            return
+        # Burnout. The rage flag drops first so nothing shields the death, and
+        # sweep_deaths runs the normal death path (背水 is spent, so it stands).
+        owner.vars["rage"] = False
+        owner.hp = 0
+        match.log_line(f"{match.label(owner)} burns out — the rage takes him.")
+        match.sweep_deaths()
+
+
+class GangTactics:
+    """Display-only: the ordering rule itself lives in the turn loop (a gang
+    commits one order per living member and they resolve in the chosen order)."""
+
+    describe = ("Gang turn: every living goblin acts, in an order you choose — "
+                "the whole gang costs one turn.")
+
+
 class MountainGuard:
     """山神 shelters his line. Allied units sharing his column take 2 less from
     every hit (all damage, fire included). He himself is not covered. Positional —
@@ -392,6 +504,12 @@ class HeroDef:
     abilities: list = field(default_factory=list)
     passives: list = field(default_factory=list)
     weapons: list = None  # 武器大师 only: per-turn choosable attacks (see WEAPONS)
+    # A draft card that deploys several bodies (哥布林团伙): the member hero keys,
+    # duplicates included. Squad cards never become entities themselves.
+    squad: list = None
+    # Set on the members: which squad card they belong to. Members sharing a gang
+    # key on the same side act together in one turn.
+    gang: str = None
     blurb: str = ""
 
 
@@ -681,9 +799,82 @@ ROSTER = [
         attack={"mode": CELL, "cells": 3, "range": 2},
         blurb="Covers ground fast — moves 2 cells a turn.",
     ),
+    HeroDef(
+        key="werewolf",
+        name="狼人",
+        name_en="werewolf",
+        max_hp=19,
+        atk=3,
+        move=1,
+        max_ap=3,
+        attack={"mode": CELL, "cells": 3, "range": 3},
+        abilities=[BeastForm()],
+        blurb="Banks one transformation — heals and hits far harder, but must close in.",
+    ),
+    HeroDef(
+        key="barbarian_king",
+        name="蛮王",
+        name_en="barbarianKing",
+        max_hp=12,
+        atk=3,
+        move=1,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 3, "range": 2},
+        passives=[LastStand],
+        blurb="Frail, but the killing blow only enrages him — two untouchable turns, then dust.",
+    ),
+    HeroDef(
+        key="goblin_gang",
+        name="哥布林团伙",
+        name_en="goblinGang",
+        # Card-level numbers are the gang's totals, shown only if a client has
+        # nothing better to draw; the real stats live on the members below.
+        max_hp=21,
+        atk=2,
+        move=1,
+        max_ap=2,
+        attack={"mode": CELL, "cells": 2, "range": 4},
+        squad=["goblin_javelin", "goblin_javelin", "goblin_commander"],
+        passives=[GangTactics],
+        blurb="Three bodies for one slot — two javelins and a commander, all acting on one turn.",
+    ),
 ]
 
 BY_KEY = {h.key: h for h in ROSTER}
+
+# 哥布林团伙's bodies. Not in ROSTER — they are never drafted directly, only
+# deployed by the gang card, so they live in BY_KEY alongside the dummy.
+SQUAD_MEMBERS = [
+    HeroDef(
+        key="goblin_javelin",
+        name="投矛手",
+        name_en="goblinJavelin",
+        max_hp=8,
+        atk=2,
+        move=1,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 2, "range": 4},
+        passives=[GangTactics],
+        gang="goblin_gang",
+        blurb="Throws from four cells away. Fragile up close.",
+    ),
+    HeroDef(
+        key="goblin_commander",
+        name="指挥",
+        name_en="goblinCommander",
+        max_hp=5,
+        atk=1,
+        move=1,
+        max_ap=2,
+        attack={"mode": CELL, "cells": 3, "range": 1},
+        abilities=[GoblinRally()],
+        passives=[GangTactics],
+        gang="goblin_gang",
+        blurb="Barely a fighter — but he makes the whole gang hit harder.",
+    ),
+]
+for _m in SQUAD_MEMBERS:
+    BY_KEY[_m.key] = _m
 
 # A punching-bag for --test mode: one-enemy attack (you pick the target), no
 # ability. Not in ROSTER, so it can never be drafted in a real game.
@@ -702,7 +893,20 @@ BY_KEY[DUMMY.key] = DUMMY
 
 # The champions --test puts under your control (the current batch). Update this
 # whenever you add heroes; --test fills the rest of your side with dummies.
-TEST_HEROES = ["wind_rider"]
+TEST_HEROES = ["goblin_gang", "barbarian_king"]
+
+
+def status_of(match, entity):
+    """Live badges a unit's passives want shown on the board and its card (蛮王's
+    rage). Any passive may grow a `status(match, owner)` method; returning None
+    means "nothing to show right now"."""
+    out = []
+    for p in entity.passives:
+        fn = getattr(p, "status", None)
+        s = fn(match, entity) if fn else None
+        if s:
+            out.append(s)
+    return out
 
 
 def describe(hero):

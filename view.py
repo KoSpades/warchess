@@ -20,8 +20,8 @@ def hero_image(name_en):
     return f"/image/{name_en}.png" if os.path.isfile(os.path.join(IMAGE_DIR, f"{name_en}.png")) else None
 
 
-def hero_card(h):
-    return {
+def hero_card(h, with_squad=True):
+    card = {
         "key": h.key,
         "name": h.name,
         "name_en": h.name_en,
@@ -31,10 +31,15 @@ def hero_card(h):
         "max_ap": h.max_ap,
         "attack": h.attack,
         "shots": h.attacks_per_turn,
+        "gang": h.gang,
         "blurb": h.blurb,
         "traits": HEROES.describe(h),
         "image": hero_image(h.name_en),
     }
+    if h.squad and with_squad:
+        # A squad card is drawn from its members' cards, not its own numbers.
+        card["squad"] = [hero_card(HEROES.BY_KEY[k], with_squad=False) for k in h.squad]
+    return card
 
 
 def roster_payload():
@@ -50,15 +55,18 @@ def codex():
 def unit_payload(m, e, live):
     if live or e.id not in m.snapshot:
         hp, ap, cell, acted, alive = e.hp, e.ap, list(e.cell) if e.cells else None, e.has_acted, e.alive
+        status = HEROES.status_of(m, e)
     else:
         s = m.snapshot[e.id]
         hp, ap, cell, acted, alive = s["hp"], s["ap"], s["cell"], s["acted"], s["alive"]
+        status = s.get("status", [])
     return {
         "id": e.id,
         "side": e.side,
         "key": e.key,
         "name": e.name,
         "name_en": e.name_en,
+        "gang": e.hero.gang,
         "hp": hp,
         "max_hp": e.max_hp,
         "ap": ap,
@@ -66,8 +74,10 @@ def unit_payload(m, e, live):
         "cell": cell,
         "acted": acted,
         "alive": alive,
+        "status": status,
         "atk": e.atk,
         "rng": e.rng,
+        "grid": e.grid,
         "move": e.move_allowance,
         "shots": e.hero.attacks_per_turn,
         "attack": e.hero.attack,
@@ -115,10 +125,13 @@ def state_for(m, side):
         return out
 
     if m.phase == M.SETUP:
-        drafted = set(m.drafted[side])
-        out["roster"] = [c for c in roster_payload() if c["key"] in drafted]
+        # One entry per body to place, so a squad shows up as its members and a
+        # duplicated member (two 投矛手) shows up twice.
+        cards = codex()
+        out["roster"] = [cards[k] for k in m.deploy_bodies(side)]
         out["setup"] = {
-            "force_size": m.force_size,
+            # Bodies, not cards: a squad card puts several units on the board.
+            "force_size": m.bodies_needed(side),
             "placements": m.setup_state[side]["placements"],
             "ready": m.setup_state[side]["ready"],
             "opponent_ready": m.setup_state[foe]["ready"],
@@ -151,6 +164,24 @@ def state_for(m, side):
             c["actions"] = m.action_menu(e)
             c["enemies"] = [x.id for x in m.living(foe)]
             c["ap"] = e.ap
+            # Picking up a goblin picks up the gang: the client needs every
+            # member's own moves and menu, since all of them act this turn.
+            if m.gang_of(e):
+                c["gang"] = {
+                    "key": m.gang_of(e),
+                    "members": [
+                        {
+                            "entity": g.id,
+                            "name": g.name,
+                            "name_en": g.name_en,
+                            "cell": list(g.cell) if g.cells else None,
+                            "ap": g.ap,
+                            "legal_moves": m.legal_moves(g),
+                            "actions": m.action_menu(g),
+                        }
+                        for g in m.turn_actors(e)
+                    ],
+                }
         out["commit"] = c
         return out
 

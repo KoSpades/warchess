@@ -8,6 +8,7 @@ range tweaks can't break these either.
 """
 
 import damage as DMG
+import view
 from heroes import Sweep
 from match import Match
 from topology import LEFT, RIGHT
@@ -217,6 +218,225 @@ ok("山神 doesn't cover an out-of-column ally", h - ally.hp == 5, f"took {h - a
 h = sg.hp
 hit(sg)
 ok("山神 does not cover himself", h - sg.hp == 5, f"took {h - sg.hp}")
+
+# 16 — 狼人: 野兽化 transforms permanently, once, and the grid change is live
+m = arena([("werewolf", (3, 3))], [("dummy", (7, 3))])
+wolf = unit(m, LEFT, "werewolf")
+wolf.hp = wolf.max_hp - 6                     # wounded, so the heal has room
+base = (wolf.atk, wolf.move_allowance, wolf.grid, wolf.rng, wolf.hp)
+wolf.ap = wolf.max_ap
+turn(m, wolf.id, {"destination": None, "action": {"key": "ability:beast_form"}},
+     unit(m, RIGHT, "dummy").id, {"destination": None, "action": {"key": "none"}})
+now = (wolf.atk, wolf.move_allowance, wolf.grid, wolf.rng, wolf.hp)
+ok("野兽化 applies +3 atk / +1 move / −1 grid / −2 rng / heal 4",
+   [n - b for n, b in zip(now, base)] == [3, 1, -1, -2, 4],
+   f"{base} -> {now}")
+
+menu = {a["key"]: a for a in m.action_menu(wolf)}
+ok("野兽化 is spent — no longer offered", "ability:beast_form" not in menu, str(list(menu)))
+ok("the attack menu reports the beast's smaller net",
+   menu["attack"]["targeting"]["count"] == wolf.grid
+   and menu["attack"]["targeting"]["range"] == wolf.rng,
+   str(menu["attack"]["targeting"]))
+
+wolf.set_cell((6, 3))                          # adjacent to the dummy at (7,3)
+tgt = unit(m, RIGHT, "dummy")
+tgt.max_hp = tgt.hp = 99                       # survive the beast's swing
+err = m.select_hero(LEFT, wolf.id) or m.commit(
+    LEFT, {"destination": None,
+           "action": {"key": "attack", "shots": [[[7, 3], [7, 2], [7, 4]]]}})
+ok("marking more grids than the beast has is rejected", err is not None, str(err))
+
+before = tgt.hp
+turn(m, wolf.id, {"destination": None, "action": {"key": "attack", "shots": [[[7, 3]]]}},
+     tgt.id, {"destination": None, "action": {"key": "none"}})
+ok("the beast's attack lands for its boosted atk", before - tgt.hp == wolf.atk,
+   f"took {before - tgt.hp}, atk {wolf.atk}")
+
+# 17 — 蛮王: 背水 catches the lethal blow once, then rage runs out on turn three
+m = arena([("barbarian_king", (3, 3))], [("dummy", (7, 3))])
+king, foe = unit(m, LEFT, "barbarian_king"), unit(m, RIGHT, "dummy")
+base_atk = king.atk
+kill = lambda: DMG.apply_batch(m, [DMG.DamageEvent(
+    source=foe, target=king, amount=99, category=DMG.NORMAL_ATTACK)])
+
+kill()
+ok("背水 turns a lethal hit into 1 HP and rage",
+   king.alive and king.hp == 1 and king.atk == base_atk + 3,
+   f"hp {king.hp}, atk {king.atk} (was {base_atk})")
+
+kill()
+ok("raging 蛮王 takes nothing from any source",
+   king.alive and king.hp == 1, f"hp {king.hp}")
+m.board.add_burning((3, 3), RIGHT)   # tile damage is a different category — also nothing
+DMG.apply_batch(m, [DMG.DamageEvent(source=None, target=king, amount=99,
+                                    category=DMG.TILE, element=DMG.FIRE)])
+ok("rage blocks tile damage too", king.alive and king.hp == 1, f"hp {king.hp}")
+
+# Two turns of action, then the third turn start kills him before he can act.
+hold = {"destination": None, "action": {"key": "none"}}
+turn(m, king.id, hold, foe.id, hold)
+ok("first raging turn: still standing and able to act", king.alive)
+turn(m, king.id, hold, foe.id, hold)
+ok("second raging turn: still standing", king.alive)
+m.select_hero(LEFT, king.id)
+assert king.alive, "he should not burn out until the turn actually starts"
+m.commit(LEFT, hold)
+ok("third raging turn start burns him out", not king.alive and m.commits[LEFT]["kind"] == "dead",
+   str(m.commits[LEFT]))
+
+# 18 — 背水 fires only once: revive him by hand and the next lethal hit sticks
+m = arena([("barbarian_king", (3, 3))], [("dummy", (7, 3))])
+king, foe = unit(m, LEFT, "barbarian_king"), unit(m, RIGHT, "dummy")
+DMG.apply_batch(m, [DMG.DamageEvent(source=foe, target=king, amount=99,
+                                    category=DMG.NORMAL_ATTACK)])
+king.vars["rage"] = False            # drop the immunity, keep 背水 spent
+DMG.apply_batch(m, [DMG.DamageEvent(source=foe, target=king, amount=99,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("背水 is once per match — the second lethal blow kills", not king.alive)
+
+# 19 — the rage badge reaches both clients, but its countdown can't leak a pick
+m = arena([("barbarian_king", (3, 3))], [("dummy", (7, 3))])
+king, foe = unit(m, LEFT, "barbarian_king"), unit(m, RIGHT, "dummy")
+king.hp = 1                                   # the dummy's next swing is lethal
+foe.set_cell((4, 3))
+badge = lambda side: next(
+    (u["status"] for u in view.state_for(m, side)["units"] if u["id"] == king.id), None)
+
+ok("no status badge before 背水 fires", badge(LEFT) == [])
+turn(m, king.id, {"destination": None, "action": {"key": "none"}},
+     foe.id, {"destination": None, "action": {"key": "attack", "target": king.id}})
+ok("both sides see the rage badge once the exchange resolves",
+   badge(LEFT) and badge(RIGHT) and badge(LEFT)[0]["key"] == "rage", str(badge(RIGHT)))
+
+seen_before = badge(RIGHT)[0]["text"]
+m.select_hero(LEFT, king.id)                  # his turn starts: the counter ticks
+m.commit(LEFT, {"destination": None, "action": {"key": "none"}})
+ok("the owner sees the countdown tick", badge(LEFT)[0]["text"] != seen_before, badge(LEFT)[0]["text"])
+ok("the opponent's view stays on the snapshot mid-commit",
+   badge(RIGHT)[0]["text"] == seen_before, badge(RIGHT)[0]["text"])
+
+# 20 — 哥布林团伙: one card, three bodies, and they must land connected
+def gang(cells=None, right=("dummy", (8, 3))):
+    """A gang vs one very fat dummy parked in javelin range."""
+    m = Match()
+    m.assign_draft(["goblin_gang"], [right[0]])
+    for k, c in (cells or [("goblin_javelin", (2, 2)), ("goblin_javelin", (2, 3)),
+                           ("goblin_commander", (2, 4))]):
+        assert m.place(LEFT, k, c) is None, (k, c)
+    assert m.place(RIGHT, right[0], right[1]) is None
+    assert m.lock_force(LEFT) is None
+    assert m.lock_force(RIGHT) is None
+    j1, j2, cm = (m.entity(i) for i in (1, 2, 3))
+    d = m.living(RIGHT)[0]
+    d.max_hp = d.hp = 200          # a wall, so nothing dies mid-test
+    d.set_cell((5, 3))
+    return m, j1, j2, cm, d
+
+m = Match()
+m.assign_draft(["goblin_gang"], ["dummy"])
+ok("one gang card asks for three bodies", m.bodies_needed(LEFT) == 3, str(m.deploy_bodies(LEFT)))
+m.place(LEFT, "goblin_javelin", (2, 2)); m.place(LEFT, "goblin_javelin", (2, 3))
+ok("a third copy of a two-copy body is refused",
+   m.place(LEFT, "goblin_javelin", (2, 4)) is not None)
+m.place(LEFT, "goblin_commander", (1, 5))       # off on its own
+err = m.lock_force(LEFT)
+ok("a scattered gang cannot lock in", err is not None, err)
+m.unplace(LEFT, (1, 5)); m.place(LEFT, "goblin_commander", (2, 4))
+ok("a connected gang locks in fine", m.lock_force(LEFT) is None)
+
+# 21 — the whole gang acts on one turn, in the order you give
+m, j1, j2, cm, d = gang()
+cm.ap = cm.max_ap
+before = d.hp
+turn(m, j1.id, {"orders": [
+        {"entity": cm.id, "destination": None, "action": {"key": "ability:goblin_rally"}},
+        {"entity": j1.id, "destination": None, "action": {"key": "attack", "shots": [[[5, 3]]]}},
+        {"entity": j2.id, "destination": None, "action": {"key": "attack", "shots": [[[5, 3]]]}}]},
+     d.id, {"destination": None, "action": {"key": "none"}})
+rallied = before - d.hp
+ok("both javelins throw in one gang turn, rallied", rallied == 2 * (j1.atk + 2),
+   f"dealt {rallied}, javelin atk {j1.atk}")
+ok("the gang costs exactly one turn", m.round == 2, f"round {m.round}, exchange {m.exchange}")
+ok("鼓舞 expires with the turn that granted it",
+   all(g.atk == g.hero.atk for g in (j1, j2, cm)), str([g.atk for g in (j1, j2, cm)]))
+ok("only 指挥 banks AP", cm.ap == 1 and j1.max_ap == 0, f"cmdr {cm.ap}/{cm.max_ap}, javelin max {j1.max_ap}")
+
+# 22 — order matters: rally after the throws helps nobody
+m, j1, j2, cm, d = gang()
+cm.ap = cm.max_ap
+before = d.hp
+turn(m, j1.id, {"orders": [
+        {"entity": j1.id, "destination": None, "action": {"key": "attack", "shots": [[[5, 3]]]}},
+        {"entity": j2.id, "destination": None, "action": {"key": "attack", "shots": [[[5, 3]]]}},
+        {"entity": cm.id, "destination": None, "action": {"key": "ability:goblin_rally"}}]},
+     d.id, {"destination": None, "action": {"key": "none"}})
+ok("rallying last buffs nobody", before - d.hp == 2 * j1.atk, f"dealt {before - d.hp}")
+
+# 23 — a goblin killed by the enemy's simultaneous action never gets its throw off
+m, j1, j2, cm, d = gang()
+j2.hp = 1
+before = d.hp
+turn(m, j1.id, {"orders": [
+        {"entity": j1.id, "destination": None, "action": {"key": "attack", "shots": [[[5, 3]]]}},
+        {"entity": j2.id, "destination": None, "action": {"key": "attack", "shots": [[[5, 3]]]}},
+        {"entity": cm.id, "destination": None, "action": {"key": "none"}}]},
+     d.id, {"destination": None, "action": {"key": "attack", "target": j2.id}})
+ok("a goblin killed at index 0 loses its later action",
+   not j2.alive and before - d.hp == j1.atk, f"dealt {before - d.hp}, one javelin {j1.atk}")
+
+# 24 — orders must cover every living goblin, exactly once
+m, j1, j2, cm, d = gang()
+m.select_hero(LEFT, j1.id)
+one = {"entity": j1.id, "destination": None, "action": {"key": "none"}}
+ok("a partial order set is refused", m.commit(LEFT, {"orders": [one]}) is not None)
+ok("ordering the same goblin twice is refused", m.commit(LEFT, {"orders": [one, one, one]}) is not None)
+
+# 25 — fire at turn start: one goblin drops, its order is dropped with it
+m, j1, j2, cm, d = gang()
+j1.hp = 1
+m.board.add_burning(j1.cell, RIGHT)
+before = d.hp
+turn(m, j2.id, {"orders": [
+        {"entity": j1.id, "destination": None, "action": {"key": "attack", "shots": [[[5, 3]]]}},
+        {"entity": j2.id, "destination": None, "action": {"key": "attack", "shots": [[[5, 3]]]}},
+        {"entity": cm.id, "destination": None, "action": {"key": "none"}}]},
+     d.id, {"destination": None, "action": {"key": "none"}})
+ok("the burned goblin's order is dropped, the gang still acts",
+   not j1.alive and before - d.hp == j2.atk, f"dealt {before - d.hp}")
+
+# 26 — two goblins reaching for one square collide, like any two units would
+m, j1, j2, cm, d = gang([("goblin_javelin", (2, 2)), ("goblin_javelin", (2, 3)),
+                         ("goblin_commander", (3, 3))])
+turn(m, j1.id, {"orders": [
+        {"entity": j1.id, "destination": [3, 2], "action": {"key": "none"}},
+        {"entity": cm.id, "destination": [3, 2], "action": {"key": "none"}},
+        {"entity": j2.id, "destination": [1, 3], "action": {"key": "none"}}]},
+     d.id, {"destination": None, "action": {"key": "none"}})
+ok("two goblins after the same square both bounce",
+   j1.cell == (2, 2) and cm.cell == (3, 3), f"{j1.cell} {cm.cell}")
+ok("the uncontested goblin still moves", j2.cell == (1, 3), str(j2.cell))
+
+# 27 — the client gets what it needs: every goblin's own moves and menu, and a
+# reveal that names the gang rather than one goblin
+m, j1, j2, cm, d = gang()
+cm.ap = cm.max_ap
+m.select_hero(LEFT, j1.id)
+gb = view.state_for(m, LEFT)["commit"].get("gang")
+ok("the commit payload carries the whole gang",
+   gb and len(gb["members"]) == 3 and all(x["legal_moves"] and x["actions"] for x in gb["members"]),
+   str(gb and [x["name"] for x in gb["members"]]))
+ok("only 指挥 is offered 鼓舞",
+   [len([a for a in x["actions"] if a["key"].startswith("ability:")]) for x in gb["members"]] == [0, 0, 1])
+turn(m, j1.id, {"orders": [
+        {"entity": cm.id, "destination": None, "action": {"key": "ability:goblin_rally"}},
+        {"entity": j1.id, "destination": None, "action": {"key": "attack", "shots": [[[5, 3]]]}},
+        {"entity": j2.id, "destination": None, "action": {"key": "attack", "shots": [[[5, 3]]]}}]},
+     d.id, {"destination": None, "action": {"key": "none"}})
+rv = m.last_reveal[LEFT]
+ok("the pause screen shows the gang and its acting order",
+   rv["key"] == "goblin_gang" and rv["crew"] == ["指挥", "投矛手", "投矛手"] and len(rv["hits"]) == 2,
+   f"{rv['hero']} {rv.get('crew')} hits={rv['hits']}")
 
 print("\nlog tail:")
 for line in m.log[-5:]:

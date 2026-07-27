@@ -11,6 +11,9 @@ from dataclasses import dataclass, field
 PERMANENT = "permanent"
 UNTIL_ROUND_END = "until_round_end"
 UNTIL_OWNER_NEXT_TURN = "until_owner_next_turn"
+# Expires when the turn it was granted in ends — 哥布林鼓舞's "本回合". For a gang
+# turn that means the whole gang's turn, since they share one.
+UNTIL_TURN_END = "until_turn_end"
 
 
 @dataclass
@@ -80,6 +83,11 @@ class Entity:
         # attacks, which have no finite range.
         if name == "rng":
             return self.hero.attack.get("range")
+        if name == "grid":
+            # How many cells a cell-locked attack may mark. Same story as rng:
+            # it lives in the `attack` dict but must be modifiable (狼人 trades
+            # grids for raw attack when it turns). None for other attack modes.
+            return self.hero.attack.get("cells")
         return getattr(self.hero, name, 0)
 
     def stat(self, name):
@@ -119,6 +127,11 @@ class Entity:
     @property
     def rng(self):
         return self.stat("rng")
+
+    @property
+    def grid(self):
+        n = self.stat("grid")
+        return None if n is None else max(0, n)
 
     @property
     def move_allowance(self):
