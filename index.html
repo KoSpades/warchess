@@ -385,12 +385,13 @@ function syncDraft(){
 }
 function blankDraft(entity){
   return {entity, destination:null, held:false, tentative:null, actionKey:null, shots:[], shotIndex:0,
-          target:null, direction:null, cell:null, amount:null, weapon:null, gangOrders:[]};
+          target:null, direction:null, cell:null, amount:null, weapon:null, choices:{}, gangOrders:[]};
 }
 function resetLeg(){
   // Clear one unit's half-built order, keeping the gang's sealed-so-far list.
   Object.assign(draft, {destination:null, held:false, tentative:null, actionKey:null, shots:[],
-                        shotIndex:0, target:null, direction:null, cell:null, amount:null, weapon:null});
+                        shotIndex:0, target:null, direction:null, cell:null, amount:null, weapon:null,
+                        choices:{}});
 }
 
 /* ---------------- goblin gang ---------------- */
@@ -416,6 +417,16 @@ function curActions(){
   }
   return (S.commit && S.commit.actions) || [];
 }
+// Free picks that ride along with this unit's turn (杂货店爷爷's handout).
+function curChoices(){
+  if (isGang()){
+    const g = gangMember(draft && draft.entity);
+    return (g && g.choices) || [];
+  }
+  return (S.commit && S.commit.choices) || [];
+}
+function choicesReady(){ return curChoices().every(ch => (draft.choices||{})[ch.key] != null); }
+function pickChoice(key, id){ draft.choices = draft.choices || {}; draft.choices[key] = id; err=""; render(); }
 
 function unitAt(cell){ return (S.units||[]).find(u => u.alive && u.cell && eq(u.cell, cell)); }
 function myUnits(){ return (S.units||[]).filter(u => u.side === SIDE); }
@@ -803,6 +814,7 @@ function finishMove(){
 function sealFromKeyboard(){
   const act = currentAction();
   if (!act) return;
+  if (!choicesReady()){ err = "Make the free pick first."; return render(); }
   // Normal attack: any marked grids seal it; nothing marked = hold.
   if (act.key==='attack' && act.targeting.kind==='cells'){
     // Solo mode fires a random attack; otherwise no grids marked = hold.
@@ -859,6 +871,7 @@ function chooseWeapon(key){
 
 function orderReady(){
   if (!draft || (!draft.destination && !draft.held)) return false;
+  if (!choicesReady()) return false;
   const act = currentAction(); if (!act) return false;
   const t = act.targeting;
   if (t.kind==='none') return true;
@@ -882,7 +895,8 @@ function sealOrder(){
   if (t.kind==='any_cell') action.cell = draft.cell;
   if (t.kind==='weapon'){ action.weapon = draft.weapon; const w=currentWeapon(); if (w && w.mode==='cells') action.shots = draft.shots; }
   if (isGang()){
-    draft.gangOrders.push({entity: draft.entity, destination: draft.destination, action});
+    draft.gangOrders.push({entity: draft.entity, destination: draft.destination, action,
+                           choices: Object.assign({}, draft.choices)});
     draft.entity = null; resetLeg(); err="";
     if (gangPending().length) return render();     // on to the next goblin
     pendingMoves = gangOrders().filter(o=>o.destination).map(o=>({id:o.entity, to:o.destination}));
@@ -891,7 +905,7 @@ function sealOrder(){
   // Remember the intended move so the ghost persists after the slip is sealed,
   // until the exchange actually resolves.
   pendingMoves = draft.destination ? [{id: draft.entity, to: draft.destination}] : [];
-  cmd({cmd:'commit', payload:{destination: draft.destination, action}});
+  cmd({cmd:'commit', payload:{destination: draft.destination, action, choices: draft.choices||{}}});
 }
 
 function pickGoblin(id){
@@ -1106,6 +1120,15 @@ function renderCommit(){
             ${draft.held?'Holding position':'Moving to '+cn(draft.destination)} <small>Click to change</small></button>`;
   }
   if (draft.destination || draft.held){
+    for (const ch of curChoices()){
+      const got = (draft.choices||{})[ch.key];
+      h += `<div class="step">Free · ${ch.name}</div><p class="note">${ch.text}</p>`;
+      for (const id of ch.options){
+        const a = (S.units||[]).find(x=>x.id===id) || {};
+        h += `<button class="btn ${got===id?'on':''}" onclick="pickChoice('${ch.key}',${id})">
+               ${a.name||('#'+id)} <small>${a.cell?cn(a.cell):''} · AP ${a.ap}/${a.max_ap}</small></button>`;
+      }
+    }
     h += `<div class="step">2 · Action</div>`;
     for (const a of c.actions){
       const dis = a.affordable===false ? 'disabled' : '';

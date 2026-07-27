@@ -438,6 +438,42 @@ ok("the pause screen shows the gang and its acting order",
    rv["key"] == "goblin_gang" and rv["crew"] == ["指挥", "投矛手", "投矛手"] and len(rv["hits"]) == 2,
    f"{rv['hero']} {rv.get('crew')} hits={rv['hits']}")
 
+# 28 — 杂货店爷爷: hands an ally 1 AP when his turn starts, free, and banks none
+m = arena([("shopkeeper", (3, 1)), ("tide_goddess", (3, 2)), ("gatekeeper", (3, 3))],
+          [("dummy", (7, 3))])
+gramps, tide, gate = (unit(m, LEFT, k) for k in ("shopkeeper", "tide_goddess", "gatekeeper"))
+d = unit(m, RIGHT, "dummy")
+m.select_hero(LEFT, gramps.id)
+ch = view.state_for(m, LEFT)["commit"]["choices"]
+ok("the handout is offered as a free pick", len(ch) == 1 and ch[0]["key"] == "handout", str(ch))
+ok("only allies who can bank AP are offered",
+   ch[0]["options"] == [tide.id], f"offered {ch[0]['options']}, gatekeeper max_ap {gate.max_ap}")
+ok("sealing without the pick is refused",
+   m.commit(LEFT, {"destination": None, "action": {"key": "none"}}) is not None)
+ok("handing it to an enemy is refused",
+   m.commit(LEFT, {"destination": None, "action": {"key": "none"},
+                   "choices": {"handout": d.id}}) is not None)
+
+d.set_cell((5, 1))
+before_ap, before_hp = tide.ap, d.hp
+turn(m, gramps.id, {"destination": [4, 1], "action": {"key": "attack", "shots": [[[5, 1]]]},
+                    "choices": {"handout": tide.id}},
+     d.id, {"destination": None, "action": {"key": "none"}})
+ok("the ally gains 1 AP", tide.ap - before_ap == 1, f"{before_ap} -> {tide.ap}")
+ok("the handout costs him nothing — he still moved and hit",
+   gramps.cell == (4, 1) and before_hp - d.hp == gramps.atk,
+   f"at {gramps.cell}, dealt {before_hp - d.hp}")
+ok("he never charges his own bar", gramps.ap == 0 and gramps.max_ap == 0,
+   f"{gramps.ap}/{gramps.max_ap}")
+
+# ...and when nobody can use it, the pick disappears rather than blocking the turn
+m = arena([("shopkeeper", (3, 1)), ("gatekeeper", (3, 3))], [("dummy", (7, 3))])
+gramps = unit(m, LEFT, "shopkeeper")
+m.select_hero(LEFT, gramps.id)
+ok("no eligible ally, no prompt", view.state_for(m, LEFT)["commit"]["choices"] == [])
+ok("and the turn seals normally",
+   m.commit(LEFT, {"destination": None, "action": {"key": "none"}}) is None)
+
 print("\nlog tail:")
 for line in m.log[-5:]:
     print("   ", line["text"])

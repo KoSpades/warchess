@@ -457,6 +457,43 @@ class LastStand:
         match.sweep_deaths()
 
 
+class Almsgiving:
+    """杂货店爷爷 never charges his own bar (max AP 0) but hands a point out to
+    somebody else every time his turn comes round. The pick is a `turn_choice`:
+    it rides along with his order instead of costing his action."""
+
+    describe = ("Gains no AP himself. When his turn begins, one ally you choose gains "
+                "1 AP — free, and he still moves and attacks as normal.")
+    CHOICE = "handout"
+
+    def turn_choice(self, match, owner):
+        opts = [
+            e.id for e in match.living(owner.side)
+            if e is not owner and e.max_ap > 0 and e.ap < e.max_ap
+        ]
+        return {
+            "key": self.CHOICE,
+            "name": "接济 Handout",
+            "text": "Give one ally 1 AP. Free — it does not use his action.",
+            "kind": "ally",
+            "options": opts,
+        }
+
+    def apply_choice(self, match, owner, key, target_id):
+        if key != self.CHOICE:
+            return
+        tgt = match.entity(target_id)
+        if tgt is None or not tgt.alive or tgt.side != owner.side:
+            return
+        before = tgt.ap
+        tgt.gain_ap(1)
+        if tgt.ap != before:
+            match.log_line(
+                f"{match.label(owner)} slips {match.label(tgt)} a little something — "
+                f"{tgt.ap}/{tgt.max_ap} AP."
+            )
+
+
 class GangTactics:
     """Display-only: the ordering rule itself lives in the turn loop (a gang
     commits one order per living member and they resolve in the chosen order)."""
@@ -822,6 +859,18 @@ ROSTER = [
         attack={"mode": CELL, "cells": 3, "range": 2},
         passives=[LastStand],
         blurb="Frail, but the killing blow only enrages him — two untouchable turns, then dust.",
+    ),
+    HeroDef(
+        key="shopkeeper",
+        name="杂货店爷爷",
+        name_en="shopkeeper",
+        max_hp=19,
+        atk=3,
+        move=1,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 3, "range": 2},
+        passives=[Almsgiving],
+        blurb="Keeps nothing for himself — every turn, an ally leaves with an extra point.",
     ),
     HeroDef(
         key="goblin_gang",

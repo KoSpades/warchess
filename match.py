@@ -631,10 +631,43 @@ class Match:
         if err:
             return err
 
+        self.apply_choices(e, order)
         self.commits[side] = dict(order, kind="action")
         self.bump()
         self.maybe_resolve()
         return None
+
+    def turn_choices(self, e):
+        """Free picks a unit's passives make when its turn begins (杂货店爷爷's
+        handout). They are not actions — they ride along with the order, so a
+        hero still moves and attacks in the same turn. A choice with no legal
+        options simply doesn't appear."""
+        out = []
+        for p in e.passives:
+            fn = getattr(p, "turn_choice", None)
+            ch = fn(self, e) if fn else None
+            if ch and ch.get("options"):
+                out.append(ch)
+        return out
+
+    def validate_choices(self, e, payload):
+        picks = payload.get("choices") or {}
+        for ch in self.turn_choices(e):
+            if picks.get(ch["key"]) not in ch["options"]:
+                return f"{ch['name']}: pick one of your allies."
+        return None
+
+    def apply_choices(self, e, order):
+        """Run at seal time — the moment the turn actually begins."""
+        picks = order.get("choices") or {}
+        for ch in self.turn_choices(e):
+            target = picks.get(ch["key"])
+            if target not in ch["options"]:
+                continue
+            for p in e.passives:
+                fn = getattr(p, "apply_choice", None)
+                if fn:
+                    fn(self, e, ch["key"], target)
 
     def _build_order(self, e, payload):
         """Validate one unit's move + action. Returns (order, error)."""
@@ -649,10 +682,15 @@ class Match:
         # Solo mode aims normal attacks for you — random grids within range.
         if self.mode == "self" and key == "attack" and e.hero.attack["mode"] == HEROES.CELL:
             action = dict(action, shots=self.random_shots(e, dest))
-        err = self.validate_action(e, dest, action)
+        err = self.validate_action(e, dest, action) or self.validate_choices(e, payload)
         if err:
             return None, err
-        return {"entity": e.id, "destination": list(dest), "action": action}, None
+        return {
+            "entity": e.id,
+            "destination": list(dest),
+            "action": action,
+            "choices": payload.get("choices") or {},
+        }, None
 
     def _commit_gang(self, side, picked, actors, payload):
         """A gang seals one order per living goblin. The list order IS the acting
@@ -683,6 +721,8 @@ class Match:
         if missing:
             return f"Still waiting on orders for {', '.join(a.name for a in missing)}."
 
+        for o in orders:
+            self.apply_choices(self.entity(o["entity"]), o)
         self.commits[side] = {
             "kind": "gang",
             "gang": self.gang_of(picked),

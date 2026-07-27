@@ -164,6 +164,7 @@ def state_for(m, side):
             c["actions"] = m.action_menu(e)
             c["enemies"] = [x.id for x in m.living(foe)]
             c["ap"] = e.ap
+            c["choices"] = m.turn_choices(e)
             # Picking up a goblin picks up the gang: the client needs every
             # member's own moves and menu, since all of them act this turn.
             if m.gang_of(e):
@@ -178,6 +179,7 @@ def state_for(m, side):
                             "ap": g.ap,
                             "legal_moves": m.legal_moves(g),
                             "actions": m.action_menu(g),
+                            "choices": m.turn_choices(g),
                         }
                         for g in m.turn_actors(e)
                     ],
