@@ -953,7 +953,7 @@ BY_KEY[DUMMY.key] = DUMMY
 
 # The champions --test puts under your control (the current batch). Update this
 # whenever you add heroes; --test fills the rest of your side with dummies.
-TEST_HEROES = ["werewolf", "barbarian_king"]
+TEST_HEROES = ["blood_mage", "gunslinger"]
 
 
 def status_of(match, entity):
