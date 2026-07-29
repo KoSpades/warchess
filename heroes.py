@@ -281,6 +281,17 @@ class DivineAegis:
                 owner.vars["aegis_spent"] = True
                 match.log_line(f"{match.label(owner)} raises a holy shield — immune for the rest of round {match.round}.")
 
+    def status(self, match, owner):
+        if not owner.vars.get("aegis_spent"):
+            return None
+        return {
+            "key": "aegis",
+            "badge": "盾",
+            "label": "神圣壁垒 SHIELD",
+            "text": f"Immune to attack and ability damage for the rest of round {match.round}. "
+                    "Tile damage still lands.",
+        }
+
     def on_round_start(self, match, owner, ctx):
         owner.vars["aegis_spent"] = False
 
@@ -942,7 +953,7 @@ BY_KEY[DUMMY.key] = DUMMY
 
 # The champions --test puts under your control (the current batch). Update this
 # whenever you add heroes; --test fills the rest of your side with dummies.
-TEST_HEROES = ["goblin_gang", "barbarian_king"]
+TEST_HEROES = ["werewolf", "barbarian_king"]
 
 
 def status_of(match, entity):

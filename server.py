@@ -81,9 +81,13 @@ class Handler(BaseHTTPRequestHandler):
             with open(os.path.join(STATIC, "index.html"), "rb") as fh:
                 return self._send(200, fh.read(), "text/html; charset=utf-8")
         if url.path.startswith("/image/"):
-            fname = os.path.basename(url.path)  # basename blocks path traversal
-            fpath = os.path.join(STATIC, "image", fname)
-            if fname.lower().endswith(".png") and os.path.isfile(fpath):
+            # Only the known art folders are reachable, and basename blocks any
+            # path traversal inside them.
+            parts = url.path.strip("/").split("/")
+            sub = parts[1] if len(parts) > 2 else ""
+            fname = os.path.basename(url.path)
+            fpath = os.path.join(view.IMAGE_ROOT, sub, fname)
+            if sub in view.IMAGE_SUBDIRS and fname.lower().endswith(".png") and os.path.isfile(fpath):
                 with open(fpath, "rb") as fh:
                     # Hero art never changes — let the browser cache it hard so it's
                     # fetched once, not re-downloaded on every draft / reload.

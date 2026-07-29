@@ -6,18 +6,38 @@ snapshot taken at the start of the exchange, so a turn-start fire tick cannot
 betray which hero the opponent picked up.
 """
 
+import functools
 import os
 
 import heroes as HEROES
 import match as M
 from topology import LEFT, RIGHT, other_side
 
-IMAGE_DIR = os.path.join(os.path.dirname(__file__), "image")
+# Two kinds of hero art, one folder each: full portraits for the draft cards and
+# the pause screen, small sprites for the board tokens. This is the single source
+# of truth for where they live — server.py serves exactly these subfolders.
+IMAGE_ROOT = os.path.join(os.path.dirname(__file__), "image")
+ART_SUBDIR = "full_pic"
+SPRITE_SUBDIR = "sprite"
+IMAGE_SUBDIRS = (ART_SUBDIR, SPRITE_SUBDIR)
+
+
+@functools.lru_cache(maxsize=None)
+def _art_url(subdir, name_en):
+    """URL for image/<subdir>/<name_en>.png (camelCase), or None if absent. Cached:
+    art never changes during a session and unit payloads are built on every poll."""
+    path = os.path.join(IMAGE_ROOT, subdir, f"{name_en}.png")
+    return f"/image/{subdir}/{name_en}.png" if os.path.isfile(path) else None
 
 
 def hero_image(name_en):
-    """URL for a hero's art (image/<name_en>.png, camelCase), or None if absent."""
-    return f"/image/{name_en}.png" if os.path.isfile(os.path.join(IMAGE_DIR, f"{name_en}.png")) else None
+    """Full portrait — draft cards, deployment roster, pause screen."""
+    return _art_url(ART_SUBDIR, name_en)
+
+
+def hero_sprite(name_en):
+    """Board token art. Falls back to None, and the token renders as before."""
+    return _art_url(SPRITE_SUBDIR, name_en)
 
 
 def hero_card(h, with_squad=True):
@@ -35,6 +55,7 @@ def hero_card(h, with_squad=True):
         "blurb": h.blurb,
         "traits": HEROES.describe(h),
         "image": hero_image(h.name_en),
+        "sprite": hero_sprite(h.name_en),
     }
     if h.squad and with_squad:
         # A squad card is drawn from its members' cards, not its own numbers.
@@ -52,6 +73,49 @@ def codex():
     return {k: hero_card(h) for k, h in HEROES.BY_KEY.items()}
 
 
+def order_slip(m, o):
+    """A sealed order, in words. Sent back to its own side so the slip can keep
+    showing what you committed while the exchange waits on the other seat — and
+    so it survives a page refresh, since the client's draft is gone by then."""
+    e = m.entity(o["entity"])
+    action = o.get("action") or {}
+    key = action.get("key", "none")
+    if key == "none":
+        name = "Hold"
+    elif key == "attack":
+        name = "Normal attack"
+    else:
+        ab = next((a for a in e.abilities if a.key == key.split(":", 1)[1]), None)
+        name = ab.name if ab else key
+
+    target = "—"
+    shots = [sh for sh in (action.get("shots") or []) if sh]
+    if shots:
+        target = "  /  ".join(" ".join(m.cell_name(tuple(c)) for c in sh) for sh in shots)
+    if action.get("target") is not None:
+        t = m.entity(action["target"])
+        target = t.name if t else "—"
+    if action.get("cell"):
+        target = m.cell_name(tuple(action["cell"]))
+    if action.get("direction"):
+        target = action["direction"]
+    if action.get("amount") is not None:
+        target = str(action["amount"])
+    if action.get("weapon"):
+        w = HEROES.WEAPONS_BY_KEY.get(action["weapon"])
+        if w:
+            name = f"{name} · {w['name']}"
+
+    dest = tuple(o["destination"]) if o.get("destination") else None
+    return {
+        "hero": e.name,
+        "from": m.cell_name(e.cell) if e.cells else "—",
+        "move": "hold" if (dest is None or (e.cells and dest == e.cell)) else m.cell_name(dest),
+        "action": name,
+        "target": target,
+    }
+
+
 def unit_payload(m, e, live):
     if live or e.id not in m.snapshot:
         hp, ap, cell, acted, alive = e.hp, e.ap, list(e.cell) if e.cells else None, e.has_acted, e.alive
@@ -67,6 +131,7 @@ def unit_payload(m, e, live):
         "name": e.name,
         "name_en": e.name_en,
         "gang": e.hero.gang,
+        "sprite": hero_sprite(e.name_en),
         "hp": hp,
         "max_hp": e.max_hp,
         "ap": ap,
@@ -157,6 +222,9 @@ def state_for(m, side):
              "opponent_sealed": m.commits[foe] is not None,
              "selected": m.selected[side],
              "unacted": [e.id for e in m.unacted(side)]}
+        if m.commits[side] is not None:
+            c["kind"] = m.commits[side]["kind"]
+            c["orders"] = [order_slip(m, o) for o in m.orders_of(m.commits[side])]
         eid = m.selected[side]
         if eid is not None and m.commits[side] is None:
             e = m.entity(eid)

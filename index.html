@@ -6,8 +6,8 @@
 <title>Warchess — plotting table</title>
 <style>
 :root{
-  --ink:#131A21; --panel:#1A232C; --panel-2:#202B35; --chart:#1E2A33;
-  --rule:#2E3D49; --rule-soft:#26333d;
+  --ink:#131A21; --panel:#1A232C; --panel-2:#202B35; --chart:#303E48;
+  --rule:#2E3D49; --rule-soft:#2F3D48;
   --verdigris:#57A08E; --brass:#C99A3E; --oxide:#D8564A; --ember:#D2622F;
   --text:#DCE4E8; --dim:#7C8B95; --dimmer:#4E5F6B;
   --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
@@ -15,7 +15,7 @@
 }
 *{box-sizing:border-box}
 html,body{margin:0;padding:0;background:var(--ink);color:var(--text);font-family:var(--sans)}
-body{min-height:100vh;font-size:14px;line-height:1.5}
+body{height:100vh;overflow:hidden;font-size:14px;line-height:1.5}
 h1,h2,h3{margin:0;font-weight:600}
 button{font-family:inherit;font-size:inherit;color:inherit;background:none;border:none;cursor:pointer}
 button:disabled{cursor:not-allowed;opacity:.35}
@@ -34,20 +34,29 @@ header{display:flex;align-items:baseline;gap:18px;flex-wrap:wrap;
 .clock{margin-left:auto;font-family:var(--mono);font-size:11px;letter-spacing:.14em;color:var(--dim)}
 .clock b{color:var(--text);font-weight:600}
 
-main{display:grid;grid-template-columns:240px auto minmax(320px,1fr);gap:16px;padding:14px 16px;align-items:start}
-@media(max-width:1080px){main{grid-template-columns:1fr}
-  #rows,.coords{width:100%}}
+/* The page itself never scrolls: main owns the leftover viewport height and
+   each panel scrolls inside itself. --chrome is the header + linkline + padding
+   that the board has to share the window with. */
+:root{--lpanel:240px; --rpanel:256px; --chrome:118px}
+main{display:grid;grid-template-columns:var(--lpanel) auto minmax(var(--rpanel),1fr);
+  gap:8px;padding:10px;align-items:start;height:calc(100vh - var(--chrome));overflow:hidden}
+.panel{display:flex;flex-direction:column;max-height:100%;min-height:0}
+@media(max-width:1080px){main{grid-template-columns:1fr;height:auto;overflow:visible}
+  #rows{width:100%}}
 
 .panel{background:var(--panel);border:1px solid var(--rule);border-radius:3px}
 .panel h3{padding:11px 14px;border-bottom:1px solid var(--rule);font-family:var(--mono);
   font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--dim);font-weight:500}
-.panel .body{padding:14px}
+.panel .body{padding:14px;overflow-y:auto;min-height:0}
 
 /* ---------- board ---------- */
-.boardwrap{display:flex;flex-direction:column;gap:10px;align-items:flex-start}
-#rows{width:min(1200px,60vw);display:flex;flex-direction:column;gap:4px}
-.coords{display:grid;grid-template-columns:repeat(9,1fr);gap:4px;width:min(1200px,60vw);flex:0 0 auto}
-.coords span{font-family:var(--mono);font-size:10px;color:var(--dimmer);text-align:center}
+.boardwrap{display:flex;flex-direction:column;align-items:flex-start}
+/* Capped on both axes — the cells are 5:6, so the whole grid is 3:2 (w:h) and
+   a height budget converts straight into a width cap. It can never outgrow its
+   column either, so neither scrollbar can ever appear. */
+#rows{display:flex;flex-direction:column;gap:4px;
+  width:min(1400px, calc((100vh - var(--chrome) - 20px) * 1.5),
+            calc(100vw - var(--lpanel) - var(--rpanel) - 44px))}
 .boardrow{width:100%}
 .board{display:grid;grid-template-columns:repeat(9,1fr);gap:4px;width:100%;min-width:0}
 
@@ -56,21 +65,21 @@ main{display:grid;grid-template-columns:240px auto minmax(320px,1fr);gap:16px;pa
 .cell .tick{position:absolute;inset:0;pointer-events:none;
   background:linear-gradient(to right,var(--rule) 0 1px,transparent 1px) 50% 0/100% 5px no-repeat,
              linear-gradient(to bottom,var(--rule) 0 1px,transparent 1px) 0 50%/5px 100% no-repeat;opacity:.5}
-.cell.regL{background:#18261F;border-color:#294036}
-.cell.regR{background:#282218;border-color:#40382a}
+.cell.regL{background:#2A3B32;border-color:#335044}
+.cell.regR{background:#3C342A;border-color:#4C4232}
 .cell.regM{background:var(--chart)}
 .cell.zone{box-shadow:inset 0 0 0 1px rgba(220,228,232,.14)}
 .cell.pick{cursor:pointer}
 .cell.pick:hover{border-color:var(--verdigris)}
-.cell.inrange{background:#20303a;border-color:#33505c}
+.cell.inrange{background:#2B4150;border-color:#3F5F6E}
 .cell.legal{border-color:var(--verdigris);box-shadow:inset 0 0 0 1px rgba(87,160,142,.35)}
 .cell.legal::after{content:"";width:7px;height:7px;border-radius:50%;background:var(--verdigris);opacity:.6}
-.cell.marked{border-color:var(--oxide);background:#2C2529}
+.cell.marked{border-color:var(--oxide);background:#3A2F35}
 .cell.marked::after{content:attr(data-mark);font-family:var(--mono);font-size:10px;color:var(--oxide);
   position:absolute;top:2px;left:4px}
-.cell.preview{background:#2A2E28;border-color:#4A5A3E}
+.cell.preview{background:#363B32;border-color:#586B4A}
 .cell.dest{box-shadow:inset 0 0 0 2px var(--verdigris)}
-.cell.burn{background:#2E211B;border-color:#4A2E22}
+.cell.burn{background:#3B2A22;border-color:#5A3829}
 .flame{position:absolute;bottom:3px;right:4px;font-family:var(--mono);font-size:9px;color:var(--ember);letter-spacing:-.02em}
 
 /* ---------- units ---------- */
@@ -86,6 +95,27 @@ main{display:grid;grid-template-columns:240px auto minmax(320px,1fr);gap:16px;pa
   box-shadow:0 1px 3px rgba(0,0,0,.4)}
 .unit.R.acted .done{border-color:var(--brass);color:var(--brass)}
 .unit.dead{display:none}
+/* ---- board sprites ---- */
+/* The art is its own layer under the label, with a scrim so the name and HP stay
+   readable over any sprite. Absolutely positioned, so the token's own children
+   need position:relative to paint above it. */
+.unit .sp{position:absolute;inset:0;background-size:cover;background-position:center top;
+  background-repeat:no-repeat;border-radius:1px;
+  filter:saturate(1.06)}
+.unit .sp::after{content:"";position:absolute;inset:0;
+  background:linear-gradient(180deg,rgba(9,13,17,0) 0%,rgba(9,13,17,0) 62%,
+             rgba(9,13,17,.35) 84%,rgba(9,13,17,.60) 100%)}
+/* Sprite tokens fill their whole grid cell — no inset margin. */
+.unit.has-sprite{inset:0;border-radius:2px;justify-content:flex-end;padding-bottom:3px}
+/* Only the label content needs lifting above the art. The corner badges (✓, 盾,
+   gang number) are already absolute and sit after .sp in the DOM, so they paint
+   above it on their own — including them here would strip their positioning. */
+.unit.has-sprite .nm,.unit.has-sprite .hpbar,
+.unit.has-sprite .hpn,.unit.has-sprite .pips{position:relative}
+.unit.has-sprite .nm{text-shadow:0 1px 3px rgba(0,0,0,.95),0 0 8px rgba(0,0,0,.7)}
+.unit.has-sprite .hpn{color:var(--text);text-shadow:0 1px 3px rgba(0,0,0,.95)}
+.unit.has-sprite .hpbar{background:rgba(9,13,17,.75)}
+.unit.place.has-sprite .nm{font-size:11px}
 .unit .nm{font-weight:600;line-height:1.05;font-size:12px;text-align:center}
 .unit .hpbar{width:78%;height:3px;background:#0d1418;border-radius:2px;overflow:hidden}
 .unit .hpbar i{display:block;height:100%;background:var(--verdigris)}
@@ -103,6 +133,9 @@ main{display:grid;grid-template-columns:240px auto minmax(320px,1fr);gap:16px;pa
   display:flex;align-items:center;justify-content:center;box-shadow:0 1px 3px rgba(0,0,0,.4)}
 .unit.R .qn{background:var(--brass)}
 .unit.queued{border-style:dashed}
+/* The holy shield reads as protection, not alarm — steady, not pulsing. */
+.unit.st-aegis .st{border-color:var(--verdigris);color:var(--verdigris)}
+.unit.st-aegis{box-shadow:0 0 0 2px rgba(87,160,142,.55),inset 0 0 12px rgba(87,160,142,.22)}
 .unit.st-rage{border-color:var(--oxide);animation:ragepulse 1.6s ease-in-out infinite}
 @keyframes ragepulse{0%,100%{box-shadow:0 0 0 1px var(--oxide),0 0 6px rgba(180,74,52,.35)}
   50%{box-shadow:0 0 0 2px var(--oxide),0 0 16px rgba(180,74,52,.75)}}
@@ -174,7 +207,7 @@ body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
 .hd-trait b{display:block;color:var(--verdigris);font-weight:600;margin-bottom:6px;font-size:15px}
 
 /* ---------- draft modal ---------- */
-.modal-backdrop{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;
+.modal-backdrop{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;overflow:auto;
   padding:20px;background:rgba(9,13,17,.72);backdrop-filter:blur(3px);
   animation:fade .18s ease-out}
 @keyframes fade{from{opacity:0}to{opacity:1}}
@@ -249,7 +282,14 @@ body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
 .slip .v.blank{color:#a89f8f}
 .slip.sealed{background:#2A3038;color:var(--dim)}
 .slip.sealed .stamp{font-size:14px;letter-spacing:.3em;text-transform:uppercase;color:var(--verdigris);
-  text-align:center;padding:14px 0}
+  text-align:center;padding:4px 0 12px}
+/* The sealed slip keeps its fields, so recolour them for the dark stock. */
+.slip.sealed .hdr{border-bottom-color:#3d4854;color:var(--dim)}
+.slip.sealed .hdr:not(:first-of-type){margin-top:14px}
+.slip.sealed .fld{border-bottom-color:#39434d}
+.slip.sealed .k{color:var(--dimmer)}
+.slip.sealed .v{color:var(--text)}
+.slip.sealed .v.blank{color:var(--dimmer)}
 .slip.R .stamp{color:var(--brass)}
 
 .flip{animation:flip .5s ease-out}
@@ -284,7 +324,7 @@ body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
 .gang-row small{color:var(--dim);font-size:11px}
 
 /* ---------- log ---------- */
-.log{max-height:52vh;overflow-y:auto;font-size:12px}
+.log{overflow-y:auto;font-size:12px}
 .log div{padding:3px 0;border-bottom:1px solid #1f2a33;color:var(--text)}
 .log div.quiet{color:var(--dimmer)}
 .log div.rd{font-family:var(--mono);font-size:10px;letter-spacing:.18em;text-transform:uppercase;
@@ -309,7 +349,6 @@ body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
   <section class="panel" id="leftpanel"><h3 id="leftheading">Your force</h3><div class="body" id="leftbody"></div></section>
 
   <section class="boardwrap">
-    <div class="coords" id="coords"></div>
     <div id="rows"></div>
   </section>
 
@@ -461,9 +500,6 @@ function cellSpec(){
 /* ---------------- board ---------------- */
 function renderBoard(){
   const cols = S.board.cols, rows = S.board.rows;
-  document.getElementById('coords').innerHTML =
-    Array.from({length:cols},(_,i)=>`<span>${COLS[i]}</span>`).join('');
-
   const act = currentAction();
   const tgt = act ? act.targeting : null;
   const cspec = cellSpec();
@@ -591,7 +627,11 @@ function unitHTML(u, pending){
   const st = u.status || [];
   for (const s of st) cls.push('st-'+s.key);
   const badges = st.map(s => `<span class="st" title="${s.label} — ${s.text}">${s.badge}</span>`).join('');
+  // Board art sits behind the name and HP; heroes with no sprite render as before.
+  const sprite = u.sprite ? `<span class="sp" style="background-image:url('${u.sprite}')"></span>` : '';
+  if (u.sprite) cls.push('has-sprite');
   return `<span class="${cls.join(' ')}" onmouseenter="setHover(${u.id})" onmouseleave="setHover(null)" onclick="inspect(${u.id})">`
+       + sprite
        + (qi>=0 ? `<span class="qn" title="acts ${qi+1}${'st,nd,rd'.split(',')[qi]||'th'} this gang turn">${qi+1}</span>` : '')
        + badges
        + (u.acted && !pending ? `<span class="done">✓</span>` : '')
@@ -606,7 +646,8 @@ function placementHTML(p){
   const hero = heroByKey(p.key) || {name:p.key, hp:''};
   const drag = S.setup.ready ? ''
     : `draggable="true" ondragstart="startDragUnit(event,'${p.key}',${p.cell[0]},${p.cell[1]})"`;
-  return `<span class="unit ${SIDE} place" ${drag}>`
+  return `<span class="unit ${SIDE} place ${hero.sprite?'has-sprite':''}" ${drag}>`
+       + (hero.sprite ? `<span class="sp" style="background-image:url('${hero.sprite}')"></span>` : '')
        + `<span class="rm">✕</span>`
        + `<span class="nm">${hero.name.slice(0,4)}</span>`
        + `<span class="hpn">${hero.hp} HP</span></span>`;
@@ -1085,7 +1126,17 @@ function renderCommit(){
   const c = S.commit;
   let h = '';
   if (c.sealed){
-    h += `<div class="slip sealed ${SIDE} flip"><div class="stamp">Sealed</div></div>`;
+    // Keep showing what you actually committed — the longest wait in the game is
+    // the worst moment to forget your own order.
+    const orders = c.orders || [];
+    const f = (k,v)=>`<div class="fld"><div class="k">${k}</div><div class="v ${v==='—'?'blank':''}">${v}</div></div>`;
+    h += `<div class="slip sealed ${SIDE} flip">
+            <div class="stamp">Sealed</div>
+            ${orders.length ? orders.map((o,i)=>`
+              <div class="hdr"><span>${orders.length>1?`${i+1} · `:''}${o.hero} ${o.from}</span><span>R${S.round}/E${S.exchange}</span></div>
+              ${f('Move', o.move)}${f('Action', o.action)}${f('Target', o.target)}`).join('')
+             : `<div class="hdr"><span>${c.kind==='dead'?'Destroyed before it could act':'No order'}</span><span>R${S.round}/E${S.exchange}</span></div>`}
+          </div>`;
     h += `<div class="waiting">${c.opponent_sealed?'Resolving':'Waiting for the other seat'}</div>`;
     document.getElementById('leftbody').innerHTML = h; return;
   }
@@ -1130,7 +1181,7 @@ function renderCommit(){
       }
     }
     h += `<div class="step">2 · Action</div>`;
-    for (const a of c.actions){
+    for (const a of curActions()){
       const dis = a.affordable===false ? 'disabled' : '';
       h += `<button class="btn ${draft.actionKey===a.key?'on':''}" ${dis} onclick="chooseAction('${a.key}')">
              ${a.name}${a.ap_cost?`<span class="cost">${a.ap_cost} AP</span>`:''}
