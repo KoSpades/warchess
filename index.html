@@ -86,8 +86,8 @@ main{display:grid;grid-template-columns:var(--lpanel) auto minmax(var(--rpanel),
 .unit{position:absolute;inset:4px;border-radius:2px;display:flex;flex-direction:column;
   align-items:center;justify-content:center;gap:2px;background:#16202880;border:1px solid var(--rule);
   font-size:13px;overflow:hidden}
-.unit.L{border-color:var(--verdigris);background:linear-gradient(180deg,#1c2e2b,#16232a)}
-.unit.R{border-color:var(--brass);background:linear-gradient(180deg,#302a1c,#1f2229)}
+.unit.L{border-color:var(--verdigris);background:linear-gradient(180deg,#2C4038,#24332E)}
+.unit.R{border-color:var(--brass);background:linear-gradient(180deg,#43392A,#342E24)}
 .unit.acted{opacity:1}
 .unit.acted .done{position:absolute;top:2px;right:2px;width:18px;height:18px;border-radius:50%;
   background:rgba(9,13,17,.85);border:1px solid var(--verdigris);color:var(--verdigris);
@@ -107,6 +107,10 @@ main{display:grid;grid-template-columns:var(--lpanel) auto minmax(var(--rpanel),
              rgba(9,13,17,.35) 84%,rgba(9,13,17,.60) 100%)}
 /* Sprite tokens fill their whole grid cell — no inset margin. */
 .unit.has-sprite{inset:0;border-radius:2px;justify-content:flex-end;padding-bottom:3px}
+/* Behind art, the side tint drops to a hint: the figure should read against a
+   near-neutral field, and the token's border already says whose it is. */
+.unit.has-sprite.L{background:linear-gradient(180deg,#35423F,#2B3733)}
+.unit.has-sprite.R{background:linear-gradient(180deg,#42403A,#36332E)}
 /* Only the label content needs lifting above the art. The corner badges (✓, 盾,
    gang number) are already absolute and sit after .sp in the DOM, so they paint
    above it on their own — including them here would strip their positioning. */
