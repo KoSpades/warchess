@@ -34,29 +34,35 @@ header{display:flex;align-items:baseline;gap:18px;flex-wrap:wrap;
 .clock{margin-left:auto;font-family:var(--mono);font-size:11px;letter-spacing:.14em;color:var(--dim)}
 .clock b{color:var(--text);font-weight:600}
 
-/* The page itself never scrolls: main owns the leftover viewport height and
-   each panel scrolls inside itself. --chrome is the header + linkline + padding
-   that the board has to share the window with. */
-:root{--lpanel:240px; --rpanel:256px; --chrome:118px}
-main{display:grid;grid-template-columns:var(--lpanel) auto minmax(var(--rpanel),1fr);
-  gap:8px;padding:10px;align-items:start;height:calc(100vh - var(--chrome));overflow:hidden}
+/* The page itself never scrolls. main owns all the viewport height below the
+   header; the board takes the left, and the right column stacks the order panel
+   over the info panel, each scrolling inside itself. --chrome is the header plus
+   main's own padding. --rsplit is how the right column divides between them. */
+:root{--rpanel:344px; --chrome:72px; --rsplit:1.15fr;
+  /* The board's own size, worked out once so the right column can match its
+     height exactly instead of stretching past the bottom row. Cells are 5:6 and
+     the grid is 9x5 with 4px gaps, so height = width*2/3 - 5.34px. */
+  --boardw:min(calc(100vw - 28px - var(--rpanel)), calc((100vh - var(--chrome) - 20px) * 1.5));
+  --boardh:calc(var(--boardw) * 2 / 3 - 5.34px)}
+main{display:grid;grid-template-columns:minmax(0,1fr) var(--rpanel);
+  gap:8px;padding:10px;height:calc(100vh - var(--chrome));overflow:hidden}
+.rightcol{display:grid;grid-template-rows:var(--rsplit) 1fr;gap:8px;min-height:0;
+  height:var(--boardh);align-self:start}
 .panel{display:flex;flex-direction:column;max-height:100%;min-height:0}
 @media(max-width:1080px){main{grid-template-columns:1fr;height:auto;overflow:visible}
+  .rightcol{grid-template-rows:auto auto;height:auto}
   #rows{width:100%}}
 
 .panel{background:var(--panel);border:1px solid var(--rule);border-radius:3px}
-.panel h3{padding:11px 14px;border-bottom:1px solid var(--rule);font-family:var(--mono);
-  font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--dim);font-weight:500}
-.panel .body{padding:14px;overflow-y:auto;min-height:0}
+.panel h3{display:none}   /* headings ate a row each; the content is self-evident */
+.panel .body{padding:11px;overflow-y:auto;min-height:0}
 
 /* ---------- board ---------- */
-.boardwrap{display:flex;flex-direction:column;align-items:flex-start}
+.boardwrap{display:flex;flex-direction:column;align-items:center;justify-content:flex-start;min-width:0}
 /* Capped on both axes — the cells are 5:6, so the whole grid is 3:2 (w:h) and
-   a height budget converts straight into a width cap. It can never outgrow its
-   column either, so neither scrollbar can ever appear. */
-#rows{display:flex;flex-direction:column;gap:4px;
-  width:min(1400px, calc((100vh - var(--chrome) - 20px) * 1.5),
-            calc(100vw - var(--lpanel) - var(--rpanel) - 44px))}
+   a height budget converts straight into a width cap. 100% is whatever the left
+   column ended up being, so neither scrollbar can ever appear. */
+#rows{display:flex;flex-direction:column;gap:4px;width:var(--boardw)}
 .boardrow{width:100%}
 .board{display:grid;grid-template-columns:repeat(9,1fr);gap:4px;width:100%;min-width:0}
 
@@ -189,26 +195,24 @@ body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
 /* ---------- hero detail (right panel) ---------- */
 .hd-name{font-size:20px;font-weight:600;line-height:1.15}
 .hd-name .en{font-size:13px;color:var(--dim);font-weight:400;margin-left:9px}
-.hd-hp{margin:18px 0 4px}
-.hd-hp .lbl{display:flex;justify-content:space-between;align-items:baseline;font-family:var(--mono);
-  font-size:11px;letter-spacing:.1em;color:var(--dim);margin-bottom:6px}
-.hd-hp .lbl b{color:var(--text);font-size:14px;font-weight:600}
-.hd-hp .bar{height:9px;background:#0d1418;border-radius:5px;overflow:hidden}
+.hd-hp{display:flex;align-items:center;gap:9px;margin:7px 0 0}
+.hd-hp b{font-family:var(--mono);color:var(--text);font-size:14px;font-weight:600;flex:0 0 auto}
+.hd-hp .bar{height:9px;background:#0d1418;border-radius:5px;overflow:hidden;flex:1 1 auto}
 .hd-hp .bar i{display:block;height:100%;background:var(--verdigris);transition:width .2s}
 .hd-hp.sideR .bar i{background:var(--brass)}
 .hd-hp .bar i.hurt{background:var(--oxide)}
-.hd-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin:18px 0}
-.hd-tile{background:var(--panel-2);border:1px solid var(--rule);border-radius:3px;padding:10px 12px}
+.hd-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin:9px 0}
+.hd-tile{background:var(--panel-2);border:1px solid var(--rule);border-radius:3px;padding:4px 8px}
 .hd-tile .k{font-family:var(--mono);font-size:9px;letter-spacing:.18em;text-transform:uppercase;color:var(--dim)}
-.hd-tile .v{font-size:18px;font-weight:600;margin-top:4px;letter-spacing:.01em}
+.hd-tile .v{font-size:18px;font-weight:600;margin-top:1px;letter-spacing:.01em}
 /* Live status (背水 rage): same shape as a trait, but in the alarm colour. */
 .hd-status{border-left:2px solid var(--oxide);background:rgba(180,74,52,.10);border-radius:0 3px 3px 0;
-  padding:8px 12px 8px 14px;margin:16px 0;font-size:14px;line-height:1.6;color:var(--text)}
+  padding:6px 10px 6px 12px;margin:9px 0;font-size:14px;line-height:1.5;color:var(--text)}
 .hd-status b{display:block;color:var(--oxide);font-weight:700;margin-bottom:4px;
   font-family:var(--mono);font-size:12px;letter-spacing:.12em;text-transform:uppercase}
-.hd-trait{border-left:2px solid var(--verdigris);padding:4px 0 4px 14px;margin:18px 0;
-  font-size:15px;line-height:1.65;color:var(--text)}
-.hd-trait b{display:block;color:var(--verdigris);font-weight:600;margin-bottom:6px;font-size:15px}
+.hd-trait{border-left:2px solid var(--verdigris);padding:2px 0 2px 12px;margin:9px 0;
+  font-size:15px;line-height:1.5;color:var(--text)}
+.hd-trait b{display:block;color:var(--verdigris);font-weight:600;margin-bottom:2px;font-size:15px}
 
 /* ---------- draft modal ---------- */
 .modal-backdrop{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;overflow:auto;
@@ -312,10 +316,10 @@ body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
 .primary:hover:not(:disabled){filter:brightness(1.1)}
 .ghost{text-align:center;color:var(--dim)}
 
-.note{font-size:12px;color:var(--dim);margin:0 0 10px}
+.note{font-size:12px;color:var(--dim);margin:0 0 7px;line-height:1.45}
 .err{color:var(--oxide);font-size:12px;margin:8px 0 0;min-height:16px}
 .step{font-family:var(--mono);font-size:9px;letter-spacing:.18em;text-transform:uppercase;
-  color:var(--dim);margin:12px 0 7px;padding-bottom:4px;border-bottom:1px solid var(--rule)}
+  color:var(--dim);margin:9px 0 5px;padding-bottom:3px;border-bottom:1px solid var(--rule)}
 .step:first-child{margin-top:0}
 
 /* ---------- gang order queue ---------- */
@@ -337,8 +341,6 @@ body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
 .banner.win{color:var(--verdigris)} .banner.lose{color:var(--oxide)} .banner.draw{color:var(--dim)}
 .waiting{text-align:center;padding:26px 14px;color:var(--dim);font-family:var(--mono);
   font-size:11px;letter-spacing:.16em;text-transform:uppercase}
-.linkline{padding:10px 20px;border-top:1px solid var(--rule);color:var(--dim);font-size:12px}
-.linkline a{color:var(--verdigris)}
 </style>
 </head>
 <body>
@@ -350,16 +352,15 @@ body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
 </header>
 
 <main>
-  <section class="panel" id="leftpanel"><h3 id="leftheading">Your force</h3><div class="body" id="leftbody"></div></section>
-
   <section class="boardwrap">
     <div id="rows"></div>
   </section>
 
-  <section class="panel"><h3 id="rhshead">Field log</h3><div class="body log" id="rhsbody"></div></section>
+  <div class="rightcol">
+    <section class="panel" id="leftpanel"><h3 id="leftheading">Your force</h3><div class="body" id="leftbody"></div></section>
+    <section class="panel"><h3 id="rhshead">Field log</h3><div class="body log" id="rhsbody"></div></section>
+  </div>
 </main>
-
-<div class="linkline" id="linkline"></div>
 
 <div id="modal"></div>
 
@@ -612,7 +613,7 @@ function applyHover(){
   }
 }
 function setHover(id){ hoverId = (id==null ? null : id); applyHover(); }
-function inspect(id){ inspected = id; renderRHS(); }
+function inspect(id){ inspected = (inspected === id ? null : id); renderRHS(); }
 
 function unitHTML(u, pending){
   const cls=['unit',u.side];
@@ -992,9 +993,6 @@ function render(){
     : S.phase==='setup' ? 'Deployment'
     : S.phase==='opening' ? 'Opening'
     : `Round <b>${S.round}</b> · exchange <b>${S.exchange}</b> · <b>${S.phase}</b>`;
-  document.getElementById('linkline').innerHTML =
-    `Two players, two tabs. This is the <b>${SIDE==='L'?'Left':'Right'}</b> seat — open `
-    + `<a href="?side=${SIDE==='L'?'R':'L'}">the ${SIDE==='L'?'Right':'Left'} seat</a> in another tab or window.`;
   document.getElementById('modal').innerHTML = '';
   renderBoard();
   renderRHS();
@@ -1165,7 +1163,7 @@ function renderCommit(){
     document.getElementById('leftbody').innerHTML = h; return;
   }
   if (!c.selected){
-    h += `<p class="note">Click a hero (on the board or below) to inspect and tentatively pick it. Its turn only begins — and board effects like fire resolve — once you confirm its movement.</p>`;
+    h += `<p class="note">Pick the hero to move.</p>`;
     for (const u of myUnits().filter(u=>u.alive && !u.acted)){
       h += `<div class="hero pickable" onclick="onUnitPick(${u.id})">
         <div class="top"><span class="cn">${u.name}</span><span class="en">${u.name_en} · ${cn(u.cell)}</span></div>
@@ -1185,10 +1183,9 @@ function renderCommit(){
       document.getElementById('leftbody').innerHTML = h; return;
     }
   }
-  h += slipHTML(u, act);
-  h += `<div class="step">1 · Movement</div>`;
+  h += `<div class="step">1 · ${u.name} ${cn(u.cell)} · move</div>`;
   if (!draft.destination && !draft.held){
-    h += `<p class="note">Arrow keys or click a square to aim ${u.name}; <b>Enter</b> confirms and locks this hero in. Enter without moving holds position. Click another hero to switch — nothing is committed until Enter.</p>
+    h += `<p class="note">Arrows or click to aim · <b>Enter</b> locks it in (Enter alone holds).</p>
           <button class="btn primary" onclick="confirmMove()">${draft.tentative?'Confirm move to '+cn(draft.tentative):'Confirm — hold position'}</button>`;
     for (const a of curActions().filter(a=>a.self_move)){
       const dis = a.affordable===false ? 'disabled' : '';
@@ -1340,25 +1337,6 @@ function magUpdate(v){
   document.getElementById('magres').textContent = `+${v} atk, ${su.max_hp - (+v)} max HP`;
 }
 
-function slipHTML(u, act){
-  const t = act ? act.targeting : null;
-  let target = '—';
-  if (t){
-    if (t.kind==='cells') target = draft.shots.map(s=>s.map(cn).join(' ')).filter(Boolean).join('  /  ') || '—';
-    else if (t.kind==='unit'){ const v=foeUnits().find(x=>x.id===draft.target); target = v?v.name:'—'; }
-    else if (t.kind==='direction') target = draft.direction || '—';
-    else if (t.kind==='any_cell') target = draft.cell?cn(draft.cell):'—';
-  }
-  const f = (k,v)=>`<div class="fld"><div class="k">${k}</div><div class="v ${v==='—'?'blank':''}">${v}</div></div>`;
-  return `<div class="slip">
-    <div class="hdr"><span>Order · R${S.round}/E${S.exchange}</span><span>${SIDE==='L'?'LEFT':'RIGHT'}</span></div>
-    ${f('Hero', u.name+' '+cn(u.cell))}
-    ${f('Move', draft.held?'hold':(draft.destination?cn(draft.destination):'—'))}
-    ${f('Action', act?act.name:'—')}
-    ${f('Target', target)}
-  </div>`;
-}
-
 function renderVictim(){
   document.getElementById('leftheading').textContent = 'Target choice';
   let h='';
@@ -1400,13 +1378,12 @@ function heroDetailHTML(u){
   return `<div class="hd">
     <div class="hd-name">${u.name}<span class="en">${u.name_en}</span></div>
     <div class="hd-hp side${u.side}">
-      <div class="lbl"><span>HP</span><b>${u.hp} / ${u.max_hp}</b></div>
+      <b>${u.hp}/${u.max_hp}</b>
       <div class="bar"><i class="${pct<40?'hurt':''}" style="width:${pct}%"></i></div>
     </div>
     ${status}
     <div class="hd-grid">${tiles}</div>
     ${(h.traits||[]).map(t=>`<div class="hd-trait"><b>${t.name}${t.ap_cost?` · ${t.ap_cost} AP`:''}</b>${t.text}</div>`).join('')}
-    <button class="btn" style="margin-top:18px" onclick="inspected=null;renderRHS()">← Back to field log</button>
   </div>`;
 }
 function renderRHS(){

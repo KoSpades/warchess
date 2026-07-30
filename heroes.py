@@ -647,6 +647,27 @@ class GangTactics:
                 "the whole gang costs one turn.")
 
 
+class StoneHide:
+    """石像鬼 is carved stone: blades and bullets chip it for 1 no matter how hard
+    they hit. Abilities and burning ground are unaffected — the way through it is
+    magic, not muscle."""
+
+    describe = ("Any normal attack deals at most 1 damage to it. Abilities and burning "
+                "ground land in full.")
+    CAP = 1
+
+    # Sits after the flat reductions (40) so it overrides them rather than stacking
+    # with them, and before the gunslinger's halving (90).
+    @EV.hook(priority=70)
+    def on_before_damage(self, match, owner, ev):
+        if ev.target is not owner or ev.cancelled:
+            return
+        if ev.category == DMG.NORMAL_ATTACK:
+            # A cap, not a flat value: something that already softened the blow to
+            # nothing must not be undone by the stone.
+            ev.amount = min(ev.amount, self.CAP)
+
+
 class MountainGuard:
     """山神 shelters his line. Allied units sharing his column take 2 less from
     every hit (all damage, fire included). He himself is not covered. Positional —
@@ -963,12 +984,12 @@ ROSTER = [
         key="gatekeeper",
         name="门神",
         name_en="gatekeeper",
-        max_hp=32,
+        max_hp=30,
         atk=3,
         move=1,
         max_ap=0,
         attack={"mode": CELL, "cells": 2, "range": 2},
-        blurb="A wall of a hero — 32 HP and a solid swing.",
+        blurb="A wall of a hero — 30 HP and a solid swing.",
     ),
     HeroDef(
         key="wind_rider",
@@ -1004,6 +1025,18 @@ ROSTER = [
         attack={"mode": CELL, "cells": 3, "range": 2},
         passives=[LastStand],
         blurb="Frail, but the killing blow only enrages him — two untouchable turns, then dust.",
+    ),
+    HeroDef(
+        key="gargoyle",
+        name="石像鬼",
+        name_en="gargoyle",
+        max_hp=14,
+        atk=4,
+        move=1,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 3, "range": 1},
+        passives=[StoneHide],
+        blurb="Carved stone — weapons chip it for 1 at a time. Only magic really hurts it.",
     ),
     HeroDef(
         key="centaur",
@@ -1113,7 +1146,7 @@ BY_KEY[DUMMY.key] = DUMMY
 # whenever you add heroes; --test fills the rest of your side with dummies.
 # Whoever is newest goes here — --test always deploys the hero just added, so it
 # can be played immediately. Up to two; the rest of the side is padded with dummies.
-TEST_HEROES = ["centaur", "mist_lady"]
+TEST_HEROES = ["gargoyle", "centaur"]
 
 
 

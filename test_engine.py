@@ -599,6 +599,40 @@ ok("an enemy vacating the landing square lets the charge through",
    predicted is None and ended == (6, 3), f"previewed {predicted}, ended {ended}")
 ok("...and that trample lands too", dealt > 0, f"dealt {dealt}")
 
+# 32 — 石像鬼: weapons chip it for 1, magic and fire go straight through
+m = arena([("gargoyle", (3, 3)), ("dummy", (3, 1))], [("cannoneer", (7, 3)), ("imp", (7, 1))])
+gar, ally, cannon, imp = (unit(m, s, k) for s, k in
+                          ((LEFT, "gargoyle"), (LEFT, "dummy"), (RIGHT, "cannoneer"), (RIGHT, "imp")))
+hit = lambda who, amount, cat: DMG.deal(
+    m, DMG.DamageEvent(source=cannon, target=who, amount=amount, category=cat))
+
+h = gar.hp
+hit(gar, cannon.atk, DMG.NORMAL_ATTACK)
+ok("a normal attack chips the stone for 1", h - gar.hp == 1, f"took {h - gar.hp} from atk {cannon.atk}")
+h = gar.hp
+hit(gar, 99, DMG.NORMAL_ATTACK)
+ok("no normal attack does better, however hard", h - gar.hp == 1, f"took {h - gar.hp} from 99")
+
+# an ability lands in full — compare against a dummy taking the same instant
+gar.hp, ally.hp = gar.max_hp, ally.max_hp
+imp.ap = imp.max_ap
+imp.set_cell((7, 3))      # 射线 sears the caster's row: stone and dummy both stand in it
+ally.set_cell((5, 3))
+turn(m, gar.id, {"destination": None, "action": {"key": "none"}},
+     imp.id, {"destination": None, "action": {"key": "ability:ray"}})
+took_stone, took_flesh = gar.max_hp - gar.hp, ally.max_hp - ally.hp
+ok("an ability hits the stone as hard as it hits flesh",
+   took_stone == took_flesh > 1, f"stone {took_stone}, dummy {took_flesh}")
+
+# burning ground also ignores the hide
+m = arena([("gargoyle", (3, 3))], [("dummy", (7, 3))])
+gar, d = unit(m, LEFT, "gargoyle"), unit(m, RIGHT, "dummy")
+burn = m.board.add_burning((3, 3), RIGHT).damage
+m.select_hero(LEFT, gar.id)
+m.commit(LEFT, {"destination": None, "action": {"key": "none"}})
+ok("burning ground ignores the stone hide", gar.max_hp - gar.hp == burn,
+   f"took {gar.max_hp - gar.hp}, tile deals {burn}")
+
 print("\nlog tail:")
 for line in m.log[-5:]:
     print("   ", line["text"])
