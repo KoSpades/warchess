@@ -642,7 +642,6 @@ function unitHTML(u, pending){
   const act = currentAction();
   if (act && act.targeting.kind==='unit' && u.side!==SIDE) cls.push('clickable');
   if (act && act.targeting.kind==='ally' && u.side===SIDE) cls.push('clickable');
-  if (S.phase==='opening' && S.opening.task && S.opening.task.targeting.kind==='ally' && u.side===SIDE) cls.push('clickable');
   if (draft && draft.target===u.id) cls.push('tgt');
   if (S.phase==='commit' && !S.commit.sealed && !S.commit.selected &&
       u.side===SIDE && !u.acted && u.alive) cls.push('clickable');
@@ -798,14 +797,8 @@ function onCell(c,r){
     if (u && S.victim.needed && S.victim.options.includes(u.id)) return cmd({cmd:'victim', entity:u.id});
     return;
   }
-  if (S.phase==='opening'){
-    const o=S.opening;
-    if (o.task && o.task.targeting.kind==='ally'){
-      const u=unitAt(cell);
-      if (u && u.side===SIDE && u.alive) return cmd({cmd:'opening', target:u.id});
-    }
-    return;
-  }
+  if (S.phase==='opening') return;   // the opening pick is made in the panel only:
+                                     // a stray board click must not spend it
   if (S.phase!=='commit' || S.commit.sealed) return;
   if (!S.commit.selected){
     // Click your own un-acted piece to tentatively pick it (reversible).
@@ -1131,7 +1124,7 @@ function renderOpening(){
         h += `<button class="btn" onclick="cmd({cmd:'opening', target:${u.id}})">
                 ${u.name} <span class="cost">${cn(u.cell)} · ${u.hp}/${u.max_hp} HP</span></button>`;
       }
-      h += `<p class="note">Or click the ally on the board.</p>`;
+      h += `<p class="note">Hover a hero on the board to see its reach; the choice is made here.</p>`;
     }
   } else {
     h += `<div class="waiting">Waiting for the other seat</div>`;
