@@ -492,7 +492,20 @@ ok("大雾 leaves a whole-board attacker alone", dragon.rng is None and d.rng is
 ok("大雾 never pushes anyone below 1",
    all(e.rng >= 1 for e in (cannon, zerk)), str([cannon.rng, zerk.rng]))
 ok("the fog holds after the turn ends", cannon.rng == before["cannoneer"] - 1)
-ok("大雾 is spent", "ability:great_fog" not in {a["key"] for a in m.action_menu(fog)})
+ok("大雾 is repeatable — still on the menu",
+   "ability:great_fog" in {a["key"] for a in m.action_menu(fog)})
+
+# a second fog next round stacks another step off, and the floor still holds
+m2 = arena([("mist_lady", (3, 3))], [("cannoneer", (7, 3))])
+fog2, cannon2 = unit(m2, LEFT, "mist_lady"), unit(m2, RIGHT, "cannoneer")
+rolls = []
+for _ in range(2):
+    fog2.ap = fog2.max_ap                      # she'd otherwise need 3 turns between casts
+    turn(m2, fog2.id, {"destination": None, "action": {"key": "ability:great_fog"}},
+         cannon2.id, {"destination": None, "action": {"key": "none"}})
+    rolls.append(cannon2.rng)
+ok("a second fog stacks another step off", rolls[0] - rolls[1] == 1, str(rolls))
+ok("the floor holds under repeated casts", cannon2.rng >= 1, f"cannoneer at {cannon2.rng}")
 
 # a range-1 enemy is untouched rather than dropped to 0
 m = arena([("mist_lady", (3, 3))], [("goblin_commander", (7, 3)), ("dummy", (7, 4))])

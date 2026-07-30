@@ -169,9 +169,8 @@ class GreatFog(Ability):
     key = "great_fog"
     name = "大雾 Great Fog"
     ap_cost = 3
-    use_limit = 1
     targeting = {"kind": "none"}
-    blurb = ("Once per match: every enemy loses 1 attack range, permanently. Never "
+    blurb = ("Every enemy loses 1 attack range, permanently. Casts stack, but never "
              "below 1, and heroes who strike any enemy anywhere are unaffected.")
     FLOOR = 1
 
@@ -1022,13 +1021,13 @@ ROSTER = [
         key="mist_lady",
         name="雾女",
         name_en="mistLady",
-        max_hp=13,
+        max_hp=14,
         atk=1,
         move=1,
         max_ap=3,
         attack={"mode": CELL, "cells": 3, "range": 7},
         abilities=[GreatFog()],
-        blurb="Sees far and hits for almost nothing — but once, she takes a step of reach from every enemy.",
+        blurb="Sees far and hits for almost nothing — but every fog takes a step of reach from the whole enemy force.",
     ),
     HeroDef(
         key="shopkeeper",
