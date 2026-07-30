@@ -21,6 +21,9 @@ class Ability:
     ap_cost = 0
     use_limit = None  # None = unlimited; an int caps total uses per match
     opening = False   # True = fires once at game start (the opening phase), not on a turn
+    # True = the ability moves the hero itself (半人马's 冲撞), so the turn's normal
+    # movement is not used: the commit must hold position.
+    self_move = False
     targeting = {"kind": "none"}
     blurb = ""
 
@@ -28,6 +31,11 @@ class Ability:
         return []
 
     def side_effects(self, match, actor, params):
+        return None
+
+    def validate(self, match, actor, params):
+        """Legality beyond the generic targeting checks — e.g. whether a chosen
+        direction can actually be charged. None means fine."""
         return None
 
 
@@ -59,6 +67,133 @@ class Sweep(Ability):
                     )
                 )
         return out
+
+
+class Charge(Ability):
+    key = "charge"
+    name = "冲撞 Charge"
+    ap_cost = 2
+    self_move = True
+    targeting = {"kind": "direction", "options": ["forward", "backward", "up", "down"]}
+    blurb = ("Charge 3 squares down one lane, dealing 3 to each enemy in the two squares "
+             "crossed on the way (at most two). If the third square is taken or off the "
+             "board it still tramples, but holds its ground. Takes the place of your move.")
+    DAMAGE = 3
+    DISTANCE = 3
+
+    @staticmethod
+    def step(match, actor, direction):
+        fwd = match.topology.forward_step(actor.side)
+        return {"forward": (fwd, 0), "backward": (-fwd, 0),
+                "up": (0, -1), "down": (0, 1)}.get(direction)
+
+    @classmethod
+    def path(cls, match, actor, direction):
+        """(landing cell or None when it can't land, [enemies in the crossed squares]).
+        The run is always exactly DISTANCE squares: the ones in between are trampled,
+        the last one is where it ends up — if anybody is standing there, or it is off
+        the board, the charge still lands its damage but the centaur doesn't move.
+        Whole thing is None only if the direction itself is nonsense."""
+        d = cls.step(match, actor, direction)
+        if d is None or not actor.cells:
+            return None
+        c0, r0 = actor.cell
+        lane = [(c0 + d[0] * i, r0 + d[1] * i) for i in range(1, cls.DISTANCE + 1)]
+        victims = []
+        for cell in lane[:-1]:
+            if not match.topology.in_bounds(cell):
+                continue
+            occ = match.occupant(cell)
+            if occ is not None and occ.side != actor.side:
+                victims.append(occ)   # allies in the way are simply ridden past
+        end = lane[-1]
+        blocked = not match.topology.in_bounds(end) or match.occupant(end) is not None
+        return (None if blocked else end), victims
+
+    def lanes(self, match, actor):
+        """Every lane worth charging, for the client to offer and preview. A lane
+        that would neither move nor trample anyone is left out."""
+        out = []
+        for d in self.targeting["options"]:
+            p = self.path(match, actor, d)
+            if p is None:
+                continue
+            landing, victims = p
+            if landing is None and not victims:
+                continue   # nowhere to go and nobody to hit
+            out.append({"dir": d,
+                        "landing": list(landing) if landing else None,
+                        "victims": [v.id for v in victims],
+                        "damage": self.DAMAGE})
+        return out
+
+    def validate(self, match, actor, params):
+        p = self.path(match, actor, params.get("direction"))
+        if p is None:
+            return "Choose a direction."
+        if p[0] is None and not p[1]:
+            return "Nothing to trample that way, and nowhere to land."
+        return None
+
+    def build_damage(self, match, actor, params):
+        p = self.path(match, actor, params.get("direction"))
+        if p is None:
+            actor.vars.pop("charge_plan", None)
+            return []
+        landing, victims = p
+        # Stashed on the actor, never on self: one Ability instance is shared by
+        # every entity of that hero, on both sides.
+        actor.vars["charge_plan"] = {"landing": landing}
+        return [
+            DMG.DamageEvent(source=actor, target=v, amount=self.DAMAGE, category=DMG.ABILITY)
+            for v in victims
+        ]
+
+    def side_effects(self, match, actor, params):
+        plan = actor.vars.pop("charge_plan", None)
+        if plan is None or not actor.alive:
+            return
+        landing = plan["landing"]
+        if landing is None:
+            match.log_line(f"{match.label(actor)} tramples through but holds its ground.")
+            return
+        frm = actor.cell
+        actor.set_cell(landing)
+        match.bus.emit(EV.AFTER_MOVE, {"entity": actor, "from": frm, "to": landing})
+        match.log_line(
+            f"{match.label(actor)} charges {match.cell_name(frm)} → {match.cell_name(landing)}."
+        )
+
+
+class GreatFog(Ability):
+    key = "great_fog"
+    name = "大雾 Great Fog"
+    ap_cost = 3
+    use_limit = 1
+    targeting = {"kind": "none"}
+    blurb = ("Once per match: every enemy loses 1 attack range, permanently. Never "
+             "below 1, and heroes who strike any enemy anywhere are unaffected.")
+    FLOOR = 1
+
+    def side_effects(self, match, actor, params):
+        fogged = []
+        for e in match.living():
+            if e.side == actor.side:
+                continue
+            # No finite range to shorten (雷霆龙 reaches the whole board), and never
+            # push anyone below the floor — a range-1 attacker just shrugs it off.
+            if e.rng is None or e.rng <= self.FLOOR:
+                continue
+            e.add_modifier(Modifier("rng", "add", -1, source=self))
+            fogged.append(e)
+        if fogged:
+            match.log_line(
+                f"{match.label(actor)} rolls in the fog — "
+                + ", ".join(f"{match.label(e)} to {e.rng}" for e in fogged)
+                + " range."
+            )
+        else:
+            match.log_line(f"{match.label(actor)} rolls in the fog, but nobody's reach can shorten.")
 
 
 class Ray(Ability):
@@ -872,6 +1007,30 @@ ROSTER = [
         blurb="Frail, but the killing blow only enrages him — two untouchable turns, then dust.",
     ),
     HeroDef(
+        key="centaur",
+        name="半人马",
+        name_en="centaur",
+        max_hp=22,
+        atk=3,
+        move=1,
+        max_ap=4,
+        attack={"mode": CELL, "cells": 2, "range": 2},
+        abilities=[Charge()],
+        blurb="Rides straight through the enemy line, trampling everyone in the lane.",
+    ),
+    HeroDef(
+        key="mist_lady",
+        name="雾女",
+        name_en="mistLady",
+        max_hp=13,
+        atk=1,
+        move=1,
+        max_ap=3,
+        attack={"mode": CELL, "cells": 3, "range": 7},
+        abilities=[GreatFog()],
+        blurb="Sees far and hits for almost nothing — but once, she takes a step of reach from every enemy.",
+    ),
+    HeroDef(
         key="shopkeeper",
         name="杂货店爷爷",
         name_en="shopkeeper",
@@ -953,7 +1112,10 @@ BY_KEY[DUMMY.key] = DUMMY
 
 # The champions --test puts under your control (the current batch). Update this
 # whenever you add heroes; --test fills the rest of your side with dummies.
-TEST_HEROES = ["blood_mage", "gunslinger"]
+# Whoever is newest goes here — --test always deploys the hero just added, so it
+# can be played immediately. Up to two; the rest of the side is padded with dummies.
+TEST_HEROES = ["centaur", "mist_lady"]
+
 
 
 def status_of(match, entity):

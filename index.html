@@ -366,6 +366,8 @@ body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
 <script>
 const SIDE = (new URLSearchParams(location.search).get('side') || 'L').toUpperCase().startsWith('R') ? 'R' : 'L';
 const COLS = "ABCDEFGHI";
+const DIRS = {forward:'Forward — into the enemy', backward:'Backward — toward your line',
+              up:'Up — toward row 1', down:'Down — toward row 5'};
 let S = null, armed = null, draft = null, err = "", lastVersion = -1, pendingMoves = [];
 let hoverId = null, inspected = null, revealActive = false, shownReveal = "";
 let codex = {};   // all hero cards, fetched once from /api/codex (not per poll)
@@ -524,6 +526,9 @@ function renderBoard(){
     if (su) ghostFor(su.id, draft.destination || draft.tentative);
     // Goblins already ordered keep their ghost while the rest of the gang is aimed.
     for (const o of gangOrders()) ghostFor(o.entity, o.destination);
+    // A picked charge lane shows where the hero will pull up.
+    const lane = chargeLane();
+    if (lane && lane.landing && su) ghostFor(su.id, lane.landing);
   } else if (pendingMoves.length && S.phase==='commit' && S.commit && S.commit.sealed){
     // Only during the exact sealed-and-waiting window of the order that set them —
     // once the exchange resolves the seal clears, so ghosts never linger.
@@ -727,9 +732,18 @@ async function dropCell(e, c, r){
   }
 }
 
+function chargeLane(){
+  const act = currentAction();
+  if (!act || !draft || !draft.direction) return null;
+  return ((act.targeting.choices)||[]).find(x=>x.dir===draft.direction) || null;
+}
 function sweepPreview(){
   const act = currentAction();
   if (!act || !draft || !draft.direction || act.targeting.kind!=='direction') return [];
+  const lane = chargeLane();
+  if (lane) return lane.victims
+    .map(id => (S.units||[]).find(u=>u.id===id))
+    .filter(u => u && u.cell).map(u => u.cell);
   const o = originCell(); if (!o) return [];
   let step = SIDE==='L' ? 1 : -1;
   if (draft.direction==='backward') step = -step;
@@ -906,6 +920,12 @@ function chooseAction(key){
   if (act.targeting.kind==='cells') draft.shots = Array.from({length:act.targeting.shots},()=>[]);
   if (act.targeting.kind==='magnitude') draft.amount = 1;
   err=""; render();
+}
+function chooseSelfMove(key){
+  // The ability supplies the motion, so the movement step is settled as "hold"
+  // without ever asking for a destination that would then be thrown away.
+  draft.tentative = null; draft.destination = null; draft.held = true;
+  chooseAction(key);
 }
 function chooseWeapon(key){
   draft.weapon = key;
@@ -1170,6 +1190,12 @@ function renderCommit(){
   if (!draft.destination && !draft.held){
     h += `<p class="note">Arrow keys or click a square to aim ${u.name}; <b>Enter</b> confirms and locks this hero in. Enter without moving holds position. Click another hero to switch — nothing is committed until Enter.</p>
           <button class="btn primary" onclick="confirmMove()">${draft.tentative?'Confirm move to '+cn(draft.tentative):'Confirm — hold position'}</button>`;
+    for (const a of curActions().filter(a=>a.self_move)){
+      const dis = a.affordable===false ? 'disabled' : '';
+      h += `<button class="btn" ${dis} onclick="chooseSelfMove('${a.key}')">
+              ${a.name}<span class="cost">${a.ap_cost} AP</span>
+              <small>Moves ${u.name} itself — pick this instead of a move.</small></button>`;
+    }
   } else {
     h += `<button class="btn on" onclick="draft.destination=null;draft.held=false;draft.tentative=null;draft.actionKey=null;render()">
             ${draft.held?'Holding position':'Moving to '+cn(draft.destination)} <small>Click to change</small></button>`;
@@ -1268,6 +1294,18 @@ function targetingHTML(act){
     for (const u of foeUnits().filter(u=>u.alive)){
       h += `<button class="btn ${draft.target===u.id?'on':''}" onclick="draft.target=${u.id};err='';render()">
               ${u.name} <span class="cost">${cn(u.cell)}</span></button>`;
+    }
+  } else if (t.kind==='direction' && t.choices){
+    h += `<div class="step">3 · Lane</div>`;
+    h += t.choices.length
+      ? `<p class="note">Three squares down the lane, trampling whatever is in the two you cross.</p>`
+      : `<p class="note">No lane worth charging from here — nothing to trample and nowhere to land.</p>`;
+    for (const ch of t.choices){
+      const n = ch.victims.length;
+      const where = ch.landing ? `→ ${cn(ch.landing)}` : 'holds ground';
+      h += `<button class="btn ${draft.direction===ch.dir?'on':''}" onclick="draft.direction='${ch.dir}';err='';render()">
+              ${DIRS[ch.dir]||ch.dir}<span class="cost">${where}</span>
+              <small>${n?`tramples ${n} ${n===1?'enemy':'enemies'} for ${ch.damage} each`:'nobody in the way'}${ch.landing?'':' · third square is taken'}</small></button>`;
     }
   } else if (t.kind==='direction'){
     h += `<p class="note">Choose which neighbouring column joins your own.</p>`;

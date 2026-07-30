@@ -474,6 +474,118 @@ ok("no eligible ally, no prompt", view.state_for(m, LEFT)["commit"]["choices"] =
 ok("and the turn seals normally",
    m.commit(LEFT, {"destination": None, "action": {"key": "none"}}) is None)
 
+# 29 — 雾女: 大雾 shortens every enemy's reach once, and never below 1
+m = arena([("mist_lady", (3, 3))],
+          [("cannoneer", (7, 1)), ("berserker", (7, 2)), ("thunder_dragon", (7, 3)), ("dummy", (7, 4))])
+fog = unit(m, LEFT, "mist_lady")
+cannon, zerk, dragon, d = (unit(m, RIGHT, k) for k in
+                           ("cannoneer", "berserker", "thunder_dragon", "dummy"))
+zerk.hp = zerk.max_hp                     # keep 狂战士 out of its wounded state
+before = {e.key: e.rng for e in (cannon, zerk, dragon, d)}
+fog.ap = fog.max_ap
+turn(m, fog.id, {"destination": None, "action": {"key": "ability:great_fog"}},
+     d.id, {"destination": None, "action": {"key": "none"}})
+
+ok("大雾 takes 1 range off a long-ranged enemy", before["cannoneer"] - cannon.rng == 1,
+   f"{before['cannoneer']} -> {cannon.rng}")
+ok("大雾 leaves a whole-board attacker alone", dragon.rng is None and d.rng is None)
+ok("大雾 never pushes anyone below 1",
+   all(e.rng >= 1 for e in (cannon, zerk)), str([cannon.rng, zerk.rng]))
+ok("the fog holds after the turn ends", cannon.rng == before["cannoneer"] - 1)
+ok("大雾 is spent", "ability:great_fog" not in {a["key"] for a in m.action_menu(fog)})
+
+# a range-1 enemy is untouched rather than dropped to 0
+m = arena([("mist_lady", (3, 3))], [("goblin_commander", (7, 3)), ("dummy", (7, 4))])
+fog, cmdr, d = unit(m, LEFT, "mist_lady"), unit(m, RIGHT, "goblin_commander"), unit(m, RIGHT, "dummy")
+base = cmdr.rng
+fog.ap = fog.max_ap
+turn(m, fog.id, {"destination": None, "action": {"key": "ability:great_fog"}},
+     d.id, {"destination": None, "action": {"key": "none"}})   # 指挥 is a gang: let the dummy act
+ok("an enemy already at range 1 shrugs the fog off", cmdr.rng == base == 1, f"{base} -> {cmdr.rng}")
+
+# 30 — 半人马: 冲撞 runs a fixed 3 squares, trampling the two it crosses
+def charge_arena(left, right):
+    m = arena(left, right)
+    cen = unit(m, LEFT, "centaur")
+    cen.ap = cen.max_ap
+    return m, cen
+
+def lanes_for(m, cen):
+    m.select_hero(LEFT, cen.id)
+    ability = next(a for a in m.action_menu(cen) if a["key"] == "ability:charge")
+    return {c["dir"]: c for c in ability["targeting"]["choices"]}
+
+# C3 · enemies at D3 and E3 · F3 open -> lands on F3, both trampled
+m, cen = charge_arena([("centaur", (3, 3))], [("dummy", (7, 3)), ("gatekeeper", (8, 3))])
+d, g = unit(m, RIGHT, "dummy"), unit(m, RIGHT, "gatekeeper")
+d.set_cell((4, 3)); g.set_cell((5, 3))
+lane = lanes_for(m, cen)["forward"]
+ok("the lane reports its landing square and both victims",
+   lane["landing"] == [6, 3] and len(lane["victims"]) == 2, str(lane))
+ok("a charge cannot be combined with a normal move",
+   m.commit(LEFT, {"destination": [4, 2],
+                   "action": {"key": "ability:charge", "direction": "forward"}}) is not None)
+hp0 = (d.hp, g.hp)
+turn(m, cen.id, {"destination": None, "action": {"key": "ability:charge", "direction": "forward"}},
+     d.id, {"destination": None, "action": {"key": "none"}})
+ok("it ends three squares along", cen.cell == (6, 3), str(cen.cell))
+ok("both crossed enemies take the same hit",
+   hp0[0] - d.hp == hp0[1] - g.hp > 0, f"{hp0[0]-d.hp} and {hp0[1]-g.hp}")
+
+# third square taken: damage still lands, the centaur stays put
+m, cen = charge_arena([("centaur", (3, 3))], [("dummy", (7, 3)), ("gatekeeper", (8, 3))])
+d, g = unit(m, RIGHT, "dummy"), unit(m, RIGHT, "gatekeeper")
+d.set_cell((4, 3)); g.set_cell((6, 3))        # crossed: D3 enemy, E3 empty; F3 blocked
+lane = lanes_for(m, cen)["forward"]
+ok("a blocked landing is reported as such", lane["landing"] is None, str(lane))
+hp0, start = d.hp, cen.cell
+turn(m, cen.id, {"destination": None, "action": {"key": "ability:charge", "direction": "forward"}},
+     d.id, {"destination": None, "action": {"key": "none"}})
+ok("blocked charge still tramples", hp0 - d.hp > 0, f"dealt {hp0 - d.hp}")
+ok("blocked charge does not move the centaur", cen.cell == start, str(cen.cell))
+ok("the enemy standing on the third square is untouched", g.hp == g.max_hp,
+   f"took {g.max_hp - g.hp}")
+
+# allies are ridden past: neither damaged nor blocking
+m, cen = charge_arena([("centaur", (3, 3)), ("gatekeeper", (3, 2))], [("dummy", (7, 3))])
+ally, d = unit(m, LEFT, "gatekeeper"), unit(m, RIGHT, "dummy")
+ally.set_cell((4, 3)); d.set_cell((5, 3))
+turn(m, cen.id, {"destination": None, "action": {"key": "ability:charge", "direction": "forward"}},
+     d.id, {"destination": None, "action": {"key": "none"}})
+ok("an ally in the lane is ridden past unharmed and does not block",
+   cen.cell == (6, 3) and ally.hp == ally.max_hp, f"{cen.cell}, ally took {ally.max_hp - ally.hp}")
+
+# a lane that would neither move nor hit anyone is not offered
+m, cen = charge_arena([("centaur", (1, 1))], [("dummy", (7, 3))])
+lanes = lanes_for(m, cen)
+ok("a lane off the board with nobody to hit is not offered", "up" not in lanes, str(list(lanes)))
+ok("that lane is refused if asked for anyway",
+   m.commit(LEFT, {"destination": None,
+                   "action": {"key": "ability:charge", "direction": "up"}}) is not None)
+
+# 31 — the charge reads the board *after* movement, so a landing square can be
+# taken or freed by the same exchange it was aimed in
+def charge_vs_move(gk_from, gk_to):
+    m, cen = charge_arena([("centaur", (3, 3))], [("dummy", (7, 3)), ("gatekeeper", (8, 3))])
+    d, g = unit(m, RIGHT, "dummy"), unit(m, RIGHT, "gatekeeper")
+    d.set_cell((4, 3))                     # sits in a crossed square
+    g.set_cell(gk_from)
+    predicted = lanes_for(m, cen)["forward"]["landing"]
+    hp0 = d.hp
+    turn(m, cen.id, {"destination": None, "action": {"key": "ability:charge", "direction": "forward"}},
+         g.id, {"destination": list(gk_to), "action": {"key": "none"}})
+    return predicted, cen.cell, hp0 - d.hp
+
+predicted, ended, dealt = charge_vs_move((6, 2), (6, 3))    # enemy steps into the landing square
+ok("an enemy moving into the landing square stops the charge dead",
+   predicted == [6, 3] and ended == (3, 3), f"previewed {predicted}, ended {ended}")
+ok("...and the trample still lands anyway", dealt > 0, f"dealt {dealt}")
+
+predicted, ended, dealt = charge_vs_move((6, 3), (6, 4))    # enemy steps out of it
+ok("an enemy vacating the landing square lets the charge through",
+   predicted is None and ended == (6, 3), f"previewed {predicted}, ended {ended}")
+ok("...and that trample lands too", dealt > 0, f"dealt {dealt}")
+
 print("\nlog tail:")
 for line in m.log[-5:]:
     print("   ", line["text"])

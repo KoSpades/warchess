@@ -156,7 +156,7 @@ class Match:
         self.force_size = 2
         left = list(HEROES.TEST_HEROES)[:2]
         left += ["dummy"] * (2 - len(left))
-        right = ["dummy", "dummy"]
+        right = ["dummy", "dummy"]   # always dummies: no passives to muddy a test
         self.drafted = {LEFT: left, RIGHT: right}
         for s in (LEFT, RIGHT):
             # Down a column, so a squad's bodies land adjacent to each other.
@@ -593,7 +593,8 @@ class Match:
                     "key": "ability:" + ab.key,
                     "name": ab.name,
                     "ap_cost": ab.ap_cost,
-                    "targeting": ab.targeting,
+                    "targeting": self.ability_targeting(e, ab),
+                    "self_move": ab.self_move,
                     "affordable": e.ap >= ab.ap_cost,
                     "text": ab.blurb,
                 }
@@ -733,6 +734,14 @@ class Match:
         self.maybe_resolve()
         return None
 
+    def ability_targeting(self, e, ab):
+        """The ability's targeting, plus any live options only the engine can work
+        out — 冲撞's chargeable lanes, with landing square and who gets trampled."""
+        t = dict(ab.targeting)
+        if hasattr(ab, "lanes"):
+            t["choices"] = ab.lanes(self, e)
+        return t
+
     def validate_action(self, e, dest, action):
         key = action.get("key", "none")
         if e.hero.attack.get("mode") == HEROES.WEAPON:
@@ -774,6 +783,8 @@ class Match:
                 return f"Needs {ab.ap_cost} AP."
             if ab.use_limit is not None and e.vars.get("ability_uses", {}).get(ab.key, 0) >= ab.use_limit:
                 return "That ability is spent for the match."
+            if ab.self_move and e.cells and dest != e.cell:
+                return f"{ab.name} does the moving — leave your movement as hold."
             t = ab.targeting
             if t["kind"] == "direction" and action.get("direction") not in t["options"]:
                 return "Choose a direction."
@@ -794,7 +805,7 @@ class Match:
                 cap = min(e.hp, e.max_hp - 1)
                 if not isinstance(x, int) or x < 1 or x > cap:
                     return f"Choose an amount between 1 and {cap}."
-            return None
+            return ab.validate(self, e, action)
         return "Unknown action."
 
     # ---- 武器大师 weapon stances -------------------------------------------
