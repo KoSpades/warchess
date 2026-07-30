@@ -267,6 +267,9 @@ body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
 .rv-side.sideR .rv-img.has-img{border-color:var(--brass)}
 .rv-name{font-size:34px;font-weight:600;margin-top:18px}
 .rv-crew{font-size:18px;color:var(--dim);margin-top:6px}
+.rv-ability{font-size:22px;font-weight:600;color:var(--verdigris);margin-bottom:6px}
+.rv-side.sideR .rv-ability{color:var(--brass)}
+.rv-note{font-size:17px;line-height:1.45;color:var(--dim);margin-top:4px}
 .rv-order{margin-top:13px}
 .rv-hit{font-size:25px;line-height:1.5;color:var(--text)}
 .rv-hit b{color:var(--oxide);font-weight:700}
@@ -426,7 +429,13 @@ function syncDraft(){
   if (!draft) { draft = blankDraft(sel); return; }
   // A gang keeps its own idea of which goblin is being ordered right now — the
   // server's `selected` only records which one opened the gang's turn.
-  if (isGang()) { draft.gangOrders = draft.gangOrders || []; return; }
+  if (isGang()){
+    draft.gangOrders = draft.gangOrders || [];
+    // Switching away and back leaves a stale id behind — rebuild rather than
+    // render a panel for a hero that isn't in this gang.
+    if (draft.entity != null && !gangMember(draft.entity)) draft = blankDraft(sel);
+    return;
+  }
   if (draft.entity !== sel) draft = blankDraft(sel);
 }
 function blankDraft(entity){
@@ -485,9 +494,20 @@ function currentAction(){
   if (!draft || !draft.actionKey || !S.commit) return null;
   return curActions().find(a => a.key === draft.actionKey);
 }
+// Where a unit will be standing once this turn's movement resolves: its own
+// aim if it is the one being ordered, its already-recorded order if it is a
+// goblin further up the gang's queue, otherwise where it stands now. Keyed on
+// draft.entity, never on S.commit.selected — for a gang those differ, and using
+// `selected` drew one goblin's reach around another goblin's destination.
+function plannedCell(u){
+  if (!u || !u.cell || S.phase!=='commit' || !draft) return u ? u.cell : null;
+  if (draft.entity === u.id) return draft.destination || draft.tentative || u.cell;
+  const o = gangOrders().find(x => x.entity === u.id);
+  return (o && o.destination) || u.cell;
+}
 function originCell(){
-  const u = selectedUnit(); if (!u) return null;
-  return draft && draft.destination ? draft.destination : u.cell;
+  const u = selectedUnit();
+  return u ? plannedCell(u) : null;
 }
 function currentWeapon(){
   const act = currentAction();
@@ -600,14 +620,8 @@ function applyHover(){
   if (hoverId==null) return;
   const u = (S.units||[]).find(x=>x.id===hoverId);
   if (!u || !u.cell) return;
-  // Project from where the hero will stand: if it's the one you're moving, use
-  // its planned destination (confirmed or tentative), else its current cell.
-  let origin = u.cell;
-  if (S.phase==='commit' && S.commit && S.commit.selected===u.id && draft){
-    origin = draft.destination || draft.tentative || u.cell;
-  }
   const cls = u.side==='L' ? 'reachL' : 'reachR';
-  for (const [c,r] of reachCells(origin, u.rng)){
+  for (const [c,r] of reachCells(plannedCell(u), u.rng)){
     const el = document.querySelector(`#rows .cell[data-cell="${c},${r}"]`);
     if (el) el.classList.add(cls);
   }
@@ -802,11 +816,17 @@ function onCell(c,r){
   if (!draft) return;
   if (isGang() && !draft.destination && !draft.held){
     const u = unitAt(cell);
-    if (u && u.side===SIDE && u.alive && gangMember(u.id) && !isOrdered(u.id)){
-      // Clicking a goblin says "this one acts next" — the click order IS the
-      // acting order. Clicking the one you are aiming puts it back in the queue.
-      draft.entity = (u.id===draft.entity) ? null : u.id;
-      resetLeg(); err=""; return render();
+    if (u && u.side===SIDE && u.alive && !u.acted){
+      if (gangMember(u.id)){
+        if (isOrdered(u.id)) return;        // that goblin already has its orders
+        // Clicking a goblin says "this one acts next" — the click order IS the
+        // acting order. Clicking the one you are aiming puts it back in the queue.
+        draft.entity = (u.id===draft.entity) ? null : u.id;
+        resetLeg(); err=""; return render();
+      }
+      // One of your other heroes: switch the turn to it. The gang's orders were
+      // only ever local, so nothing was committed and nothing is lost.
+      return cmd({cmd:'select', entity:u.id});
     }
     if (!draft.entity) return;              // nobody is up yet — squares do nothing
     if (has(curMoves(),cell)){ draft.tentative=cell; err=""; return render(); }
@@ -978,6 +998,10 @@ function pickGoblin(id){
   if (!isGang() || isOrdered(id)) return;
   draft.entity = id; resetLeg(); err=""; render();
 }
+function dropGang(){
+  draft = blankDraft(null);        // keep the object valid until the poll rebuilds it
+  cmd({cmd:'deselect'});
+}
 function resetGang(){
   if (!isGang()) return;
   draft.gangOrders = []; draft.entity = null; resetLeg(); err=""; render();
@@ -1008,6 +1032,14 @@ function render(){
 function dismissReveal(){ revealActive = false; clearTimeout(window._revealT); render(); }
 
 function revealHits(o){
+  const bits = [];
+  for (const a of (o.abilities||[])) bits.push(`<div class="rv-ability">${a}</div>`);
+  for (const h of (o.hits||[])) bits.push(`<div class="rv-hit"><b>${h.amount}</b> damage → ${h.target}</div>`);
+  for (const n of (o.notes||[]).slice(0,3)) bits.push(`<div class="rv-note">${n}</div>`);
+  if (bits.length) return bits.join('');
+  return revealHitsPlain(o);
+}
+function revealHitsPlain(o){
   const hits = o.hits || [];
   if (!hits.length) return `<div class="rv-hit rv-none">no damage</div>`;
   return hits.map(h => `<div class="rv-hit"><b>${h.amount}</b> damage → ${h.target}</div>`).join('');
@@ -1175,6 +1207,7 @@ function renderCommit(){
     document.getElementById('leftbody').innerHTML = h; return;
   }
 
+  if (!draft){ document.getElementById('leftbody').innerHTML = h; return; }
   const u = selectedUnit(), act = currentAction();
   if (isGang()){
     h += gangHeaderHTML();
@@ -1242,6 +1275,7 @@ function gangHeaderHTML(){
     }).join('') + `</div>`;
     h += `<button class="btn" onclick="resetGang()">Clear the gang’s orders</button>`;
   }
+  h += `<button class="btn" onclick="dropGang()">← Order a different hero instead</button>`;
   for (const m of pending){
     h += `<button class="btn ${draft.entity===m.entity?'on':''}" onclick="pickGoblin(${m.entity})">
             ${m.name} <small>${cn(m.cell)} · AP ${m.ap}</small></button>`;

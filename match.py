@@ -1054,14 +1054,38 @@ class Match:
                         + f" — {ev.target.hp}/{ev.target.max_hp} left."
                     )
             for side in (LEFT, RIGHT):
-                if insts[side] is not None:
-                    insts[side].side_effects(self)
+                inst = insts[side]
+                if inst is None:
+                    continue
+                mark = len(self.log)
+                inst.side_effects(self)
+                self.note_on_reveal(side, inst, mark)
 
             res["index"] += 1
             res["picks"] = {LEFT: None, RIGHT: None}
             res["options"] = {LEFT: [], RIGHT: []}
             if self.check_victory():
                 return
+
+    def note_on_reveal(self, side, inst, mark):
+        """Put an ability's name — and whatever it announced while resolving — on the
+        pause screen, so an ability that deals no damage isn't invisible there."""
+        rv = (self.last_reveal or {}).get(side)
+        if rv is None:
+            return
+        ab = getattr(inst, "ability", None)
+        if ab is not None and ab.name not in rv.setdefault("abilities", []):
+            rv["abilities"].append(ab.name)
+        for line in self.log[mark:]:
+            if line.get("quiet"):
+                continue
+            # The panel already says whose side this is.
+            text = line["text"]
+            for prefix in ("Left ", "Right "):
+                if text.startswith(prefix):
+                    text = text[len(prefix):]
+                    break
+            rv.setdefault("notes", []).append(text)
 
     def choose_victim(self, side, eid):
         if self.phase != VICTIM or self.res is None:
