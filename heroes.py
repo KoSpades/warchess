@@ -1058,9 +1058,9 @@ ROSTER = [
         atk=1,
         move=1,
         max_ap=3,
-        attack={"mode": CELL, "cells": 3, "range": 7},
+        attack={"mode": UNIT, "range": None},
         abilities=[GreatFog()],
-        blurb="Sees far and hits for almost nothing — but every fog takes a step of reach from the whole enemy force.",
+        blurb="Picks off any enemy anywhere for almost nothing — and every fog takes a step of reach from the whole enemy force.",
     ),
     HeroDef(
         key="shopkeeper",
