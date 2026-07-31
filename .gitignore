@@ -3,3 +3,5 @@ __pycache__
 .venv/
 ngrok_domain.txt
 warchess-game.zip
+fixtures.json
+.client.test.js

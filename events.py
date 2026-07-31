@@ -20,6 +20,11 @@ BEFORE_DEATH = "before_death"
 DEATH = "death"
 CELL_ENTERED = "cell_entered"
 ABILITY_USED = "ability_used"
+# The exchange is over: every hit has landed, every effect has run and the
+# dead are off the board, but nobody has been picked for the next one yet.
+# Context carries what happened — `landed` is whether that unit's attack got
+# through — so a hero can react to the outcome of its own turn.
+TURN_RESOLVED = "turn_resolved"
 
 
 def hook(priority=50):

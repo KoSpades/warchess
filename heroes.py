@@ -43,6 +43,11 @@ class Ability:
         partway through a match, or that a hero can trade away."""
         return True
 
+    def magnitude_cap(self, actor):
+        """Largest amount a `magnitude` ability accepts. The cost is the ability's
+        business, not the validator's — 0 means it cannot be used at all."""
+        return max(0, actor.hp - 1)
+
 
 class Sweep(Ability):
     key = "sweep"
@@ -203,6 +208,72 @@ class Possess(Ability):
             f"{match.label(actor)} sinks into {match.label(tgt)} — its blows land "
             f"1 weaker and its reach shortens until the ghost stirs again."
         )
+
+
+class Shotgun:
+    """男枪's 散弹枪. Two halves, both hung off the turn-resolved hook: a hit ramps
+    its damage (to a cap), and a hit lets it reposition once the exchange has
+    settled — the follow-up asks where."""
+
+    describe = ("Its attack sprays a three-cell arc in a chosen direction. Every shot "
+                "that connects raises its damage by 1 — at most +2 — and lets it step "
+                "one square once the exchange is over.")
+    RAMP_CAP = 2
+
+    def on_turn_resolved(self, match, owner, ctx):
+        if ctx.get("entity") is not owner or not ctx.get("landed"):
+            return
+        ramp = owner.vars.get("spread_ramp", 0)
+        if ramp >= self.RAMP_CAP:
+            return
+        owner.vars["spread_ramp"] = ramp + 1
+        owner.add_modifier(Modifier("atk", "add", 1, source=self))
+        match.log_line(
+            f"{match.label(owner)} finds its range — Atk now {owner.atk}"
+            + (" (as far as it goes)." if ramp + 1 == self.RAMP_CAP else ".")
+        )
+
+    def followup(self, match, owner, ctx):
+        if ctx.get("entity") is not owner or not ctx.get("landed"):
+            return None
+        if not owner.alive or not owner.cells:
+            return None
+        free = [c for c in match.topology.neighbours(owner.cell)
+                if match.occupant(c) is None]
+        if not free:
+            return None
+        return {
+            "key": "reposition",
+            "name": "散弹枪 Reposition",
+            "text": "The shot connected — step one square now, or hold your ground.",
+            "kind": "cell",
+            "optional": True,
+            "options": [list(c) for c in free],
+        }
+
+    def apply_followup(self, match, owner, key, choice):
+        if key != "reposition" or not choice:
+            return
+        cell = tuple(choice)
+        if match.occupant(cell) is not None or not owner.alive:
+            return
+        frm = owner.cell
+        owner.set_cell(cell)
+        match.bus.emit(EV.AFTER_MOVE, {"entity": owner, "from": frm, "to": cell})
+        match.log_line(
+            f"{match.label(owner)} racks the slide and slides "
+            f"{match.cell_name(frm)} → {match.cell_name(cell)}."
+        )
+
+    def status(self, match, owner):
+        ramp = owner.vars.get("spread_ramp", 0)
+        if not ramp:
+            return None
+        return {
+            "key": "ramp", "badge": f"+{ramp}", "label": "散弹枪 DIALLED IN",
+            "text": f"Every shot that connected has raised its damage — +{ramp}"
+                    + (", as far as it goes." if ramp >= self.RAMP_CAP else "."),
+        }
 
 
 class GhostForm:
@@ -479,10 +550,14 @@ class BloodRite(Ability):
     blurb = ("Once per match: spend health — current and maximum alike — for that "
              "much permanent attack. Never enough to kill yourself.")
 
+    def magnitude_cap(self, actor):
+        # Never enough to self-kill: one point of each is always left standing.
+        return max(0, min(actor.hp - 1, actor.max_hp - 1))
+
     def side_effects(self, match, actor, params):
         # The sacrifice is real blood, not just a smaller frame: it costs current
-        # HP as well as max. Never enough to self-kill — 1 of each is always left.
-        x = max(0, min(int(params.get("amount") or 0), actor.hp - 1, actor.max_hp - 1))
+        # HP as well as max.
+        x = max(0, min(int(params.get("amount") or 0), self.magnitude_cap(actor)))
         if x <= 0:
             match.log_line(f"{match.label(actor)} has no blood left to spare.")
             return
@@ -882,6 +957,7 @@ CELL = "cell_locked"
 UNIT = "unit_locked"
 LINE = "line_locked"  # 狙击手: the first enemy down one lane of your row or column
 AREA = "area_locked"  # 猛犸: every enemy inside a shape centred on the hero
+CONE = "cone_locked"  # 男枪: the three-cell arc one step away, in a chosen direction
 WEAPON = "weapon"  # 武器大师: the attack is chosen each turn from `weapons`
 
 # 武器大师's arsenal. `mode` drives targeting: "cells" = mark cells within range
@@ -1191,6 +1267,18 @@ ROSTER = [
         blurb="Frail, but the killing blow only enrages him — two untouchable turns, then dust.",
     ),
     HeroDef(
+        key="gunner",
+        name="男枪",
+        name_en="gunner",
+        max_hp=17,
+        atk=3,
+        move=1,
+        max_ap=0,
+        attack={"mode": CONE},
+        passives=[Shotgun],
+        blurb="Sprays a three-cell arc, and every shot that bites makes the next one hurt more.",
+    ),
+    HeroDef(
         key="mammoth",
         name="猛犸",
         name_en="mammoth",
@@ -1370,8 +1458,67 @@ BY_KEY[DUMMY.key] = DUMMY
 # whenever you add heroes; --test fills the rest of your side with dummies.
 # Whoever is newest goes here — --test always deploys the hero just added, so it
 # can be played immediately. Up to two; the rest of the side is padded with dummies.
-TEST_HEROES = ["mammoth", "ghost"]
+TEST_HEROES = ["gunner", "mammoth"]
 
+
+
+def check_roster():
+    """Structural checks on the hero data itself. Cheap enough to run at import in
+    tests, and it catches the mistakes that are otherwise found only in play: a
+    misspelled attack mode, a squad naming a body that does not exist, two heroes
+    sharing a key, art that will never be found because name_en does not match.
+    Returns a list of complaints; empty means the roster is well formed."""
+    import attacks as ATK
+
+    bad = []
+    seen = {}
+    every = list(ROSTER) + list(SQUAD_MEMBERS) + [DUMMY]
+
+    for h in every:
+        where = f"{h.name}({h.key})"
+        if h.key in seen:
+            bad.append(f"{where}: duplicate key, also used by {seen[h.key]}")
+        seen[h.key] = h.name
+
+        mode = (h.attack or {}).get("mode")
+        if mode not in ATK.MODES:
+            bad.append(f"{where}: unknown attack mode {mode!r}")
+        if mode == CELL:
+            for field in ("cells", "range"):
+                if h.attack.get(field) is None:
+                    bad.append(f"{where}: cell-locked attack needs a {field!r}")
+        if mode == WEAPON and not h.weapons:
+            bad.append(f"{where}: weapon attack but no weapons listed")
+
+        if not h.name_en or not h.name_en[0].islower() or " " in h.name_en:
+            bad.append(f"{where}: name_en {h.name_en!r} should be lowerCamelCase — art is looked up by it")
+        for n in (h.max_hp, h.atk, h.move, h.max_ap):
+            if not isinstance(n, int) or n < 0:
+                bad.append(f"{where}: stats must be non-negative whole numbers, got {n!r}")
+        if h.max_hp < 1:
+            bad.append(f"{where}: a hero needs at least 1 HP")
+
+        for k in (h.squad or []):
+            if k not in BY_KEY:
+                bad.append(f"{where}: squad names {k!r}, which is not a hero")
+        if h.gang and h.gang not in BY_KEY:
+            bad.append(f"{where}: belongs to gang {h.gang!r}, which is not a hero")
+
+        keys = [ab.key for ab in h.abilities]
+        if len(keys) != len(set(keys)):
+            bad.append(f"{where}: two abilities share a key {keys}")
+        for ab in h.abilities:
+            if not ab.key or not ab.name:
+                bad.append(f"{where}: ability {ab!r} needs a key and a name")
+            if ab.ap_cost > h.max_ap and not ab.opening:
+                bad.append(f"{where}: {ab.name} costs {ab.ap_cost} AP but the hero maxes at {h.max_ap}")
+            if ab.targeting.get("kind") == "direction" and not ab.targeting.get("options"):
+                bad.append(f"{where}: {ab.name} is direction-targeted but lists no options")
+
+    for k in TEST_HEROES:
+        if k not in BY_KEY:
+            bad.append(f"TEST_HEROES names {k!r}, which is not a hero")
+    return bad
 
 
 def status_of(match, entity):

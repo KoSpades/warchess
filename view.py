@@ -258,6 +258,14 @@ def state_for(m, side):
         out["commit"] = c
         return out
 
+    if m.phase == M.RESOLVED:
+        pend = m.followups[side]
+        out["followup"] = {
+            "task": pend[0] if pend else None,
+            "waiting_on_opponent": (not pend) and bool(m.followups[foe]),
+        }
+        return out
+
     if m.phase == M.VICTIM:
         opts = m.res["options"][side] if m.res else []
         inst = None

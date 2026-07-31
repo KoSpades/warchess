@@ -180,6 +180,43 @@ class AreaAttack(ActionInstance):
         ]
 
 
+class ConeAttack(ActionInstance):
+    """A spread weapon: everything in the three-cell arc one step away in the
+    chosen direction is hit for the same amount. Like every positional attack the
+    arc is re-derived from where the attacker actually ends up."""
+
+    needs_pick = False
+    label = "attack"
+
+    def __init__(self, attacker, direction):
+        self.attacker = attacker
+        self.actor = attacker
+        self.direction = direction
+
+    @staticmethod
+    def cells(match, actor, direction, origin=None):
+        step = match.topology.direction_step(actor.side, direction)
+        origin = tuple(origin) if origin else actor.cell
+        if step is None or origin is None:
+            return []
+        return match.topology.cone(origin, step)
+
+    def resolved_cells(self, match):
+        return self.cells(match, self.attacker, self.direction)
+
+    def eligible_victims(self, match):
+        return None
+
+    def build_damage(self, match, victim):
+        spread = set(self.resolved_cells(match))
+        return [
+            DMG.DamageEvent(source=self.attacker, target=e, amount=self.attacker.atk,
+                            category=DMG.NORMAL_ATTACK)
+            for e in match.living()
+            if e.side != self.attacker.side and e.flags["targetable"] and (e.cells & spread)
+        ]
+
+
 class UnitLockedAttack(ActionInstance):
     """Commits a hero identity. Lands regardless of where either unit moved."""
 

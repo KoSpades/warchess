@@ -61,6 +61,14 @@ def ok(label, cond, detail=""):
     print(f"{'PASS' if cond else 'FAIL'}  {label}" + (f"   [{detail}]" if detail else ""))
 
 
+# 0 — the hero data itself is well formed: unknown attack modes, squads naming
+# heroes that do not exist, art that can never be found, abilities nobody can pay
+# for. Cheap, and it catches these before they reach a game.
+import heroes as HEROES
+_bad = HEROES.check_roster()
+ok("the roster is structurally sound", not _bad, "; ".join(_bad))
+
+
 # 1 — both step to different cells, both move
 m = build()
 turn(m, 1, {"destination": [4, 1], "action": {"key": "none"}},
@@ -1078,6 +1086,115 @@ turn(m, mam.id, {"destination": [4, 3], "action": {"key": "attack"}},
      d.id, {"destination": None, "action": {"key": "none"}})
 ok("the swing is centred where it ends up, not where it started",
    mam.cell == (4, 3) and before - d.hp == mam.atk, f"at {mam.cell}, dealt {before - d.hp}")
+
+# 42 — 男枪: a three-square arc, a ramp that caps, and a step after it connects
+def gunner_arena():
+    m = arena([("gunner", (3, 3))], [("dummy", (7, 3)), ("cannoneer", (7, 2)), ("gatekeeper", (7, 4))])
+    g = unit(m, LEFT, "gunner")
+    d, c, gk = (unit(m, RIGHT, k) for k in ("dummy", "cannoneer", "gatekeeper"))
+    return m, g, d, c, gk
+
+def spray(m, g, direction, foe, step=None):
+    """Fire, then answer the follow-up if the shot earned one."""
+    assert m.select_hero(LEFT, g.id) is None
+    err = m.commit(LEFT, {"destination": None, "action": {"key": "attack", "direction": direction}})
+    if err:
+        return err
+    m.select_hero(RIGHT, foe.id)
+    m.commit(RIGHT, hold)
+    while m.phase == "victim":
+        for side in (LEFT, RIGHT):
+            o = m.res["options"][side]
+            if o and m.res["picks"][side] is None:
+                m.choose_victim(side, o[0])
+    if m.phase == "resolved":
+        m.choose_followup(LEFT, step)
+    # Play the rest of the round out so the gunner comes round again.
+    guard = 0
+    while m.phase == "commit" and m.unacted(RIGHT) and guard < 12:
+        guard += 1
+        r = m.unacted(RIGHT)[0]
+        m.select_hero(RIGHT, r.id)
+        m.commit(RIGHT, hold)
+        while m.phase == "victim":
+            for side in (LEFT, RIGHT):
+                o = m.res["options"][side]
+                if o and m.res["picks"][side] is None:
+                    m.choose_victim(side, o[0])
+        if m.phase == "resolved":
+            m.choose_followup(LEFT, None)
+    return None
+
+m, g, d, c, gk = gunner_arena()
+d.set_cell((4, 3)); c.set_cell((4, 2)); gk.set_cell((4, 4))     # the whole forward arc
+m.select_hero(LEFT, g.id)
+menu = {a["key"]: a for a in m.action_menu(g)}
+ok("its attack asks for a direction", menu["attack"]["targeting"]["kind"] == "cone")
+ok("and each direction offers a three-square arc",
+   all(len(x["cells"]) == 3 for x in menu["attack"]["targeting"]["dirs"]
+       if x["dir"] in ("forward", "up", "down")),
+   str(menu["attack"]["targeting"]["dirs"][0]))
+
+before = {x.name: x.hp for x in (d, c, gk)}
+atk0 = g.atk
+spray(m, g, "forward", d, step=None)
+ok("every enemy in the arc takes the shot",
+   all(before[x.name] - x.hp == atk0 for x in (d, c, gk)),
+   str({x.name: before[x.name] - x.hp for x in (d, c, gk)}))
+ok("a shot that connects raises its damage", g.atk - atk0 == 1, f"{atk0} -> {g.atk}")
+
+# an enemy outside the arc is untouched
+m, g, d, c, gk = gunner_arena()
+d.set_cell((4, 3)); c.set_cell((5, 3))                          # c is two squares off
+before_c = c.hp
+spray(m, g, "forward", d, step=None)
+ok("an enemy beyond the arc is untouched", c.hp == before_c, f"took {before_c - c.hp}")
+
+# the ramp stops at +2, however many shots land
+m, g, d, c, gk = gunner_arena()
+d.set_cell((4, 3))
+d.max_hp = d.hp = 200
+base = g.hero.atk
+seen = []
+for _ in range(4):
+    spray(m, g, "forward", d, step=None)
+    seen.append(g.atk - base)
+ok("the ramp climbs and then stops at +2", seen == [1, 2, 2, 2], str(seen))
+
+# a shot that hits nothing earns neither ramp nor step
+m, g, d, c, gk = gunner_arena()
+d.set_cell((7, 3)); c.set_cell((7, 2)); gk.set_cell((7, 4))     # nobody near
+atk0 = g.atk
+spray(m, g, "forward", d, step=None)
+ok("a shot that connects with nothing gives no ramp", g.atk == atk0, f"{atk0} -> {g.atk}")
+ok("...and offers no step", m.phase != "resolved", m.phase)
+
+# the step: offered after everything resolves, optional, and only onto free squares
+m, g, d, c, gk = gunner_arena()
+d.set_cell((4, 3))
+m.select_hero(LEFT, g.id)
+m.commit(LEFT, {"destination": None, "action": {"key": "attack", "direction": "forward"}})
+m.select_hero(RIGHT, d.id); m.commit(RIGHT, hold)
+ok("a hit pauses for the step, after the exchange has resolved", m.phase == "resolved", m.phase)
+task = m.followups[LEFT][0]
+ok("only free neighbours are offered",
+   all(m.occupant(tuple(x)) is None for x in task["options"]) and task["optional"],
+   str(task["options"]))
+ok("a square nobody offered is refused", m.choose_followup(LEFT, [9, 1]) is not None)
+where = task["options"][0]
+ok("stepping there works", m.choose_followup(LEFT, where) is None)
+ok("it moved, and play carries on", g.cell == tuple(where) and m.phase == "commit",
+   f"{g.cell}, phase {m.phase}")
+
+# and it can decline
+m, g, d, c, gk = gunner_arena()
+d.set_cell((4, 3))
+m.select_hero(LEFT, g.id)
+m.commit(LEFT, {"destination": None, "action": {"key": "attack", "direction": "forward"}})
+m.select_hero(RIGHT, d.id); m.commit(RIGHT, hold)
+was = g.cell
+ok("the step can be declined", m.choose_followup(LEFT, None) is None)
+ok("declining leaves it where it stood", g.cell == was and m.phase == "commit", str(g.cell))
 
 print("\nlog tail:")
 for line in m.log[-5:]:

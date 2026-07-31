@@ -81,6 +81,16 @@ class Topology:
         return {"forward": (fwd, 0), "backward": (-fwd, 0),
                 "up": (0, -1), "down": (0, 1)}.get(name)
 
+    def cone(self, origin, step):
+        """The square one step away plus the two flanking it — a three-cell arc
+        in that direction. Used by a spread weapon."""
+        perp = (0, 1) if step[0] else (1, 0)
+        c, r = origin
+        cells = [(c + step[0], r + step[1]),
+                 (c + step[0] + perp[0], r + step[1] + perp[1]),
+                 (c + step[0] - perp[0], r + step[1] - perp[1])]
+        return [x for x in cells if self.in_bounds(x)]
+
     def ray(self, origin, step, limit=None):
         """Cells walking outward from (but not including) origin, in order, until
         the board runs out — the lane a charge or a sniper's shot travels."""

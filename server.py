@@ -46,6 +46,8 @@ class Game:
                 return m.deselect(side)
             if cmd == "commit":
                 return m.commit(side, body.get("payload") or {})
+            if cmd == "followup":
+                return m.choose_followup(side, body.get("cell"))
             if cmd == "victim":
                 return m.choose_victim(side, body["entity"])
             return "Unknown command."
@@ -80,6 +82,9 @@ class Handler(BaseHTTPRequestHandler):
         if url.path in ("/", "/index.html"):
             with open(os.path.join(STATIC, "index.html"), "rb") as fh:
                 return self._send(200, fh.read(), "text/html; charset=utf-8")
+        if url.path == "/app.js":
+            with open(os.path.join(STATIC, "app.js"), "rb") as fh:
+                return self._send(200, fh.read(), "application/javascript; charset=utf-8")
         if url.path.startswith("/image/"):
             # Only the known art folders are reachable, and basename blocks any
             # path traversal inside them.

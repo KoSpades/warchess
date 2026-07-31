@@ -10,6 +10,7 @@ import random
 import time
 
 import actions as ACT
+import attacks as ATK
 import damage as DMG
 import events as EV
 import heroes as HEROES
@@ -24,6 +25,10 @@ SETUP = "setup"
 OPENING = "opening"
 COMMIT = "commit"
 VICTIM = "victim"
+# A turn has fully resolved and something wants to act on the outcome before the
+# next pair is picked (男枪 stepping after a hit). Only entered if a follow-up
+# actually needs a decision.
+RESOLVED = "resolved"
 GAMEOVER = "gameover"
 
 # The draft plays out in batches: each batch shows a fresh set of never-seen
@@ -403,7 +408,7 @@ class Match:
             return "Nothing to choose."
         e = self.entity(pend[0]["entity"])
         ab = next(a for a in e.abilities if a.key == pend[0]["ability_key"])
-        err = self._validate_targeting(e, ab.targeting, params)
+        err = self.validate_targeting(e, ab, params)
         if err:
             return err
         self._apply_opening(e, ab, params)
@@ -414,23 +419,40 @@ class Match:
             self.start_round()
         return None
 
-    def _validate_targeting(self, e, t, params):
-        """Shared targeting checks for opening picks (and any future non-turn
-        choice). Mirrors the ability cases in validate_action."""
+    def validate_targeting(self, e, ab, params):
+        """Every targeting kind checked in one place — turn actions and opening
+        picks both come through here, so the two can never drift apart. Anything
+        beyond targeting belongs in the ability's own `validate`."""
+        t = self.ability_targeting(e, ab)
         kind = t.get("kind", "none")
-        if kind == "ally":
-            tt = self.entity(params.get("target"))
-            if tt is None or not tt.alive or tt.side != e.side:
-                return "Choose a living ally."
+
+        if kind == "direction":
+            if params.get("direction") not in t.get("options", []):
+                return "Choose a direction."
+
         elif kind == "any_cell":
             cell = params.get("cell")
             if not cell or not self.topology.in_bounds(tuple(cell)):
                 return "Choose a cell on the board."
+            legal = t.get("cells")
+            if legal is not None and list(cell) not in legal:
+                return "Not a square this can be used on."
+
+        elif kind in ("ally", "unit"):
+            want_ally = kind == "ally"
+            tt = self.entity(params.get("target"))
+            ok = tt is not None and tt.alive and ((tt.side == e.side) == want_ally)
+            if not ok:
+                return "Choose a living ally." if want_ally else "Choose a living enemy."
+
         elif kind == "magnitude":
+            cap = ab.magnitude_cap(e)
+            if cap < 1:
+                return f"{ab.name} cannot be used right now."
             x = params.get("amount")
-            cap = min(e.hp, e.max_hp - 1)
             if not isinstance(x, int) or x < 1 or x > cap:
                 return f"Choose an amount between 1 and {cap}."
+
         return None
 
     # -------------------------------------------------------------- round
@@ -460,6 +482,9 @@ class Match:
         self.commits = {LEFT: None, RIGHT: None}
         self.turn_started = {LEFT: False, RIGHT: False}
         self.res = None
+        # Whose attacks connected this exchange, for the turn-resolved hooks.
+        self.landed = set()
+        self.followups = {LEFT: [], RIGHT: []}
         self.take_snapshot()
 
         # A side with nobody left to act sits the exchange out; the other side
@@ -632,67 +657,9 @@ class Match:
             return []
         out = [{"key": "none", "name": "Hold", "ap_cost": 0, "targeting": {"kind": "none"}}]
         # A bodiless hero can still plan an attack if it is about to take flesh.
-        spec = e.hero.attack if (e.cells or self.legal_moves(e)) else None
-        if spec is None:
-            pass
-        elif spec["mode"] == HEROES.CELL:
-            out.append(
-                {
-                    "key": "attack",
-                    "name": "Normal attack",
-                    "ap_cost": 0,
-                    "targeting": {
-                        "kind": "cells",
-                        "count": e.grid,
-                        "range": e.rng,
-                        "shots": e.hero.attacks_per_turn,
-                    },
-                }
-            )
-        elif spec["mode"] == HEROES.AREA:
-            out.append(
-                {
-                    "key": "attack",
-                    "name": "Normal attack",
-                    "ap_cost": 0,
-                    # Nothing to aim: it catches every enemy in the shape around
-                    # wherever it ends up. The cells are for the preview only.
-                    "targeting": {"kind": "area",
-                                  "shape": e.hero.attack.get("shape", "surround8"),
-                                  "cells": [list(c) for c in self.attack_shape(e)]},
-                }
-            )
-        elif spec["mode"] == HEROES.LINE:
-            out.append(
-                {
-                    "key": "attack",
-                    "name": "Normal attack",
-                    "ap_cost": 0,
-                    # No precomputed choices: the lane depends on where this hero
-                    # ends up, so the client scans from the square being aimed at
-                    # and the commit is validated against the real destination.
-                    "targeting": {"kind": "lane", "dirs": list(self.topology.DIRECTIONS)},
-                }
-            )
-        elif spec["mode"] == HEROES.WEAPON:
-            out.append(
-                {
-                    "key": "attack",
-                    "name": "Weapon",
-                    "ap_cost": 0,
-                    "targeting": {"kind": "weapon"},
-                    "weapons": e.hero.weapons,
-                }
-            )
-        else:
-            out.append(
-                {
-                    "key": "attack",
-                    "name": "Normal attack",
-                    "ap_cost": 0,
-                    "targeting": {"kind": "unit", "range": spec.get("range")},
-                }
-            )
+        mode = ATK.mode_for(e) if (e.cells or self.legal_moves(e)) else None
+        if mode is not None:
+            out.append(mode.menu_entry(self, e))
         uses = e.vars.get("ability_uses", {})
         for ab in e.abilities:
             if getattr(ab, "opening", False):
@@ -863,42 +830,13 @@ class Match:
         key = action.get("key", "none")
         if key == "none":
             return None      # holding is always legal, whatever the attack mode
-        if e.hero.attack.get("mode") == HEROES.WEAPON:
-            return self._validate_weapon(e, dest, action, key)
         if key == "attack":
             if not e.cells and dest is None:
                 return f"{e.name} has no body to attack with — take flesh first."
-            spec = e.hero.attack
-            if spec["mode"] == HEROES.CELL:
-                shots = action.get("shots") or []
-                if len(shots) != e.hero.attacks_per_turn:
-                    return f"Mark cells for all {e.hero.attacks_per_turn} shot(s)."
-                for cells in shots:
-                    # Any number of cells up to the max — a smaller net is the
-                    # attacker's choice; an empty net simply hits nothing.
-                    if len(cells) > e.grid:
-                        return f"At most {e.grid} cells per shot."
-                    for c in cells:
-                        c = tuple(c)
-                        if not self.topology.in_bounds(c):
-                            return "Cell off the board."
-                        if self.topology.distance(dest, c) > e.rng:
-                            return "Cell out of range of where you will be standing."
-                    if len(set(tuple(c) for c in cells)) != len(cells):
-                        return "Cells must be distinct."
-            elif spec["mode"] == HEROES.AREA:
-                pass          # nothing to aim: it catches whatever is beside it
-            elif spec["mode"] == HEROES.LINE:
-                d = action.get("direction")
-                if d not in self.topology.DIRECTIONS:
-                    return "Choose a lane to fire down."
-                if ACT.LineShot.scan(self, e, d, dest) is None:
-                    return "No shot down that lane — nobody there, or your own line is in the way."
-            else:
-                t = self.entity(action.get("target"))
-                if t is None or not t.alive or t.side == e.side:
-                    return "Choose a living enemy."
-            return None
+            mode = ATK.mode_for(e)
+            if mode is None:
+                return f"{e.name} has no attack."
+            return mode.validate(self, e, dest, action)
         if key.startswith("ability:"):
             abkey = key.split(":", 1)[1]
             ab = next((a for a in e.abilities if a.key == abkey), None)
@@ -915,30 +853,7 @@ class Match:
                 return "That ability is spent for the match."
             if ab.self_move and e.cells and dest != e.cell:
                 return f"{ab.name} does the moving — leave your movement as hold."
-            t = ab.targeting
-            if t["kind"] == "direction" and action.get("direction") not in t["options"]:
-                return "Choose a direction."
-            if t["kind"] == "any_cell":
-                cell = action.get("cell")
-                if not cell or not self.topology.in_bounds(tuple(cell)):
-                    return "Choose a cell on the board."
-                legal = self.ability_targeting(e, ab).get("cells")
-                if legal is not None and list(cell) not in legal:
-                    return "Not a square this can be used on."
-            if t["kind"] == "ally":
-                tt = self.entity(action.get("target"))
-                if tt is None or not tt.alive or tt.side != e.side:
-                    return "Choose a living ally."
-            if t["kind"] == "unit":
-                tt = self.entity(action.get("target"))
-                if tt is None or not tt.alive or tt.side == e.side:
-                    return "Choose a living enemy."
-            if t["kind"] == "magnitude":
-                x = action.get("amount")
-                cap = min(e.hp - 1, e.max_hp - 1)
-                if not isinstance(x, int) or x < 1 or x > cap:
-                    return f"Choose an amount between 1 and {cap}."
-            return ab.validate(self, e, action)
+            return self.validate_targeting(e, ab, action) or ab.validate(self, e, action)
         return "Unknown action."
 
     # ---- 武器大师 weapon stances -------------------------------------------
@@ -1111,26 +1026,9 @@ class Match:
         intended = tuple(commit["destination"]) if commit["destination"] else e.cell
         if key == "none":
             return [ACT.NullAction()]     # no weapon drawn, so no stance either
-        if e.hero.attack.get("mode") == HEROES.WEAPON:
-            return self._build_weapon(e, action, intended)
         if key == "attack":
-            spec = e.hero.attack
-            if spec["mode"] == HEROES.CELL:
-                out = []
-                for i, cells in enumerate(action["shots"]):
-                    halve = (
-                        e.hero.halve_from_index is not None
-                        and i >= e.hero.halve_from_index
-                    )
-                    out.append(ACT.CellLockedAttack(e, cells, intended, halve, i))
-                return out
-            if spec["mode"] == HEROES.AREA:
-                # Built after movement resolves, so the shape is centred on the
-                # square it actually ended up standing in.
-                return [ACT.AreaAttack(e, self.attack_shape(e), e.atk)]
-            if spec["mode"] == HEROES.LINE:
-                return [ACT.LineShot(e, action.get("direction"))]
-            return [ACT.UnitLockedAttack(e, self.entity(action.get("target")))]
+            mode = ATK.mode_for(e)
+            return mode.build(self, e, intended, action) if mode else [ACT.NullAction()]
         if key.startswith("ability:"):
             abkey = key.split(":", 1)[1]
             ab = next(a for a in e.abilities if a.key == abkey)
@@ -1198,6 +1096,9 @@ class Match:
             # or a hero saved on the exact turn it drops would die anyway.
             for _s, _i, ev in batch:
                 DMG.deal(self, ev)
+            for side, inst, ev in batch:
+                if not ev.cancelled and ev.amount > 0 and inst.actor is not None:
+                    self.landed.add(inst.actor.id)
             for side, inst, ev in batch:
                 if ev.cancelled:
                     self.log_line(
@@ -1317,7 +1218,64 @@ class Match:
         if self.check_victory():
             return
         self.res = None
+        if self.run_turn_resolved():
+            return          # somebody has a decision to make first
         self.start_exchange()
+
+    def run_turn_resolved(self):
+        """The exchange has settled. Tell every unit that acted how it went, then
+        collect any follow-up that needs the player to choose something. Returns
+        True if we are now waiting on one of those choices.
+
+        A passive reacts by implementing `on_turn_resolved` (no input needed) or
+        `followup`/`apply_followup` (a choice), mirroring the `turn_choice` pair
+        that fires at the start of a turn."""
+        self.followups = {LEFT: [], RIGHT: []}
+        for side in (LEFT, RIGHT):
+            c = self.commits.get(side)
+            if not c or c["kind"] not in ("action", "gang", "dead"):
+                continue
+            for e in self.turn_units(side, c):
+                if not e.alive:
+                    continue
+                ctx = {"entity": e, "landed": e.id in self.landed}
+                self.bus.emit(EV.TURN_RESOLVED, ctx)
+                for p in e.passives:
+                    fn = getattr(p, "followup", None)
+                    task = fn(self, e, ctx) if fn else None
+                    if task and task.get("options"):
+                        self.followups[side].append(dict(task, entity=e.id))
+        if not any(self.followups.values()):
+            return False
+        self.phase = RESOLVED
+        self.bump()
+        return True
+
+    def choose_followup(self, side, choice=None):
+        """Answer the first follow-up pending for this side. `choice` of None
+        declines it, when the follow-up allows that."""
+        if self.phase != RESOLVED:
+            return "Nothing to decide."
+        pend = self.followups[side]
+        if not pend:
+            return "Nothing pending for you."
+        task = pend[0]
+        e = self.entity(task["entity"])
+        if choice is not None and list(choice) not in task["options"]:
+            return "Not one of the squares on offer."
+        if choice is None and not task.get("optional"):
+            return "You must choose one."
+        if e is not None and e.alive:
+            for p in e.passives:
+                fn = getattr(p, "apply_followup", None)
+                if fn:
+                    fn(self, e, task["key"], choice)
+        pend.pop(0)
+        self.bump()
+        if not any(self.followups.values()):
+            self.phase = COMMIT      # start_exchange sets the real phase
+            self.start_exchange()
+        return None
 
     def check_victory(self):
         left = [e for e in self.living(LEFT) if e.flags["counts_for_defeat"]]
