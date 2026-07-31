@@ -37,7 +37,9 @@ class NullAction(ActionInstance):
 
 class CellLockedAttack(ActionInstance):
     """X cells chosen within range Y of the intended post-move position. One
-    enemy standing in them takes the damage, chosen live by the attacker."""
+    enemy standing in them takes the damage, chosen live by the attacker. There
+    is no friendly fire anywhere in this game: an attack only ever considers the
+    other side."""
 
     needs_pick = True
 
@@ -52,8 +54,9 @@ class CellLockedAttack(ActionInstance):
         self.label = "shot 2" if index else "attack"
 
     def resolved_cells(self, match):
-        """If the attacker was bounced, the pattern is re-derived from where it
-        actually stands: being blocked displaces your shot, it does not void it."""
+        """If the attacker was displaced, the pattern is re-derived from where it
+        actually stands: being blocked — or swapped — moves your shot with you, it
+        does not void it."""
         actual = self.attacker.cell
         if actual is None or self.intended_origin is None:
             # It never made it onto the board — a 鬼魂 whose square was taken by

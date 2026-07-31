@@ -364,6 +364,49 @@ class CursePoison(Ability):
         )
 
 
+class Transfer(Ability):
+    """魔术师's 转移. Resolves with movement rather than with damage, so a unit
+    pulled into a marked square is the one that takes the hit — attacks find
+    their victims from live positions."""
+
+    key = "transfer"
+    name = "转移 Transfer"
+    ap_cost = 2
+    targeting = {"kind": "two_units"}
+    blurb = ("Swap any two units on the board, anywhere. It happens as everyone "
+             "moves, so a hero dragged into a marked square takes what was aimed "
+             "at whoever stood there.")
+
+    @staticmethod
+    def pair(match, params):
+        a = match.entity(params.get("first"))
+        b = match.entity(params.get("second"))
+        return a, b
+
+    def validate(self, match, actor, params):
+        a, b = self.pair(match, params)
+        for x in (a, b):
+            if x is None or not x.alive or not x.cells:
+                return "Choose two units that are on the board."
+        if a is b:
+            return "Choose two different units."
+        return None
+
+    def move_effects(self, match, actor, params):
+        a, b = self.pair(match, params)
+        if a is None or b is None or a is b or not a.cells or not b.cells:
+            return
+        ca, cb = a.cell, b.cell
+        a.set_cell(cb)
+        b.set_cell(ca)
+        match.bus.emit(EV.AFTER_MOVE, {"entity": a, "from": ca, "to": cb})
+        match.bus.emit(EV.AFTER_MOVE, {"entity": b, "from": cb, "to": ca})
+        match.log_line(
+            f"{match.label(actor)} works the switch — {match.label(a)} and "
+            f"{match.label(b)} trade places."
+        )
+
+
 class MagicWard(Ability):
     key = "magic_ward"
     name = "魔法守护 Magic Ward"
@@ -1267,6 +1310,18 @@ ROSTER = [
         blurb="Frail, but the killing blow only enrages him — two untouchable turns, then dust.",
     ),
     HeroDef(
+        key="magician",
+        name="魔术师",
+        name_en="magician",
+        max_hp=15,
+        atk=2,
+        move=1,
+        max_ap=2,
+        attack={"mode": CELL, "cells": 2, "range": 5},
+        abilities=[Transfer()],
+        blurb="Trades two heroes' places mid-exchange — walk one out of danger, or drag one into it.",
+    ),
+    HeroDef(
         key="gunner",
         name="男枪",
         name_en="gunner",
@@ -1458,8 +1513,17 @@ BY_KEY[DUMMY.key] = DUMMY
 # whenever you add heroes; --test fills the rest of your side with dummies.
 # Whoever is newest goes here — --test always deploys the hero just added, so it
 # can be played immediately. Up to two; the rest of the side is padded with dummies.
-TEST_HEROES = ["gunner", "mammoth"]
+TEST_HEROES = ["magician", "gunner"]
 
+
+
+# Every targeting kind the engine emits and the client knows how to collect. A
+# new one must be added here *and* handled in app.js — check_roster catches the
+# half of that which Python can see.
+TARGETING_KINDS = {
+    "none", "ally", "unit", "two_units", "any_cell", "direction",
+    "magnitude", "weapon", "cells", "lane", "area", "cone",
+}
 
 
 def check_roster():
@@ -1514,6 +1578,9 @@ def check_roster():
                 bad.append(f"{where}: {ab.name} costs {ab.ap_cost} AP but the hero maxes at {h.max_ap}")
             if ab.targeting.get("kind") == "direction" and not ab.targeting.get("options"):
                 bad.append(f"{where}: {ab.name} is direction-targeted but lists no options")
+            kind = ab.targeting.get("kind")
+            if kind not in TARGETING_KINDS:
+                bad.append(f"{where}: {ab.name} uses targeting {kind!r}, which nothing collects")
 
     for k in TEST_HEROES:
         if k not in BY_KEY:

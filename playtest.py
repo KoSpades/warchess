@@ -165,6 +165,20 @@ def ability_options(m, e, a, origin):
             got = damage_of({"direction": d})
             yield {"direction": d}, (got[0] if got else 0)
 
+    elif kind == "two_units":
+        # Two honest uses: drag the enemy's weakest into our line, and pull our
+        # own most wounded out of theirs. Modest scores — it is a tempo play.
+        ours = [x for x in m.living(e.side) if x.cells]
+        if foes and ours:
+            weakest_foe = min(foes, key=lambda x: x.hp)
+            hurt = min(ours, key=lambda x: x.hp / max(1, x.max_hp))
+            if hurt is not weakest_foe:
+                yield {"first": hurt.id, "second": weakest_foe.id}, 4
+            far = max(foes, key=lambda x: m.topology.distance(origin, x.cell)) if origin else None
+            near = min(foes, key=lambda x: m.topology.distance(origin, x.cell)) if origin else None
+            if far is not None and near is not None and far is not near:
+                yield {"first": near.id, "second": far.id}, 3
+
     elif kind == "magnitude":
         cap = ab.magnitude_cap(e)
         if cap >= 1:

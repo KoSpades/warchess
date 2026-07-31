@@ -438,6 +438,12 @@ class Match:
             if legal is not None and list(cell) not in legal:
                 return "Not a square this can be used on."
 
+        elif kind == "two_units":
+            a, b = params.get("first"), params.get("second")
+            live = {x.id for x in self.living() if x.cells}
+            if a not in live or b not in live or a == b:
+                return "Choose two different units, both on the board."
+
         elif kind in ("ally", "unit"):
             want_ally = kind == "ally"
             tt = self.entity(params.get("target"))
@@ -820,6 +826,8 @@ class Match:
         """The ability's targeting, plus any live options only the engine can work
         out — 冲撞's chargeable lanes, with landing square and who gets trampled."""
         t = dict(ab.targeting)
+        if t.get("kind") == "two_units":
+            t["options"] = [e.id for e in self.living() if e.cells]
         if hasattr(ab, "lanes"):
             t["choices"] = ab.lanes(self, e)
         if hasattr(ab, "cells"):
@@ -977,6 +985,7 @@ class Match:
         self.last_reveal = reveal
 
         self.apply_movement(movers)
+        self.apply_move_effects()
 
         plan = {LEFT: [], RIGHT: []}
         for side in (LEFT, RIGHT):
@@ -994,29 +1003,63 @@ class Match:
         }
         self.advance_resolution()
 
+    def apply_move_effects(self):
+        """Abilities that reposition rather than damage resolve here, in the same
+        instant as ordinary movement and before any attack is worked out. That is
+        what lets 魔术师's 转移 pull somebody into a square the enemy already
+        marked — attacks find their victims from live positions, so whoever ends
+        up standing there is the one who is hit."""
+        for side in (LEFT, RIGHT):
+            for o in self.orders_of(self.commits[side]):
+                key = (o.get("action") or {}).get("key", "none")
+                if not key.startswith("ability:"):
+                    continue
+                e = self.entity(o["entity"])
+                if e is None or not e.alive:
+                    continue
+                ab = next((a for a in e.abilities if a.key == key.split(":", 1)[1]), None)
+                fn = getattr(ab, "move_effects", None)
+                if fn:
+                    fn(self, e, o["action"])
+
+    def claim_square(self, units):
+        """Who wins a square two or more units reach for at once. The bigger frame
+        takes it first, then whoever is in better shape, then the harder hitter —
+        all public, so a contest can be read before it is entered. A coin decides
+        only if every one of those ties."""
+        best = max((u.max_hp, u.hp, u.atk) for u in units)
+        tied = [u for u in units if (u.max_hp, u.hp, u.atk) == best]
+        return tied[0] if len(tied) == 1 else random.choice(tied)
+
     def apply_movement(self, movers):
         """Everyone moves in the same instant — one hero a side normally, but a
-        gang turn puts several movers on one side. Two units reaching for the
-        same square collide and neither goes (whichever sides they are on), and
-        a square that is still occupied when a mover arrives blocks it, so units
-        can never swap or chain through each other."""
+        gang turn puts several movers on one side. Two units reaching for the same
+        square do not both fail: the stronger claim takes it and the others simply
+        stay where they are. A destination is only ever a square that was empty
+        when orders were sealed, so nobody can swap or chain through anyone."""
         going = [(e, d) for _s, e, d in movers if d != e.cell]
-        contested = {
-            d for i, (_e, d) in enumerate(going)
-            if any(d2 == d for j, (_e2, d2) in enumerate(going) if j != i)
-        }
+        by_square = {}
         for e, d in going:
-            if d in contested:
-                self.log_line(f"{self.label(e)} is blocked at {self.cell_name(d)} — no movement.")
-                continue
+            by_square.setdefault(d, []).append(e)
+
+        for d, units in by_square.items():
+            winner = units[0] if len(units) == 1 else self.claim_square(units)
+            for e in units:
+                if e is not winner:
+                    self.log_line(
+                        f"{self.label(e)} is shouldered out of {self.cell_name(d)} "
+                        f"by {self.label(winner)} — no movement."
+                    )
             if self.occupant(d) is not None:
-                self.log_line(f"{self.label(e)} is blocked at {self.cell_name(d)} — no movement.")
+                self.log_line(f"{self.label(winner)} is blocked at {self.cell_name(d)} — no movement.")
                 continue
-            frm = e.cell
-            e.set_cell(d)
-            self.bus.emit(EV.AFTER_MOVE, {"entity": e, "from": frm, "to": d})
+            frm = winner.cell
+            winner.set_cell(d)
+            self.bus.emit(EV.AFTER_MOVE, {"entity": winner, "from": frm, "to": d})
             if frm is not None:     # a mover with no origin has just taken flesh
-                self.log_line(f"{self.label(e)} moves {self.cell_name(frm)} → {self.cell_name(d)}.")
+                self.log_line(
+                    f"{self.label(winner)} moves {self.cell_name(frm)} → {self.cell_name(d)}."
+                )
 
     def build_instances(self, e, commit):
         action = commit["action"]

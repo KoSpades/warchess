@@ -75,12 +75,45 @@ turn(m, 1, {"destination": [4, 1], "action": {"key": "none"}},
      5, {"destination": [6, 1], "action": {"key": "none"}})
 ok("independent moves both apply", m.entity(1).cell == (4, 1) and m.entity(5).cell == (6, 1))
 
-# 2 — both step to the same empty cell, both bounce
+# 2 — both step to the same empty cell: the stronger claim takes it, the other stays
 m = build()
 m.entity(5).set_cell((5, 1))
-turn(m, 1, {"destination": [4, 1], "action": {"key": "none"}},
-     5, {"destination": [4, 1], "action": {"key": "none"}})
-ok("same destination bounces both", m.entity(1).cell == (3, 1) and m.entity(5).cell == (5, 1))
+a, b = m.entity(1), m.entity(5)                 # 枪兵 19 max hp vs 火法师 17
+turn(m, a.id, {"destination": [4, 1], "action": {"key": "none"}},
+     b.id, {"destination": [4, 1], "action": {"key": "none"}})
+ok("a contested square goes to the bigger frame",
+   a.cell == (4, 1) and b.cell == (5, 1), f"{a.name} {a.cell}, {b.name} {b.cell}")
+
+# ...and the ordering is max HP, then current HP, then attack
+m = build()
+a, b = m.entity(1), m.entity(5)
+b.set_cell((5, 1))
+a.max_hp = b.max_hp = 20                        # level the first tiebreak
+a.hp, b.hp = 12, 18                             # b is in better shape
+turn(m, a.id, {"destination": [4, 1], "action": {"key": "none"}},
+     b.id, {"destination": [4, 1], "action": {"key": "none"}})
+ok("with equal frames the healthier one takes it",
+   b.cell == (4, 1) and a.cell == (3, 1), f"{a.cell} {b.cell}")
+
+m = build()
+a, b = m.entity(1), m.entity(5)
+b.set_cell((5, 1))
+a.max_hp = b.max_hp = 20
+a.hp = b.hp = 15
+a.add_modifier(__import__("entities").Modifier("atk", "add", 5))   # a hits harder
+turn(m, a.id, {"destination": [4, 1], "action": {"key": "none"}},
+     b.id, {"destination": [4, 1], "action": {"key": "none"}})
+ok("with equal frames and health the harder hitter takes it",
+   a.cell == (4, 1) and b.cell == (5, 1), f"{a.cell} {b.cell}")
+
+# an exact tie still resolves — somebody gets the square, nobody bounces off it
+m = arena([("gatekeeper", (3, 1))], [("gatekeeper", (7, 1))])
+x, y = m.living(LEFT)[0], m.living(RIGHT)[0]
+x.set_cell((4, 1)); y.set_cell((6, 1))
+turn(m, x.id, {"destination": [5, 1], "action": {"key": "none"}},
+     y.id, {"destination": [5, 1], "action": {"key": "none"}})
+ok("an exact tie is still decided, not shared",
+   ((x.cell == (5, 1)) != (y.cell == (5, 1))), f"{x.cell} {y.cell}")
 
 # 3 — swap is impossible: destination must be empty in the snapshot
 m = build()
@@ -415,8 +448,8 @@ turn(m, j1.id, {"orders": [
         {"entity": cm.id, "destination": [3, 2], "action": {"key": "none"}},
         {"entity": j2.id, "destination": [1, 3], "action": {"key": "none"}}]},
      d.id, {"destination": None, "action": {"key": "none"}})
-ok("two goblins after the same square both bounce",
-   j1.cell == (2, 2) and cm.cell == (3, 3), f"{j1.cell} {cm.cell}")
+ok("two goblins after the same square — one takes it, the other stays",
+   (j1.cell == (3, 2)) != (cm.cell == (3, 2)), f"{j1.cell} {cm.cell}")
 ok("the uncontested goblin still moves", j2.cell == (1, 3), str(j2.cell))
 
 # 27 — the client gets what it needs: every goblin's own moves and menu, and a
@@ -1195,6 +1228,130 @@ m.select_hero(RIGHT, d.id); m.commit(RIGHT, hold)
 was = g.cell
 ok("the step can be declined", m.choose_followup(LEFT, None) is None)
 ok("declining leaves it where it stood", g.cell == was and m.phase == "commit", str(g.cell))
+
+# 43 — 魔术师: 转移 resolves with movement, so a swap redirects what was aimed
+def magic_arena():
+    m = arena([("magician", (3, 2)), ("gatekeeper", (3, 3)), ("cannoneer", (3, 1))],
+              [("spearman", (7, 3)), ("dummy", (7, 1))])
+    mag = unit(m, LEFT, "magician")
+    mag.ap = mag.max_ap
+    return (m, mag, unit(m, LEFT, "gatekeeper"), unit(m, LEFT, "cannoneer"),
+            unit(m, RIGHT, "spearman"), unit(m, RIGHT, "dummy"))
+
+swap = lambda a, b: {"destination": None,
+                     "action": {"key": "ability:transfer", "first": a.id, "second": b.id}}
+
+# the enemy marks the square 门神 stands on; we swap 炮手 into it
+m, mag, gate, cannon, foe, d = magic_arena()
+foe.set_cell((4, 3))
+hp0 = {e.name: e.hp for e in (gate, cannon)}
+turn(m, mag.id, swap(gate, cannon),
+     foe.id, {"destination": None, "action": {"key": "attack", "shots": [[[3, 3]]]}})
+ok("the swapped-in hero takes what was aimed at the square",
+   hp0[cannon.name] - cannon.hp == foe.atk, f"炮手 took {hp0[cannon.name] - cannon.hp}")
+ok("...and the hero pulled out of it takes nothing",
+   gate.hp == hp0[gate.name], f"门神 took {hp0[gate.name] - gate.hp}")
+ok("both actually changed places", gate.cell == (3, 1) and cannon.cell == (3, 3),
+   f"{gate.cell} {cannon.cell}")
+
+# it can swap two enemies with each other
+m, mag, gate, cannon, foe, d = magic_arena()
+a, b = foe.cell, d.cell
+turn(m, mag.id, swap(foe, d), foe.id, hold)
+ok("it can rearrange the enemy's own line", foe.cell == b and d.cell == a,
+   f"{foe.cell} {d.cell}")
+
+# a unit-locked attack follows its target through the swap
+m, mag, gate, cannon, foe, d = magic_arena()
+before = gate.hp
+turn(m, mag.id, swap(gate, cannon),
+     d.id, {"destination": None, "action": {"key": "attack", "target": gate.id}})
+ok("a unit-locked attack still finds its target after the swap",
+   before - gate.hp == d.atk, f"took {before - gate.hp}")
+
+# and it moves and casts in the same turn
+m, mag, gate, cannon, foe, d = magic_arena()
+turn(m, mag.id, dict(swap(gate, cannon), destination=[4, 2]), foe.id, hold)
+ok("the magician moves and casts in one turn", mag.cell == (4, 2), str(mag.cell))
+
+m, mag, gate, cannon, foe, d = magic_arena()
+m.select_hero(LEFT, mag.id)
+ok("swapping a unit with itself is refused",
+   m.commit(LEFT, swap(gate, gate)) is not None)
+
+# 44 — 转移 against an aimed attack: no friendly fire, so putting an enemy in the
+# marked square makes the shot find nobody at all
+m = arena([("magician", (3, 2)), ("gatekeeper", (3, 3))], [("spearman", (7, 3)), ("dummy", (7, 1))])
+mag = unit(m, LEFT, "magician"); mag.ap = mag.max_ap
+gate = unit(m, LEFT, "gatekeeper")
+sp, d = unit(m, RIGHT, "spearman"), unit(m, RIGHT, "dummy")
+sp.set_cell((4, 3))                      # 枪兵 marks C3, where 门神 stands
+b_gate, b_d = gate.hp, d.hp
+turn(m, mag.id, {"destination": None,
+                 "action": {"key": "ability:transfer", "first": d.id, "second": gate.id}},
+     sp.id, {"destination": None, "action": {"key": "attack", "shots": [[[3, 3]]]}})
+ok("swapping an enemy into their own marked square voids the shot",
+   d.cell == (3, 3) and d.hp == b_d, f"木桩 at {d.cell}, took {b_d - d.hp}")
+ok("...and the hero it replaced walks away clean", gate.hp == b_gate,
+   f"门神 took {b_gate - gate.hp}")
+
+# swapping one of your own in instead just changes who takes it
+m = arena([("magician", (3, 2)), ("gatekeeper", (3, 3)), ("cannoneer", (3, 1))],
+          [("spearman", (7, 3))])
+mag = unit(m, LEFT, "magician"); mag.ap = mag.max_ap
+gate, can = unit(m, LEFT, "gatekeeper"), unit(m, LEFT, "cannoneer")
+sp = unit(m, RIGHT, "spearman"); sp.set_cell((4, 3))
+b = can.hp
+turn(m, mag.id, {"destination": None,
+                 "action": {"key": "ability:transfer", "first": can.id, "second": gate.id}},
+     sp.id, {"destination": None, "action": {"key": "attack", "shots": [[[3, 3]]]}})
+ok("swapping your own hero in takes the hit for the other",
+   can.cell == (3, 3) and b - can.hp == sp.atk, f"炮手 took {b - can.hp}")
+
+# 45 — 转移 loose ends
+m = arena([("magician", (3, 2)), ("ghost", (3, 3))], [("dummy", (7, 3))])
+mag, gh, d = unit(m, LEFT, "magician"), unit(m, LEFT, "ghost"), unit(m, RIGHT, "dummy")
+mag.ap = mag.max_ap
+m.select_hero(LEFT, mag.id)
+ok("a hero with no square cannot be swapped",
+   m.commit(LEFT, {"destination": None,
+                   "action": {"key": "ability:transfer", "first": gh.id, "second": d.id}}) is not None)
+ok("...and is not even offered",
+   gh.id not in m.ability_targeting(mag, mag.abilities[0])["options"])
+
+# it moves first, then swaps from where it ended up
+m = arena([("magician", (3, 2)), ("gatekeeper", (3, 3))], [("dummy", (7, 3))])
+mag, d = unit(m, LEFT, "magician"), unit(m, RIGHT, "dummy")
+mag.ap = mag.max_ap
+turn(m, mag.id, {"destination": [4, 2],
+                 "action": {"key": "ability:transfer", "first": mag.id, "second": d.id}},
+     d.id, hold)
+ok("swapping itself uses where its own movement left it",
+   mag.cell == (7, 3) and d.cell == (4, 2), f"{mag.cell} {d.cell}")
+
+# two magicians swapping the same pair cancel out, deterministically
+m = arena([("magician", (3, 2)), ("gatekeeper", (3, 3))],
+          [("magician", (7, 2)), ("dummy", (7, 3))])
+ml, gl = unit(m, LEFT, "magician"), unit(m, LEFT, "gatekeeper")
+mr, dr = unit(m, RIGHT, "magician"), unit(m, RIGHT, "dummy")
+ml.ap = ml.max_ap; mr.ap = mr.max_ap
+where = {gl.id: gl.cell, dr.id: dr.cell}
+both = {"key": "ability:transfer", "first": gl.id, "second": dr.id}
+turn(m, ml.id, {"destination": None, "action": both},
+     mr.id, {"destination": None, "action": both})
+ok("two magicians undoing each other leaves the board as it was",
+   gl.cell == where[gl.id] and dr.cell == where[dr.id], f"{gl.cell} {dr.cell}")
+
+# the sealed slip names both units
+m = arena([("magician", (3, 2)), ("gatekeeper", (3, 3))], [("dummy", (7, 3))])
+mag, gate, d = unit(m, LEFT, "magician"), unit(m, LEFT, "gatekeeper"), unit(m, RIGHT, "dummy")
+mag.ap = mag.max_ap
+m.select_hero(LEFT, mag.id)
+m.commit(LEFT, {"destination": None,
+                "action": {"key": "ability:transfer", "first": gate.id, "second": d.id}})
+slip = view.state_for(m, LEFT)["commit"]["orders"][0]
+ok("the sealed order says who is being swapped",
+   gate.name in slip["target"] and d.name in slip["target"], slip["target"])
 
 print("\nlog tail:")
 for line in m.log[-5:]:

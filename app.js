@@ -73,13 +73,14 @@ function syncDraft(){
 }
 function blankDraft(entity){
   return {entity, destination:null, held:false, tentative:null, actionKey:null, shots:[], shotIndex:0,
-          target:null, direction:null, cell:null, amount:null, weapon:null, choices:{}, gangOrders:[]};
+          target:null, direction:null, cell:null, amount:null, weapon:null, pair:[],
+          choices:{}, gangOrders:[]};
 }
 function resetLeg(){
   // Clear one unit's half-built order, keeping the gang's sealed-so-far list.
   Object.assign(draft, {destination:null, held:false, tentative:null, actionKey:null, shots:[],
                         shotIndex:0, target:null, direction:null, cell:null, amount:null, weapon:null,
-                        choices:{}});
+                        pair:[], choices:{}});
 }
 
 /* ---------------- goblin gang ---------------- */
@@ -283,6 +284,10 @@ function unitHTML(u, pending){
   if (qi>=0) cls.push('queued');
   if (S.phase==='victim' && S.victim && S.victim.needed && S.victim.options.includes(u.id)) cls.push('tgt');
   const act = currentAction();
+  if (act && act.targeting.kind==='two_units' && (act.targeting.options||[]).includes(u.id)){
+    cls.push('clickable');
+    if ((draft.pair||[]).includes(u.id)) cls.push('tgt');
+  }
   if (act && act.targeting.kind==='unit' && u.side!==SIDE) cls.push('clickable');
   if (act && act.targeting.kind==='ally' && u.side===SIDE) cls.push('clickable');
   if (draft && draft.target===u.id) cls.push('tgt');
@@ -605,6 +610,15 @@ function onCell(c,r){
     if (only && !has(only, cell)){ err="Not a square this can be used on."; return render(); }
     draft.cell=cell; err=""; return render();
   }
+  if (act.targeting.kind==='two_units'){
+    const tu = unitAt(cell);
+    if (!tu || !(act.targeting.options||[]).includes(tu.id)) return;
+    const at = (draft.pair||[]).indexOf(tu.id);
+    if (at >= 0) draft.pair.splice(at, 1);
+    else if (draft.pair.length < 2) draft.pair.push(tu.id);
+    else { err = "Two is all it can move."; return render(); }
+    err=""; return render();
+  }
   if (act.targeting.kind==='unit' || act.targeting.kind==='ally'){
     const tu = unitAt(cell); if (!tu || !tu.alive) return;
     const wantAlly = act.targeting.kind==='ally';
@@ -693,6 +707,9 @@ function stillNeeded(act){
   if (t.kind==='weapon')    return draft.weapon ? 'Finish aiming this weapon.' : 'Choose a weapon first.';
   if (t.kind==='lane')      return 'Pick a lane to fire down, or choose Hold.';
   if (t.kind==='cone')      return 'Pick a direction to spray, or choose Hold.';
+  if (t.kind==='two_units')
+    return (draft.pair||[]).length ? 'Choose a second unit to swap with.'
+                                   : 'Choose the two units to swap — click them on the board.';
   if (t.kind==='magnitude') return 'Choose an amount.';
   return 'That order is not ready yet.';
 }
@@ -730,7 +747,7 @@ function onKey(e){
 
 function chooseAction(key){
   const act = curActions().find(a=>a.key===key);
-  draft.actionKey=key; draft.shots=[]; draft.shotIndex=0; draft.target=null; draft.direction=null; draft.cell=null; draft.amount=null; draft.weapon=null;
+  draft.actionKey=key; draft.shots=[]; draft.shotIndex=0; draft.target=null; draft.direction=null; draft.cell=null; draft.amount=null; draft.weapon=null; draft.pair=[];
   if (act.targeting.kind==='cells') draft.shots = Array.from({length:act.targeting.shots},()=>[]);
   if (act.targeting.kind==='magnitude') draft.amount = 1;
   if (act.targeting.kind==='lane'){
@@ -745,7 +762,7 @@ function changeMove(){
   // lane or a marked cell chosen from there is meaningless once you move.
   Object.assign(draft, {destination:null, held:false, tentative:null, actionKey:null,
                         shots:[], shotIndex:0, target:null, direction:null,
-                        cell:null, amount:null, weapon:null});
+                        cell:null, amount:null, weapon:null, pair:[]});
   err=""; render();
 }
 function chooseSelfMove(key){
@@ -770,6 +787,7 @@ function orderReady(){
   if (t.kind==='cells') return S.mode==='self' || (draft.shots.length===t.shots && draft.shots.every(s=>s.length<=t.count));
   if (t.kind==='unit') return draft.target!=null;
   if (t.kind==='ally') return draft.target!=null;
+  if (t.kind==='two_units') return (draft.pair||[]).length===2;
   if (t.kind==='magnitude') return draft.amount>=1;
   if (t.kind==='cone') return draft.direction!=null;
   if (t.kind==='area') return true;   // nothing to aim — it catches whatever is beside it
@@ -785,6 +803,7 @@ function sealOrder(){
   if (t.kind==='cells') action.shots = draft.shots;
   if (t.kind==='unit') action.target = draft.target;
   if (t.kind==='ally') action.target = draft.target;
+  if (t.kind==='two_units'){ action.first = draft.pair[0]; action.second = draft.pair[1]; }
   if (t.kind==='magnitude') action.amount = draft.amount;
   if (t.kind==='direction' || t.kind==='lane' || t.kind==='cone') action.direction = draft.direction;
   if (t.kind==='any_cell') action.cell = draft.cell;
@@ -1164,6 +1183,16 @@ function targetingHTML(act){
       <p class="note">Catches every enemy standing beside it — no aiming.
       ${hit?`<b>${hit}</b> in reach right now.`:'Nothing in reach from there.'}
       Press <b>Enter</b> to swing.</p>`;
+  } else if (t.kind==='two_units'){
+    const picked = (draft.pair||[]).map(id => (S.units||[]).find(u=>u.id===id)).filter(Boolean);
+    let h = `<div class="step">3 · Swap</div>
+      <p class="note">Click two units on the board — either side, anywhere. They trade places as everyone moves, so a hero dragged into a marked square takes what was aimed there.</p>`;
+    for (let i = 0; i < 2; i++){
+      const u = picked[i];
+      h += `<button class="btn ${u?'on':''}" ${u?`onclick="draft.pair.splice(${i},1);render()"`:''}>
+              ${u ? `${u.name} <span class="cost">${cn(u.cell)}</span>` : `— pick unit ${i+1} —`}</button>`;
+    }
+    return h;
   } else if (t.kind==='unit'){
     h += `<p class="note">Choose one enemy${draft.target==null?' — click it on the board':''}. This lands wherever it moves.</p>`;
     for (const u of foeUnits().filter(u=>u.alive)){

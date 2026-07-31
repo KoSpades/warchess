@@ -182,6 +182,30 @@ if (F.followup) {
      C.sent.length > before && lastSent().cmd === 'followup', JSON.stringify(lastSent()));
 }
 
+// --------------------------------------------------- picking two units to swap
+
+if (F.two_units) {
+  HOLD_FIRST(F.two_units);
+  C.chooseAction('ability:transfer');
+  const before = C.sent.length;
+  C.sealFromKeyboard();
+  ok('magician: Enter with nobody picked explains itself',
+     C.sent.length === before && !!C.err, C.err || 'sealed silently');
+  const opts = C.curActions().find(a => a.key === 'ability:transfer').targeting.options;
+  const units = F.two_units.units.filter(u => opts.includes(u.id) && u.cell);
+  C.onCell(units[0].cell[0], units[0].cell[1]);
+  ok('magician: clicking one unit picks it', C.draft.pair.length === 1, String(C.draft.pair));
+  C.onCell(units[1].cell[0], units[1].cell[1]);
+  ok('magician: clicking a second completes the pair', C.draft.pair.length === 2, String(C.draft.pair));
+  C.onCell(units[0].cell[0], units[0].cell[1]);
+  ok('magician: clicking a picked unit again unpicks it', C.draft.pair.length === 1);
+  C.onCell(units[0].cell[0], units[0].cell[1]);
+  C.sealFromKeyboard();
+  const a = lastSent().payload.action;
+  ok('magician: both units travel in the order', a.first != null && a.second != null && a.first !== a.second,
+     JSON.stringify(a));
+}
+
 // ------------------------------------------------- frozen heroes are not offered
 
 if (F.frozen) {

@@ -99,6 +99,9 @@ def order_slip(m, o):
         target = m.cell_name(tuple(action["cell"]))
     if action.get("direction"):
         target = action["direction"]
+    if action.get("first") is not None and action.get("second") is not None:
+        pair = [m.entity(action["first"]), m.entity(action["second"])]
+        target = " ⇄ ".join(x.name if x else "—" for x in pair)
     if action.get("amount") is not None:
         target = str(action["amount"])
     if action.get("weapon"):

@@ -100,6 +100,10 @@ def build():
     assert m.phase == "resolved", m.phase
     out["followup"] = view.state_for(m, LEFT)
 
+    m = arena([("magician", (3, 2)), ("gatekeeper", (3, 3))], [("spearman", (7, 3))])
+    mg = unit(m, LEFT, "magician")
+    snap("two_units", m, select=mg.id, full_ap=[mg])
+
     m = arena([("shopkeeper", (3, 1)), ("tide_goddess", (3, 2))], [("dummy", (7, 3))])
     snap("free_pick", m, select=unit(m, LEFT, "shopkeeper").id)
 
