@@ -14,7 +14,7 @@ import damage as DMG
 import events as EV
 import heroes as HEROES
 from board import Board
-from entities import Entity, UNTIL_TURN_END
+from entities import Entity, UNTIL_OWNER_NEXT_TURN, UNTIL_TURN_END
 from topology import LEFT, RIGHT, Topology, other_side
 
 COLUMN_LETTERS = "ABCDEFGHI"
@@ -45,7 +45,8 @@ class Match:
         self.topology = Topology()
         self.board = Board(self.topology)
         self.bus = EV.EventBus(self)
-        self.global_rules = [DMG.AbilityImmunity(), DMG.FlatReduction(), DMG.HalvingRule()]
+        self.global_rules = [DMG.AbilityImmunity(), DMG.OutgoingShift(), DMG.FlatReduction(),
+                             DMG.CurseTrap(), DMG.HalvingRule()]
 
         self.entities = []
         self._ids = itertools.count(1)
@@ -75,6 +76,9 @@ class Match:
         self.selected = {LEFT: None, RIGHT: None}
         self.commits = {LEFT: None, RIGHT: None}
         self.turn_started = {LEFT: False, RIGHT: False}
+        # 美梦神's 魔法守护: side -> the id of the caster silencing it. Lazily valid,
+        # so the ward dies with its caster without a death hook.
+        self.ability_lock = {LEFT: None, RIGHT: None}
         self.snapshot = {}
         self.res = None
         self.last_reveal = None
@@ -99,8 +103,10 @@ class Match:
         c, r = cell
         return f"{COLUMN_LETTERS[c - 1]}{r}"
 
-    def log_line(self, text, quiet=False):
-        self.log.append({"round": self.round, "text": text, "quiet": quiet})
+    def log_line(self, text, quiet=False, side=None):
+        """`side` scopes a line to one seat — hidden information (诅咒娃娃 choosing
+        whom to curse) must not appear in the opponent's field log."""
+        self.log.append({"round": self.round, "text": text, "quiet": quiet, "side": side})
         self.log = self.log[-200:]
 
     def living(self, side=None):
@@ -123,7 +129,34 @@ class Match:
         return None
 
     def unacted(self, side):
-        return [e for e in self.living(side) if not e.has_acted and e.flags["takes_turns"]]
+        return [e for e in self.living(side)
+                if not e.has_acted and e.flags["takes_turns"] and not self.frozen(e)]
+
+    FREEZE_ROUNDS = 2
+
+    def freeze(self, e, reason=""):
+        """Take this unit's next two rounds away. The current round is untouched —
+        下两回合 — so a unit cursed after it has acted loses rounds R+1 and R+2."""
+        e.vars["frozen_at_round"] = self.round
+        # Anything that expires on this unit's next turn must end now instead: its
+        # next turn is not coming (美梦神's ward would otherwise silence forever).
+        for side, eid in list(self.ability_lock.items()):
+            if eid == e.id:
+                self.ability_lock[side] = None
+                self.log_line(f"{self.label(e)}'s ward fails as she seizes up.", quiet=True)
+        self.log_line(
+            f"{self.label(e)} is struck by {reason} — no turns for the next "
+            f"{self.FREEZE_ROUNDS} rounds." if reason else
+            f"{self.label(e)} cannot act for the next {self.FREEZE_ROUNDS} rounds."
+        )
+
+    def frozen(self, e):
+        at = e.vars.get("frozen_at_round")
+        return at is not None and 0 < self.round - at <= self.FREEZE_ROUNDS
+
+    def frozen_rounds_left(self, e):
+        at = e.vars.get("frozen_at_round")
+        return 0 if at is None else max(0, at + self.FREEZE_ROUNDS - self.round + 1)
 
     def mark_seen(self, side):
         self.present[side] = time.time()
@@ -466,6 +499,8 @@ class Match:
             return "Not one of your heroes."
         if e.has_acted:
             return "That hero has already acted this round."
+        if self.frozen(e):
+            return f"{e.name} cannot act for another {self.frozen_rounds_left(e)} round(s)."
         # Tentative: picking a hero is reversible — you can switch to another (or
         # deselect) freely until you commit. The turn only truly starts (and fire
         # resolves) at commit time.
@@ -489,18 +524,56 @@ class Match:
         return [e for e in self.living(side) if e.hero.gang == gang]
 
     def turn_actors(self, e):
-        """Everyone whose turn it is when this unit is picked up: a gang brings
-        its whole living crew, anyone else brings only themselves."""
+        """Everyone whose turn it is when this unit is picked up: a gang brings its
+        whole crew, anyone else brings only themselves. A frozen goblin is not part
+        of the turn — it neither owes an order nor gets to act."""
         gang = self.gang_of(e)
-        return self.gang_members(e.side, gang) if gang else [e]
+        if not gang:
+            return [e]
+        return [g for g in self.gang_members(e.side, gang) if not self.frozen(g)]
+
+    def set_ability_lock(self, caster):
+        """Silence the enemy side until this caster's next turn begins."""
+        foe = other_side(caster.side)
+        self.ability_lock[foe] = caster.id
+        self.log_line(
+            f"{self.label(caster)} wards the field — no enemy abilities until her next turn."
+        )
+
+    def ability_locked(self, side):
+        """The caster silencing this side, or None. Checked lazily: a ward whose
+        caster has fallen is no ward at all."""
+        eid = self.ability_lock.get(side)
+        if eid is None:
+            return None
+        caster = self.entity(eid)
+        if caster is None or not caster.alive:
+            self.ability_lock[side] = None
+            return None
+        return caster
 
     def forfeit_turn(self, side):
         self.commits[side] = {"kind": "dead"}
         self.maybe_resolve()
 
+    def expire_owner_modifiers(self, owner):
+        """Drop everything this unit hung on the board that lasts \"until my next
+        turn\" — wherever it landed. Any hero can use it: attach the modifier with
+        source=<the caster> and duration=UNTIL_OWNER_NEXT_TURN."""
+        for e in self.entities:
+            keep = [m for m in e.modifiers
+                    if not (m.duration == UNTIL_OWNER_NEXT_TURN and m.source is owner)]
+            if len(keep) != len(e.modifiers):
+                e.modifiers = keep
+
     def run_turn_start(self, e):
         """Board effects resolve before the hero decides anything. Returns False
         if the unit died here — it forfeits its action."""
+        self.expire_owner_modifiers(e)
+        for side, eid in self.ability_lock.items():
+            if eid == e.id:            # her next turn has come: the ward lifts
+                self.ability_lock[side] = None
+                self.log_line(f"{self.label(e)}'s ward fades.", quiet=True)
         self.bus.emit(EV.TURN_START, {"entity": e})
         burn = self.board.burning_damage_for(e.cell, e)
         if burn:
@@ -525,8 +598,18 @@ class Match:
         at a time through cells empty in the current snapshot (you cannot move
         through an occupied square). Most heroes move 1, but the budget is the
         `move` stat, so buffs like 激励 just work."""
-        if not e.alive or not e.cells:
+        if not e.alive:
             return []
+        if not e.cells:
+            # No square of its own, but it may still have somewhere to appear
+            # (鬼魂 taking flesh). Passives publish those squares; stepping onto
+            # one *is* the move, so the rest of the turn plays out as normal.
+            out = []
+            for p in e.passives:
+                fn = getattr(p, "manifest_cells", None)
+                if fn:
+                    out.extend(fn(self, e))
+            return [list(c) for c in out]
         start = e.cell
         seen = {start}
         frontier = [start]
@@ -548,8 +631,11 @@ class Match:
         if not e.alive:
             return []
         out = [{"key": "none", "name": "Hold", "ap_cost": 0, "targeting": {"kind": "none"}}]
-        spec = e.hero.attack
-        if spec["mode"] == HEROES.CELL:
+        # A bodiless hero can still plan an attack if it is about to take flesh.
+        spec = e.hero.attack if (e.cells or self.legal_moves(e)) else None
+        if spec is None:
+            pass
+        elif spec["mode"] == HEROES.CELL:
             out.append(
                 {
                     "key": "attack",
@@ -561,6 +647,31 @@ class Match:
                         "range": e.rng,
                         "shots": e.hero.attacks_per_turn,
                     },
+                }
+            )
+        elif spec["mode"] == HEROES.AREA:
+            out.append(
+                {
+                    "key": "attack",
+                    "name": "Normal attack",
+                    "ap_cost": 0,
+                    # Nothing to aim: it catches every enemy in the shape around
+                    # wherever it ends up. The cells are for the preview only.
+                    "targeting": {"kind": "area",
+                                  "shape": e.hero.attack.get("shape", "surround8"),
+                                  "cells": [list(c) for c in self.attack_shape(e)]},
+                }
+            )
+        elif spec["mode"] == HEROES.LINE:
+            out.append(
+                {
+                    "key": "attack",
+                    "name": "Normal attack",
+                    "ap_cost": 0,
+                    # No precomputed choices: the lane depends on where this hero
+                    # ends up, so the client scans from the square being aimed at
+                    # and the commit is validated against the real destination.
+                    "targeting": {"kind": "lane", "dirs": list(self.topology.DIRECTIONS)},
                 }
             )
         elif spec["mode"] == HEROES.WEAPON:
@@ -588,6 +699,9 @@ class Match:
                 continue  # opening abilities fire once at game start, not on a turn
             if ab.use_limit is not None and uses.get(ab.key, 0) >= ab.use_limit:
                 continue  # a spent limited ability disappears from the menu
+            if not ab.available(self, e):
+                continue  # not yet, or no longer, part of this hero\'s kit
+            warder = self.ability_locked(e.side)
             out.append(
                 {
                     "key": "ability:" + ab.key,
@@ -595,7 +709,8 @@ class Match:
                     "ap_cost": ab.ap_cost,
                     "targeting": self.ability_targeting(e, ab),
                     "self_move": ab.self_move,
-                    "affordable": e.ap >= ab.ap_cost,
+                    "affordable": e.ap >= ab.ap_cost and warder is None,
+                    "blocked": f"warded by {warder.name}" if warder else None,
                     "text": ab.blurb,
                 }
             )
@@ -688,7 +803,7 @@ class Match:
             return None, err
         return {
             "entity": e.id,
-            "destination": list(dest),
+            "destination": list(dest) if dest else None,   # None: nothing on the board
             "action": action,
             "choices": payload.get("choices") or {},
         }, None
@@ -740,15 +855,19 @@ class Match:
         t = dict(ab.targeting)
         if hasattr(ab, "lanes"):
             t["choices"] = ab.lanes(self, e)
+        if hasattr(ab, "cells"):
+            t["cells"] = [list(c) for c in ab.cells(self, e)]
         return t
 
     def validate_action(self, e, dest, action):
         key = action.get("key", "none")
+        if key == "none":
+            return None      # holding is always legal, whatever the attack mode
         if e.hero.attack.get("mode") == HEROES.WEAPON:
             return self._validate_weapon(e, dest, action, key)
-        if key == "none":
-            return None
         if key == "attack":
+            if not e.cells and dest is None:
+                return f"{e.name} has no body to attack with — take flesh first."
             spec = e.hero.attack
             if spec["mode"] == HEROES.CELL:
                 shots = action.get("shots") or []
@@ -767,6 +886,14 @@ class Match:
                             return "Cell out of range of where you will be standing."
                     if len(set(tuple(c) for c in cells)) != len(cells):
                         return "Cells must be distinct."
+            elif spec["mode"] == HEROES.AREA:
+                pass          # nothing to aim: it catches whatever is beside it
+            elif spec["mode"] == HEROES.LINE:
+                d = action.get("direction")
+                if d not in self.topology.DIRECTIONS:
+                    return "Choose a lane to fire down."
+                if ACT.LineShot.scan(self, e, d, dest) is None:
+                    return "No shot down that lane — nobody there, or your own line is in the way."
             else:
                 t = self.entity(action.get("target"))
                 if t is None or not t.alive or t.side == e.side:
@@ -779,6 +906,9 @@ class Match:
                 return "This hero has no such ability."
             if getattr(ab, "opening", False):
                 return "That ability only fires at the opening."
+            warder = self.ability_locked(e.side)
+            if warder is not None:
+                return f"{warder.name}'s ward blocks abilities until she acts again."
             if e.ap < ab.ap_cost:
                 return f"Needs {ab.ap_cost} AP."
             if ab.use_limit is not None and e.vars.get("ability_uses", {}).get(ab.key, 0) >= ab.use_limit:
@@ -792,6 +922,9 @@ class Match:
                 cell = action.get("cell")
                 if not cell or not self.topology.in_bounds(tuple(cell)):
                     return "Choose a cell on the board."
+                legal = self.ability_targeting(e, ab).get("cells")
+                if legal is not None and list(cell) not in legal:
+                    return "Not a square this can be used on."
             if t["kind"] == "ally":
                 tt = self.entity(action.get("target"))
                 if tt is None or not tt.alive or tt.side != e.side:
@@ -802,7 +935,7 @@ class Match:
                     return "Choose a living enemy."
             if t["kind"] == "magnitude":
                 x = action.get("amount")
-                cap = min(e.hp, e.max_hp - 1)
+                cap = min(e.hp - 1, e.max_hp - 1)
                 if not isinstance(x, int) or x < 1 or x > cap:
                     return f"Choose an amount between 1 and {cap}."
             return ab.validate(self, e, action)
@@ -837,6 +970,21 @@ class Match:
             for dc in (-1, 0, 1) for dr in (-1, 0, 1)
             if (dc or dr) and self.topology.in_bounds((c + dc, r + dr))
         ]
+
+    def attack_shape(self, e, origin=None):
+        """The squares an area attack covers from a given square. Named shapes, so a
+        future hero can sweep a cross or a row without new plumbing."""
+        origin = tuple(origin) if origin else e.cell
+        if origin is None:
+            return []
+        shape = e.hero.attack.get("shape", "surround8")
+        if shape == "surround8":
+            return self._surround8(origin)
+        if shape == "row":
+            return [c for c in self.topology.row(origin[1]) if c != origin]
+        if shape == "column":
+            return [c for c in self.topology.column(origin[0]) if c != origin]
+        return []
 
     def _apply_stance(self, e, w):
         buff = w.get("buff")
@@ -908,6 +1056,8 @@ class Match:
                     "hits": [],   # filled during resolution: [{target, amount}, ...]
                 }
             for o, a in zip(orders, actors):
+                if o["destination"] is None:
+                    continue        # nothing on the board to move (鬼魂 while bodiless)
                 movers.append((side, a, tuple(o["destination"])))
         self.last_reveal = reveal
 
@@ -950,16 +1100,19 @@ class Match:
             frm = e.cell
             e.set_cell(d)
             self.bus.emit(EV.AFTER_MOVE, {"entity": e, "from": frm, "to": d})
-            self.log_line(f"{self.label(e)} moves {self.cell_name(frm)} → {self.cell_name(d)}.")
+            if frm is not None:     # a mover with no origin has just taken flesh
+                self.log_line(f"{self.label(e)} moves {self.cell_name(frm)} → {self.cell_name(d)}.")
 
     def build_instances(self, e, commit):
         action = commit["action"]
         key = action.get("key", "none")
-        intended = tuple(commit["destination"])
+        # None only for a unit with no square at all (鬼魂 while bodiless); its
+        # actions are targeted, never positional, so the origin is unused.
+        intended = tuple(commit["destination"]) if commit["destination"] else e.cell
+        if key == "none":
+            return [ACT.NullAction()]     # no weapon drawn, so no stance either
         if e.hero.attack.get("mode") == HEROES.WEAPON:
             return self._build_weapon(e, action, intended)
-        if key == "none":
-            return [ACT.NullAction()]
         if key == "attack":
             spec = e.hero.attack
             if spec["mode"] == HEROES.CELL:
@@ -971,6 +1124,12 @@ class Match:
                     )
                     out.append(ACT.CellLockedAttack(e, cells, intended, halve, i))
                 return out
+            if spec["mode"] == HEROES.AREA:
+                # Built after movement resolves, so the shape is centred on the
+                # square it actually ended up standing in.
+                return [ACT.AreaAttack(e, self.attack_shape(e), e.atk)]
+            if spec["mode"] == HEROES.LINE:
+                return [ACT.LineShot(e, action.get("direction"))]
             return [ACT.UnitLockedAttack(e, self.entity(action.get("target")))]
         if key.startswith("ability:"):
             abkey = key.split(":", 1)[1]
@@ -1034,7 +1193,11 @@ class Match:
                 events = inst.build_damage(self, victim)
                 for ev in events:
                     batch.append((side, inst, ev))
-            dealt = DMG.apply_batch(self, [ev for _s, _i, ev in batch])
+            # Apply every hit of this instant, but do NOT resolve deaths yet: an
+            # ally healing the same target in the same instant has to land first,
+            # or a hero saved on the exact turn it drops would die anyway.
+            for _s, _i, ev in batch:
+                DMG.deal(self, ev)
             for side, inst, ev in batch:
                 if ev.cancelled:
                     self.log_line(
@@ -1060,6 +1223,8 @@ class Match:
                 mark = len(self.log)
                 inst.side_effects(self)
                 self.note_on_reveal(side, inst, mark)
+            # Now the instant is complete — heals included — so settle who died.
+            self.sweep_deaths()
 
             res["index"] += 1
             res["picks"] = {LEFT: None, RIGHT: None}
@@ -1137,6 +1302,9 @@ class Match:
                 continue
             for e in self.turn_units(side, c):
                 e.has_acted = True
+                # Turns this unit has finished. Read at menu-build time as well as
+                # at commit, so it must not change between the two.
+                e.vars["turns_done"] = e.vars.get("turns_done", 0) + 1
                 if not e.alive:
                     continue
                 self.bus.emit(EV.TURN_END, {"entity": e})

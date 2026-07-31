@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 import damage as DMG
 import events as EV
-from entities import Modifier, UNTIL_TURN_END
+from entities import Modifier, UNTIL_OWNER_NEXT_TURN, UNTIL_TURN_END
 from topology import other_side
 
 
@@ -37,6 +37,11 @@ class Ability:
         """Legality beyond the generic targeting checks — e.g. whether a chosen
         direction can actually be charged. None means fine."""
         return None
+
+    def available(self, match, actor):
+        """False hides the ability from the menu entirely — for one that unlocks
+        partway through a match, or that a hero can trade away."""
+        return True
 
 
 class Sweep(Ability):
@@ -81,12 +86,6 @@ class Charge(Ability):
     DAMAGE = 3
     DISTANCE = 3
 
-    @staticmethod
-    def step(match, actor, direction):
-        fwd = match.topology.forward_step(actor.side)
-        return {"forward": (fwd, 0), "backward": (-fwd, 0),
-                "up": (0, -1), "down": (0, 1)}.get(direction)
-
     @classmethod
     def path(cls, match, actor, direction):
         """(landing cell or None when it can't land, [enemies in the crossed squares]).
@@ -94,7 +93,7 @@ class Charge(Ability):
         the last one is where it ends up — if anybody is standing there, or it is off
         the board, the charge still lands its damage but the centaur doesn't move.
         Whole thing is None only if the direction itself is nonsense."""
-        d = cls.step(match, actor, direction)
+        d = match.topology.direction_step(actor.side, direction)
         if d is None or not actor.cells:
             return None
         c0, r0 = actor.cell
@@ -163,6 +162,166 @@ class Charge(Ability):
         match.log_line(
             f"{match.label(actor)} charges {match.cell_name(frm)} → {match.cell_name(landing)}."
         )
+
+
+class Possess(Ability):
+    """鬼魂's haunt. Pure debuff plumbing: 2 damage, then two ordinary modifiers on
+    the victim that expire when the ghost's own next turn begins."""
+
+    key = "possess"
+    name = "附身 Possess"
+    ap_cost = 0
+    targeting = {"kind": "unit"}
+    blurb = ("Sink into one enemy: 2 damage, and until your next turn everything it "
+             "deals is 1 weaker and its reach is 1 shorter.")
+    DAMAGE = 2
+    RNG_FLOOR = 1
+
+    def available(self, match, actor):
+        return not actor.vars.get("manifested")
+
+    def build_damage(self, match, actor, params):
+        tgt = match.entity(params.get("target"))
+        if tgt is None or not tgt.alive or tgt.side == actor.side:
+            return []
+        return [DMG.DamageEvent(source=actor, target=tgt, amount=self.DAMAGE,
+                                category=DMG.ABILITY)]
+
+    def side_effects(self, match, actor, params):
+        tgt = match.entity(params.get("target"))
+        if tgt is None or not tgt.alive or tgt.side == actor.side:
+            return
+        actor.vars["haunting"] = tgt.id
+        tgt.add_modifier(Modifier("damage_dealt", "add", -1, source=actor,
+                                  duration=UNTIL_OWNER_NEXT_TURN))
+        # A whole-board attacker has no reach to shorten, and nobody is pushed
+        # below the floor — the same rule 大雾 follows.
+        if tgt.rng is not None and tgt.rng > self.RNG_FLOOR:
+            tgt.add_modifier(Modifier("rng", "add", -1, source=actor,
+                                      duration=UNTIL_OWNER_NEXT_TURN))
+        match.log_line(
+            f"{match.label(actor)} sinks into {match.label(tgt)} — its blows land "
+            f"1 weaker and its reach shortens until the ghost stirs again."
+        )
+
+
+class GhostForm:
+    """Bodiless until it takes flesh. Nothing new in the engine: it turns off the
+    entity flags that already exist and gives up its square. Stepping into the
+    world is its *movement* — the squares beside whoever it is haunting — so the
+    turn it appears is an ordinary turn: it walks out of the host and acts."""
+
+    describe = ("Bodiless: holds no square and nothing can touch it, but it cannot hold "
+                "the field either. From its 4th turn it may step into an empty square "
+                "beside the hero it haunts — giving up 附身 for good — and then take "
+                "that turn as normal.")
+    FROM_TURN = 4
+
+    def on_match_start(self, match, owner, ctx):
+        if owner.vars.get("manifested"):
+            return
+        owner.cells = set()
+        owner.flags.update(blocks_movement=False, counts_for_defeat=False,
+                           targetable=False)
+
+    @classmethod
+    def ready(cls, owner):
+        """True once this is its FROM_TURN'th turn — it has finished the three before."""
+        return owner.vars.get("turns_done", 0) >= cls.FROM_TURN - 1
+
+    def manifest_cells(self, match, owner):
+        """Where a bodiless hero may step into being. `match.legal_moves` asks every
+        passive for these, so this is the whole of its movement while incorporeal."""
+        if owner.vars.get("manifested") or not self.ready(owner):
+            return []
+        host = match.entity(owner.vars.get("haunting"))
+        if host is None or not host.alive or not host.cells:
+            return []
+        return [c for c in match.topology.neighbours(host.cell)
+                if match.occupant(c) is None]
+
+    def on_after_move(self, match, owner, ctx):
+        """It only ever "moves" from nowhere once — that is the moment it takes flesh."""
+        if ctx.get("entity") is not owner or owner.vars.get("manifested"):
+            return
+        if ctx.get("from") is not None:
+            return
+        owner.vars["manifested"] = True
+        owner.abilities = [a for a in owner.abilities if a.key != Possess.key]
+        owner.flags.update(blocks_movement=True, counts_for_defeat=True, targetable=True)
+        match.expire_owner_modifiers(owner)      # the haunt it was holding lifts
+        match.log_line(
+            f"{match.label(owner)} tears loose and takes flesh at "
+            f"{match.cell_name(ctx['to'])} — the haunting is over."
+        )
+
+    def status(self, match, owner):
+        if owner.vars.get("manifested"):
+            return None
+        host = match.entity(owner.vars.get("haunting"))
+        left = max(0, self.FROM_TURN - 1 - owner.vars.get("turns_done", 0))
+        return {
+            "key": "ghost", "badge": "魂", "label": "鬼魂 BODILESS",
+            "text": ("Cannot be touched, and holds no ground."
+                     + (f" Haunting {host.name}." if host and host.alive else "")
+                     + (f" Can take flesh in {left} more turn{'' if left == 1 else 's'}."
+                        if left else " Can take flesh beside its host now.")),
+        }
+
+
+class CursePoison(Ability):
+    key = "curse_poison"
+    name = "咒毒 Curse Poison"
+    ap_cost = 0
+    use_limit = 1
+    opening = True
+    targeting = {"kind": "ally"}
+    blurb = ("At game start, mark one ally (itself included). The first attack or "
+             "ability that damages the marked hero costs its source the next two "
+             "rounds. Once per match.")
+
+    def side_effects(self, match, actor, params):
+        tgt = match.entity(params.get("target"))
+        if tgt is None or not tgt.alive or tgt.side != actor.side:
+            return
+        tgt.vars["curse_mark"] = actor.id
+        # Scoped to its own seat: the enemy must not know which hero is baited.
+        match.log_line(
+            f"{match.label(actor)} curses {match.label(tgt)} — whoever draws its blood "
+            f"loses two rounds.",
+            side=actor.side,
+        )
+
+
+class MagicWard(Ability):
+    key = "magic_ward"
+    name = "魔法守护 Magic Ward"
+    ap_cost = 2
+    targeting = {"kind": "none"}
+    blurb = ("Until her next turn begins, no enemy hero can use an active ability. "
+             "Orders already sealed this exchange still resolve, and the ward lifts "
+             "early if she falls.")
+
+    def side_effects(self, match, actor, params):
+        match.set_ability_lock(actor)
+
+
+class DreamWard:
+    """Display only — the lock itself lives on the match, since it silences a whole
+    side rather than attaching to any one unit."""
+
+    describe = ("While her ward is up, enemy heroes cannot use active abilities — "
+                "until her next turn, or until she is destroyed.")
+
+    def status(self, match, owner):
+        if match.ability_lock.get(other_side(owner.side)) != owner.id:
+            return None
+        return {
+            "key": "ward",
+            "badge": "守",
+            "label": "魔法守护 WARD",
+            "text": "Enemy heroes cannot use active abilities until her next turn.",
+        }
 
 
 class GreatFog(Ability):
@@ -317,15 +476,18 @@ class BloodRite(Ability):
     ap_cost = 1
     use_limit = 1
     targeting = {"kind": "magnitude"}
-    blurb = "Once per match: sacrifice up to your current HP in max HP for that much permanent attack."
+    blurb = ("Once per match: spend health — current and maximum alike — for that "
+             "much permanent attack. Never enough to kill yourself.")
 
     def side_effects(self, match, actor, params):
-        # Never enough to self-kill: leave at least 1 max HP; current HP clamps
-        # down to the new max.
-        x = max(1, min(int(params.get("amount") or 0), actor.hp, actor.max_hp - 1))
+        # The sacrifice is real blood, not just a smaller frame: it costs current
+        # HP as well as max. Never enough to self-kill — 1 of each is always left.
+        x = max(0, min(int(params.get("amount") or 0), actor.hp - 1, actor.max_hp - 1))
+        if x <= 0:
+            match.log_line(f"{match.label(actor)} has no blood left to spare.")
+            return
         actor.max_hp -= x
-        if actor.hp > actor.max_hp:
-            actor.hp = actor.max_hp
+        actor.hp = max(1, min(actor.hp - x, actor.max_hp))
         actor.add_modifier(Modifier("atk", "add", x))
         match.log_line(
             f"{match.label(actor)} sacrifices {x} max HP for +{x} attack "
@@ -718,6 +880,8 @@ class HeroDef:
 
 CELL = "cell_locked"
 UNIT = "unit_locked"
+LINE = "line_locked"  # 狙击手: the first enemy down one lane of your row or column
+AREA = "area_locked"  # 猛犸: every enemy inside a shape centred on the hero
 WEAPON = "weapon"  # 武器大师: the attack is chosen each turn from `weapons`
 
 # 武器大师's arsenal. `mode` drives targeting: "cells" = mark cells within range
@@ -1027,6 +1191,66 @@ ROSTER = [
         blurb="Frail, but the killing blow only enrages him — two untouchable turns, then dust.",
     ),
     HeroDef(
+        key="mammoth",
+        name="猛犸",
+        name_en="mammoth",
+        max_hp=17,
+        atk=3,
+        move=1,
+        max_ap=0,
+        attack={"mode": AREA, "shape": "surround8", "range": None},
+        blurb="Swings all the way round — every enemy standing beside it takes the hit.",
+    ),
+    HeroDef(
+        key="ghost",
+        name="鬼魂",
+        name_en="ghost",
+        max_hp=4,
+        atk=4,
+        move=1,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 1, "range": 1},
+        abilities=[Possess()],
+        passives=[GhostForm],
+        blurb="Untouchable but powerless, riding an enemy — until it steps into the world beside them.",
+    ),
+    HeroDef(
+        key="sniper",
+        name="狙击手",
+        name_en="sniper",
+        max_hp=13,
+        atk=0,
+        move=1,
+        max_ap=0,
+        attack={"mode": LINE, "range": None},
+        blurb="Shoots the first enemy down its row or column — the further away, the harder it hits.",
+    ),
+    HeroDef(
+        key="cursed_doll",
+        name="诅咒娃娃",
+        name_en="cursedDoll",
+        max_hp=16,
+        atk=4,
+        move=1,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 2, "range": 2},
+        abilities=[CursePoison()],
+        blurb="Lays a curse on one of your own before the first move — striking them costs two rounds.",
+    ),
+    HeroDef(
+        key="dream_goddess",
+        name="美梦神",
+        name_en="dreamGoddess",
+        max_hp=14,
+        atk=2,
+        move=1,
+        max_ap=2,
+        attack={"mode": CELL, "cells": 3, "range": 5},
+        abilities=[MagicWard()],
+        passives=[DreamWard],
+        blurb="Puts the enemy's magic to sleep — no abilities from them until she stirs again.",
+    ),
+    HeroDef(
         key="gargoyle",
         name="石像鬼",
         name_en="gargoyle",
@@ -1146,15 +1370,30 @@ BY_KEY[DUMMY.key] = DUMMY
 # whenever you add heroes; --test fills the rest of your side with dummies.
 # Whoever is newest goes here — --test always deploys the hero just added, so it
 # can be played immediately. Up to two; the rest of the side is padded with dummies.
-TEST_HEROES = ["gargoyle", "centaur"]
+TEST_HEROES = ["mammoth", "ghost"]
 
 
 
 def status_of(match, entity):
-    """Live badges a unit's passives want shown on the board and its card (蛮王's
-    rage). Any passive may grow a `status(match, owner)` method; returning None
-    means "nothing to show right now"."""
+    """Live badges for the board and the hero card. Most come from a passive's
+    optional `status(match, owner)`; the match-level ones (诅咒娃娃's mark, and the
+    freeze it inflicts) are collected here because they sit on units that have no
+    passive of their own."""
     out = []
+    if entity.vars.get("curse_mark"):
+        out.append({
+            "key": "cursed", "badge": "咒", "label": "咒毒 MARKED",
+            "private": True,      # only the side that laid the curse may see it
+            "text": "The first attack or ability that damages this hero costs its "
+                    "source the next two rounds.",
+        })
+    if match.frozen(entity):
+        left = match.frozen_rounds_left(entity)
+        out.append({
+            "key": "frozen", "badge": "禁", "label": "无法行动 FROZEN",
+            "text": f"Cursed — cannot take a turn for {left} more round"
+                    f"{'' if left == 1 else 's'}.",
+        })
     for p in entity.passives:
         fn = getattr(p, "status", None)
         s = fn(match, entity) if fn else None

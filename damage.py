@@ -40,6 +40,21 @@ class DamageEvent:
         self.cancel_reason = reason
 
 
+class OutgoingShift:
+    """A unit's own `damage_dealt` stat shifts everything it deals — the outgoing
+    mirror of `damage_reduction`. Nothing sets it directly: it rides the modifier
+    stack, so any hero can weaken (or sharpen) another's output for a while.
+    Applies before the target's defences, since it changes the blow itself."""
+
+    @EV.hook(priority=15)
+    def on_before_damage(self, match, ev):
+        if ev.cancelled or ev.source is None or ev.amount <= 0:
+            return
+        shift = ev.source.stat("damage_dealt")
+        if shift:
+            ev.amount = max(0, ev.amount + shift)
+
+
 class FlatReduction:
     """A flat per-target cut on all incoming damage — the target's permanent
     `damage_reduction` (e.g. 森林之子's guard) plus any temporary `stance_dr`
@@ -62,6 +77,24 @@ class AbilityImmunity:
             return
         if ev.target.vars.get("ability_immune") and ev.source is not None and ev.source.side != ev.target.side:
             ev.cancel("warded (太刀)")
+
+
+class CurseTrap:
+    """诅咒娃娃's 咒毒 sits on whoever it marked: the first attack or ability that
+    damages that unit costs its source the next two rounds. Generic like the other
+    global rules — it reads a var off the target and never names a hero. Fires once,
+    then clears the mark."""
+
+    TRIGGERS = (NORMAL_ATTACK, ABILITY)
+
+    @EV.hook(priority=80)
+    def on_after_damage(self, match, ev):
+        if ev.category not in self.TRIGGERS or ev.amount <= 0:
+            return
+        if not ev.target.vars.get("curse_mark") or ev.source is None:
+            return
+        ev.target.vars["curse_mark"] = None
+        match.freeze(ev.source, reason="咒毒")
 
 
 class HalvingRule:

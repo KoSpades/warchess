@@ -69,3 +69,26 @@ class Topology:
     def forward_step(self, side):
         """+1 column is 'forward' for Left, -1 for Right."""
         return 1 if side == LEFT else -1
+
+    # --- directions and rays ------------------------------------------
+
+    DIRECTIONS = ("forward", "backward", "up", "down")
+
+    def direction_step(self, side, name):
+        """A named direction as a (dc, dr) step, from that side's point of view.
+        None for anything unrecognised, so callers can validate by asking."""
+        fwd = self.forward_step(side)
+        return {"forward": (fwd, 0), "backward": (-fwd, 0),
+                "up": (0, -1), "down": (0, 1)}.get(name)
+
+    def ray(self, origin, step, limit=None):
+        """Cells walking outward from (but not including) origin, in order, until
+        the board runs out — the lane a charge or a sniper's shot travels."""
+        c, r = origin
+        out = []
+        while limit is None or len(out) < limit:
+            c, r = c + step[0], r + step[1]
+            if not self.in_bounds((c, r)):
+                break
+            out.append((c, r))
+        return out

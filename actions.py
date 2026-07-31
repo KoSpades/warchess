@@ -16,8 +16,10 @@ class ActionInstance:
 
     def is_live(self):
         """A unit killed earlier in the same exchange does not fire its later
-        sequential attacks. Its simultaneous ones have already landed."""
-        return self.actor is None or (self.actor.alive and self.actor.cells)
+        sequential attacks. Its simultaneous ones have already landed. Death is
+        the only test — a living unit with no square (鬼魂 before it manifests)
+        still acts; its actions simply are not positional."""
+        return self.actor is None or self.actor.alive
 
     def eligible_victims(self, match):
         return []
@@ -83,6 +85,71 @@ class CellLockedAttack(ActionInstance):
                 amount=self.attacker.atk if self.amount is None else self.amount,
                 category=DMG.NORMAL_ATTACK,
                 tags=tags,
+            )
+        ]
+
+
+class LineShot(ActionInstance):
+    """狙击手: fires down one lane of its own row or column and hits the first enemy
+    in it, for the distance between them plus its attack. An ally in the lane blocks
+    the shot. Like every cell-locked attack, the lane is re-scanned from where the
+    sniper actually ends up, so being bounced re-aims rather than voids the shot."""
+
+    needs_pick = False
+    label = "shot"
+
+    def __init__(self, attacker, direction):
+        self.attacker = attacker
+        self.actor = attacker
+        self.direction = direction
+
+    @staticmethod
+    def scan(match, actor, direction, origin=None):
+        """(target, distance) down this lane, or None if it cannot be fired: no
+        enemy in it, or one of your own standing in the way."""
+        step = match.topology.direction_step(actor.side, direction)
+        origin = tuple(origin) if origin else actor.cell
+        if step is None or not origin:
+            return None
+        for dist, cell in enumerate(match.topology.ray(origin, step), start=1):
+            occ = match.occupant(cell)
+            # Its own body doesn't block it: when the lane is scanned from a square
+            # it is moving to, the sniper is still standing in the old one, and that
+            # square will be empty by the time the shot goes off.
+            if occ is None or occ is actor:
+                continue
+            return None if occ.side == actor.side else (occ, dist)
+        return None
+
+    @classmethod
+    def lanes(cls, match, actor, origin=None):
+        """Every lane that can actually be fired, for offering and validation."""
+        out = []
+        for d in match.topology.DIRECTIONS:
+            hit = cls.scan(match, actor, d, origin)
+            if hit:
+                target, dist = hit
+                out.append({"dir": d, "target": target.id,
+                            "distance": dist, "damage": max(0, dist + actor.atk)})
+        return out
+
+    def eligible_victims(self, match):
+        return None
+
+    def build_damage(self, match, victim):
+        hit = self.scan(match, self.attacker, self.direction)
+        if hit is None:
+            match.log_line(
+                f"{match.label(self.attacker)} fires down the lane — nobody there."
+            )
+            return []
+        target, dist = hit
+        return [
+            DMG.DamageEvent(
+                source=self.attacker,
+                target=target,
+                amount=max(0, dist + self.attacker.atk),
+                category=DMG.NORMAL_ATTACK,
             )
         ]
 

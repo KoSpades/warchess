@@ -116,7 +116,7 @@ def order_slip(m, o):
     }
 
 
-def unit_payload(m, e, live):
+def unit_payload(m, e, live, viewer=None):
     if live or e.id not in m.snapshot:
         hp, ap, cell, acted, alive = e.hp, e.ap, list(e.cell) if e.cells else None, e.has_acted, e.alive
         status = HEROES.status_of(m, e)
@@ -124,6 +124,9 @@ def unit_payload(m, e, live):
         s = m.snapshot[e.id]
         hp, ap, cell, acted, alive = s["hp"], s["ap"], s["cell"], s["acted"], s["alive"]
         status = s.get("status", [])
+    # Some badges are for their owner's eyes only (诅咒娃娃's mark).
+    if viewer is not None and viewer != e.side:
+        status = [x for x in status if not x.get("private")]
     return {
         "id": e.id,
         "side": e.side,
@@ -154,7 +157,7 @@ def state_for(m, side):
     live_enemy = m.phase != M.COMMIT
     units = []
     for e in m.entities:
-        units.append(unit_payload(m, e, live=(e.side == side) or live_enemy))
+        units.append(unit_payload(m, e, live=(e.side == side) or live_enemy, viewer=side))
 
     out = {
         "version": m.version,
@@ -169,7 +172,7 @@ def state_for(m, side):
         "zone": [list(c) for c in m.topology.deployment_zone(side)],
         "tiles": m.board.serialise(),
         "units": units,
-        "log": m.log[-60:],
+        "log": [l for l in m.log if l.get("side") in (None, side)][-60:],
         "reveal": m.last_reveal,
     }
 

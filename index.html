@@ -144,6 +144,8 @@ main{display:grid;grid-template-columns:minmax(0,1fr) var(--rpanel);
 .unit.R .qn{background:var(--brass)}
 .unit.queued{border-style:dashed}
 /* The holy shield reads as protection, not alarm — steady, not pulsing. */
+.unit.st-ward .st{border-color:#7FA6D8;color:#7FA6D8}
+.unit.st-ward{box-shadow:0 0 0 2px rgba(127,166,216,.45),inset 0 0 12px rgba(127,166,216,.18)}
 .unit.st-aegis .st{border-color:var(--verdigris);color:var(--verdigris)}
 .unit.st-aegis{box-shadow:0 0 0 2px rgba(87,160,142,.55),inset 0 0 12px rgba(87,160,142,.22)}
 .unit.st-rage{border-color:var(--oxide);animation:ragepulse 1.6s ease-in-out infinite}
@@ -320,6 +322,7 @@ body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
 .ghost{text-align:center;color:var(--dim)}
 
 .note{font-size:12px;color:var(--dim);margin:0 0 7px;line-height:1.45}
+.btn small.blocked{color:var(--oxide)}
 .err{color:var(--oxide);font-size:12px;margin:8px 0 0;min-height:16px}
 .step{font-family:var(--mono);font-size:9px;letter-spacing:.18em;text-transform:uppercase;
   color:var(--dim);margin:9px 0 5px;padding-bottom:3px;border-bottom:1px solid var(--rule)}
@@ -376,7 +379,7 @@ let S = null, armed = null, draft = null, err = "", lastVersion = -1, pendingMov
 let hoverId = null, inspected = null, revealActive = false, shownReveal = "";
 let codex = {};   // all hero cards, fetched once from /api/codex (not per poll)
 
-const cn = c => COLS[c[0]-1] + c[1];
+const cn = c => c ? COLS[c[0]-1] + c[1] : 'nowhere';
 const eq = (a,b) => a && b && a[0]===b[0] && a[1]===b[1];
 const has = (arr,c) => (arr||[]).some(x => eq(x,c));
 
@@ -484,6 +487,14 @@ function choicesReady(){ return curChoices().every(ch => (draft.choices||{})[ch.
 function pickChoice(key, id){ draft.choices = draft.choices || {}; draft.choices[key] = id; err=""; render(); }
 
 function unitAt(cell){ return (S.units||[]).find(u => u.alive && u.cell && eq(u.cell, cell)); }
+// Whose turn can actually be taken. The engine already excludes heroes that are
+// frozen (咒毒) from commit.unacted, so trust that list rather than re-deriving
+// it from alive/acted — otherwise we offer picks the server will refuse.
+function canAct(u){
+  if (!u || !u.alive || u.acted || u.side !== SIDE) return false;
+  const un = S.commit && S.commit.unacted;
+  return un ? un.includes(u.id) : true;
+}
 function myUnits(){ return (S.units||[]).filter(u => u.side === SIDE); }
 function foeUnits(){ return (S.units||[]).filter(u => u.side !== SIDE); }
 function selectedUnit(){
@@ -500,7 +511,9 @@ function currentAction(){
 // draft.entity, never on S.commit.selected — for a gang those differ, and using
 // `selected` drew one goblin's reach around another goblin's destination.
 function plannedCell(u){
-  if (!u || !u.cell || S.phase!=='commit' || !draft) return u ? u.cell : null;
+  if (!u) return null;
+  if (S.phase!=='commit' || !draft) return u.cell;
+  // u.cell may be null (鬼魂 before it takes flesh) — the aim still counts.
   if (draft.entity === u.id) return draft.destination || draft.tentative || u.cell;
   const o = gangOrders().find(x => x.entity === u.id);
   return (o && o.destination) || u.cell;
@@ -643,8 +656,7 @@ function unitHTML(u, pending){
   if (act && act.targeting.kind==='unit' && u.side!==SIDE) cls.push('clickable');
   if (act && act.targeting.kind==='ally' && u.side===SIDE) cls.push('clickable');
   if (draft && draft.target===u.id) cls.push('tgt');
-  if (S.phase==='commit' && !S.commit.sealed && !S.commit.selected &&
-      u.side===SIDE && !u.acted && u.alive) cls.push('clickable');
+  if (S.phase==='commit' && !S.commit.sealed && !S.commit.selected && canAct(u)) cls.push('clickable');
   const pct = Math.max(0,Math.round(100*u.hp/u.max_hp));
   const pips = u.max_ap>0 ? `<span class="pips">${Array.from({length:u.max_ap},(_,i)=>`<i class="${i<u.ap?'on':''}"></i>`).join('')}</span>` : '';
   const st = u.status || [];
@@ -746,14 +758,62 @@ async function dropCell(e, c, r){
   }
 }
 
+// 狙击手's lanes, scanned client-side from the square being aimed at — the
+// server re-scans from the real destination when the order is sealed. Mirrors
+// actions.LineShot.scan: first body wins, your own line blocks the shot.
+function laneShots(){
+  const act = currentAction(), u = selectedUnit();
+  if (!act || act.targeting.kind!=='lane' || !u) return [];
+  const o = originCell(); if (!o) return [];
+  const fwd = SIDE==='L' ? 1 : -1;
+  const steps = {forward:[fwd,0], backward:[-fwd,0], up:[0,-1], down:[0,1]};
+  const out = [];
+  for (const d of (act.targeting.dirs||[])){
+    const [dc,dr] = steps[d]; let c=o[0], r=o[1];
+    for (let n=1;;n++){
+      c += dc; r += dr;
+      if (c<1 || r<1 || c>S.board.cols || r>S.board.rows) break;
+      const v = unitAt([c,r]);
+      if (!v || v.id===u.id) continue;                // its own pre-move body doesn't block
+      if (v.side===SIDE) break;                       // your own line blocks it
+      out.push({dir:d, target:v, distance:n, damage:Math.max(0, n + (u.atk||0))});
+      break;
+    }
+  }
+  return out;
+}
+function currentLane(){
+  return draft && draft.direction ? laneShots().find(l=>l.dir===draft.direction) || null : null;
+}
 function chargeLane(){
   const act = currentAction();
   if (!act || !draft || !draft.direction) return null;
   return ((act.targeting.choices)||[]).find(x=>x.dir===draft.direction) || null;
 }
+// The hero's area attack, whether or not it is the action currently armed —
+// clicking a covered square is how you choose it.
+function areaAttack(){
+  return curActions().find(a => a.targeting && a.targeting.kind==='area') || null;
+}
+// The squares that swing catches, centred on where the hero will stand.
+function areaCells(act){
+  act = act || currentAction();
+  if (!act || act.targeting.kind!=='area') return [];
+  const o = originCell(); if (!o) return [];
+  const out = [];
+  for (const dc of [-1,0,1]) for (const dr of [-1,0,1]){
+    if (!dc && !dr) continue;
+    const c=o[0]+dc, r=o[1]+dr;
+    if (c>=1 && r>=1 && c<=S.board.cols && r<=S.board.rows) out.push([c,r]);
+  }
+  return out;
+}
 function sweepPreview(){
   const act = currentAction();
+  if (act && act.targeting.kind==='area') return areaCells(act);
   if (!act || !draft || !draft.direction || act.targeting.kind!=='direction') return [];
+  const shot = currentLane();
+  if (shot) return shot.target.cell ? [shot.target.cell] : [];
   const lane = chargeLane();
   if (lane) return lane.victims
     .map(id => (S.units||[]).find(u=>u.id===id))
@@ -776,9 +836,14 @@ function clickableCell(cell){
   if (cs){
     if (S.mode==='self') return false;   // solo mode auto-aims — no manual marking
     const o = originCell();
+    if (!o) return false;          // nowhere to fire from yet
     return Math.abs(o[0]-cell[0])+Math.abs(o[1]-cell[1]) <= cs.range;
   }
-  if (act.targeting.kind==='any_cell') return true;
+  if (act.targeting.kind==='any_cell')
+    return act.targeting.cells ? has(act.targeting.cells, cell) : true;
+  if (act.targeting.kind==='lane')
+    return laneShots().some(l => l.target.cell && eq(l.target.cell, cell));
+  if (areaAttack()) return has(areaCells(areaAttack()), cell);
   return false;
 }
 
@@ -803,13 +868,13 @@ function onCell(c,r){
   if (!S.commit.selected){
     // Click your own un-acted piece to tentatively pick it (reversible).
     const u = unitAt(cell);
-    if (u && u.side===SIDE && !u.acted && u.alive) return cmd({cmd:'select', entity:u.id});
+    if (canAct(u)) return cmd({cmd:'select', entity:u.id});
     return;
   }
   if (!draft) return;
   if (isGang() && !draft.destination && !draft.held){
     const u = unitAt(cell);
-    if (u && u.side===SIDE && u.alive && !u.acted){
+    if (canAct(u)){
       if (gangMember(u.id)){
         if (isOrdered(u.id)) return;        // that goblin already has its orders
         // Clicking a goblin says "this one acts next" — the click order IS the
@@ -830,7 +895,7 @@ function onCell(c,r){
     // current one to back out, or a legal square to *tentatively* aim the move —
     // just like the arrow keys. Enter then confirms and locks this hero in.
     const u = unitAt(cell);
-    if (u && u.side===SIDE && u.alive && !u.acted){
+    if (canAct(u)){
       return u.id === S.commit.selected ? cmd({cmd:'deselect'}) : cmd({cmd:'select', entity:u.id});
     }
     if (has(curMoves(),cell)){ draft.tentative=cell; err=""; return render(); }
@@ -841,6 +906,7 @@ function onCell(c,r){
   if (cs){
     if (S.mode==='self') return;   // solo mode auto-aims — clicks do nothing here
     const o=originCell();
+    if (!o){ err="Take flesh first."; return render(); }
     if (Math.abs(o[0]-c)+Math.abs(o[1]-r) > cs.range){ err="Out of range."; return render(); }
     const sh = draft.shots[draft.shotIndex] || (draft.shots[draft.shotIndex]=[]);
     const at = sh.findIndex(x=>eq(x,cell));
@@ -849,7 +915,22 @@ function onCell(c,r){
     else { err=`Already marked ${cs.count} cells.`; return render(); }
     err=""; return render();
   }
-  if (act.targeting.kind==='any_cell'){ draft.cell=cell; err=""; return render(); }
+  if (areaAttack()){
+    // Nothing to aim: clicking any square the swing covers simply chooses it,
+    // and Enter confirms. Clicking anywhere else leaves the order alone.
+    if (has(areaCells(areaAttack()), cell)){ draft.actionKey='attack'; err=""; return render(); }
+    return;
+  }
+  if (act.targeting.kind==='lane'){
+    const l = laneShots().find(x => x.target.cell && eq(x.target.cell, cell));
+    if (l){ draft.direction = l.dir; err=""; return render(); }
+    return;
+  }
+  if (act.targeting.kind==='any_cell'){
+    const only = act.targeting.cells;
+    if (only && !has(only, cell)){ err="Not a square this can be used on."; return render(); }
+    draft.cell=cell; err=""; return render();
+  }
   if (act.targeting.kind==='unit' || act.targeting.kind==='ally'){
     const tu = unitAt(cell); if (!tu || !tu.alive) return;
     const wantAlly = act.targeting.kind==='ally';
@@ -858,7 +939,10 @@ function onCell(c,r){
 }
 
 function onUnitPick(id){
-  if (S.phase==='commit' && !S.commit.selected) return cmd({cmd:'select', entity:id});
+  if (S.phase==='commit' && !S.commit.selected){
+    const u = (S.units||[]).find(x=>x.id===id);
+    return canAct(u) ? cmd({cmd:'select', entity:id}) : null;
+  }
   const act = currentAction();
   if (act && act.targeting.kind==='unit'){ draft.target=id; err=""; render(); }
 }
@@ -894,12 +978,44 @@ function sealFromKeyboard(){
     if (S.mode!=='self' && !(draft.shots||[]).some(s=>s.length>0)) draft.actionKey='none';
     return sealOrder();
   }
-  if (act.key==='attack' && act.targeting.kind==='unit'){
-    if (draft.target==null) draft.actionKey='none';
+  if (act.key==='attack' && act.targeting.kind==='area') return sealOrder();
+  if (act.key==='attack' && act.targeting.kind==='lane'){
+    if (draft.direction==null){
+      if (laneShots().length){          // a shot is there to be taken — don't eat it
+        err = "Pick a lane to fire down, or choose Hold.";
+        return render();
+      }
+      draft.actionKey='none';           // genuinely nothing to shoot: hold
+    }
     return sealOrder();
   }
-  // Hold, or an ability whose parameters are set. A half-chosen ability waits.
-  if (act.key==='none' || orderReady()) sealOrder();
+  if (act.key==='attack' && act.targeting.kind==='unit'){
+    // Same trap as the sniper's lane: silently turning an unaimed attack into a
+    // hold loses the player's turn without telling them. Hold is a button.
+    if (draft.target==null){
+      if ((S.commit.enemies||[]).length){ err = stillNeeded(act); return render(); }
+      draft.actionKey='none';
+    }
+    return sealOrder();
+  }
+  // Hold, or an ability whose parameters are set.
+  if (act.key==='none' || orderReady()) return sealOrder();
+  // Half-chosen: Enter used to do nothing at all, which reads as a frozen UI.
+  err = stillNeeded(act);
+  render();
+}
+// What an armed-but-unaimed action is still waiting for. Enter is the one key
+// players lean on, so it must always answer.
+function stillNeeded(act){
+  const t = act.targeting;
+  if (t.kind==='ally')      return `Choose an ally for ${act.name} — click one on the board or in the panel.`;
+  if (t.kind==='unit')      return `Choose an enemy for ${act.name}.`;
+  if (t.kind==='any_cell')  return `Choose a square for ${act.name}.`;
+  if (t.kind==='direction') return `Choose a direction for ${act.name}.`;
+  if (t.kind==='weapon')    return draft.weapon ? 'Finish aiming this weapon.' : 'Choose a weapon first.';
+  if (t.kind==='lane')      return 'Pick a lane to fire down, or choose Hold.';
+  if (t.kind==='magnitude') return 'Choose an amount.';
+  return 'That order is not ready yet.';
 }
 function onKey(e){
   // Deployment: Enter seals once all heroes are placed.
@@ -933,6 +1049,19 @@ function chooseAction(key){
   draft.actionKey=key; draft.shots=[]; draft.shotIndex=0; draft.target=null; draft.direction=null; draft.cell=null; draft.amount=null; draft.weapon=null;
   if (act.targeting.kind==='cells') draft.shots = Array.from({length:act.targeting.shots},()=>[]);
   if (act.targeting.kind==='magnitude') draft.amount = 1;
+  if (act.targeting.kind==='lane'){
+    // Only one line of fire: aim it, so Enter shoots instead of quietly holding.
+    const only = laneShots();
+    if (only.length === 1) draft.direction = only[0].dir;
+  }
+  err=""; render();
+}
+function changeMove(){
+  // Re-opening the movement step drops the action aimed from the old square — a
+  // lane or a marked cell chosen from there is meaningless once you move.
+  Object.assign(draft, {destination:null, held:false, tentative:null, actionKey:null,
+                        shots:[], shotIndex:0, target:null, direction:null,
+                        cell:null, amount:null, weapon:null});
   err=""; render();
 }
 function chooseSelfMove(key){
@@ -958,6 +1087,8 @@ function orderReady(){
   if (t.kind==='unit') return draft.target!=null;
   if (t.kind==='ally') return draft.target!=null;
   if (t.kind==='magnitude') return draft.amount>=1;
+  if (t.kind==='area') return true;   // nothing to aim — it catches whatever is beside it
+  if (t.kind==='lane') return true;   // no lane picked simply holds
   if (t.kind==='direction') return draft.direction!=null;
   if (t.kind==='any_cell') return draft.cell!=null;
   if (t.kind==='weapon') return draft.weapon!=null;
@@ -970,7 +1101,7 @@ function sealOrder(){
   if (t.kind==='unit') action.target = draft.target;
   if (t.kind==='ally') action.target = draft.target;
   if (t.kind==='magnitude') action.amount = draft.amount;
-  if (t.kind==='direction') action.direction = draft.direction;
+  if (t.kind==='direction' || t.kind==='lane') action.direction = draft.direction;
   if (t.kind==='any_cell') action.cell = draft.cell;
   if (t.kind==='weapon'){ action.weapon = draft.weapon; const w=currentWeapon(); if (w && w.mode==='cells') action.shots = draft.shots; }
   if (isGang()){
@@ -1154,7 +1285,10 @@ function renderSetup(){
       h += `<div class="hero ${on?'used':'pickable'} ${armed===hero.key?'armed':''}" ${drag} onclick="armHero('${hero.key}')">
         <div class="top"><span class="cn">${hero.name}</span><span class="en">${hero.name_en}</span>${on?'':'<span class="grip">⠿</span>'}</div>
         <div class="stats">HP ${hero.hp} · ATK ${hero.atk} · MOVE ${hero.move} · AP ${hero.max_ap}
-          · ${hero.attack.mode==='cell_locked'?`${hero.attack.cells} cells @ ${hero.attack.range}`:'any one enemy'}
+          · ${hero.attack.mode==='cell_locked'?`${hero.attack.cells} cells @ ${hero.attack.range}`
+              :hero.attack.mode==='area_locked'?'every enemy in the 8 around it'
+              :hero.attack.mode==='line_locked'?'first enemy in row/column'
+              :hero.attack.mode==='weapon'?'weapon of choice':'any one enemy'}
           ${hero.shots>1?` · ${hero.shots} shots`:''}</div>
         ${hero.traits.map(t=>`<div class="trait"><b>${t.name}${t.ap_cost?` (${t.ap_cost} AP)`:''}</b> — ${t.text}</div>`).join('')}
       </div>`;
@@ -1189,10 +1323,17 @@ function renderCommit(){
   }
   if (!c.selected){
     h += `<p class="note">Pick the hero to move.</p>`;
-    for (const u of myUnits().filter(u=>u.alive && !u.acted)){
+    for (const u of myUnits().filter(canAct)){
       h += `<div class="hero pickable" onclick="onUnitPick(${u.id})">
         <div class="top"><span class="cn">${u.name}</span><span class="en">${u.name_en} · ${cn(u.cell)}</span></div>
         <div class="stats">HP ${u.hp}/${u.max_hp} · AP ${u.ap}/${u.max_ap}</div></div>`;
+    }
+    // Anyone alive, un-acted and still not offered is being held out by an effect
+    // (咒毒's freeze) — say so rather than silently dropping them from the list.
+    for (const u of myUnits().filter(u=>u.alive && !u.acted && !canAct(u))){
+      const why = (u.status||[]).map(s=>s.label).join(' · ') || 'cannot act';
+      h += `<div class="hero used"><div class="top"><span class="cn">${u.name}</span>
+        <span class="en">${cn(u.cell)}</span></div><div class="stats">${why}</div></div>`;
     }
     const done = myUnits().filter(u=>u.alive && u.acted).length;
     if (done) h += `<p class="note">${done} of your heroes have already acted this round.</p>`;
@@ -1209,10 +1350,16 @@ function renderCommit(){
       document.getElementById('leftbody').innerHTML = h; return;
     }
   }
-  h += `<div class="step">1 · ${u.name} ${cn(u.cell)} · move</div>`;
+  const bodiless = !u.cell;
+  const canAppear = bodiless && (curMoves()||[]).length > 0;
+  h += `<div class="step">1 · ${u.name} ${cn(u.cell)}${bodiless?(canAppear?' · take flesh':''):' · move'}</div>`;
   if (!draft.destination && !draft.held){
-    h += `<p class="note">Arrows or click to aim · <b>Enter</b> locks it in (Enter alone holds).</p>
-          <button class="btn primary" onclick="confirmMove()">${draft.tentative?'Confirm move to '+cn(draft.tentative):'Confirm — hold position'}</button>`;
+    h += canAppear
+      ? `<p class="note">Click a highlighted square beside its host to <b>take flesh</b> there — then it acts as normal. <b>Enter</b> alone stays a ghost.</p>`
+      : bodiless
+      ? `<p class="note">${u.name} has no body to move — press <b>Enter</b> to go on to its action.</p>`
+      : `<p class="note">Arrows or click to aim · <b>Enter</b> locks it in (Enter alone holds).</p>
+          <button class="btn primary" onclick="confirmMove()">${draft.tentative?(bodiless?'Take flesh at ':'Confirm move to ')+cn(draft.tentative):(bodiless?'Stay a ghost':'Confirm — hold position')}</button>`;
     for (const a of curActions().filter(a=>a.self_move)){
       const dis = a.affordable===false ? 'disabled' : '';
       h += `<button class="btn" ${dis} onclick="chooseSelfMove('${a.key}')">
@@ -1220,7 +1367,7 @@ function renderCommit(){
               <small>Moves ${u.name} itself — pick this instead of a move.</small></button>`;
     }
   } else {
-    h += `<button class="btn on" onclick="draft.destination=null;draft.held=false;draft.tentative=null;draft.actionKey=null;render()">
+    h += `<button class="btn on" onclick="changeMove()">
             ${draft.held?'Holding position':'Moving to '+cn(draft.destination)} <small>Click to change</small></button>`;
   }
   if (draft.destination || draft.held){
@@ -1238,7 +1385,7 @@ function renderCommit(){
       const dis = a.affordable===false ? 'disabled' : '';
       h += `<button class="btn ${draft.actionKey===a.key?'on':''}" ${dis} onclick="chooseAction('${a.key}')">
              ${a.name}${a.ap_cost?`<span class="cost">${a.ap_cost} AP</span>`:''}
-             ${a.text?`<small>${a.text}</small>`:''}</button>`;
+             ${a.blocked?`<small class="blocked">${a.blocked}</small>`:(a.text?`<small>${a.text}</small>`:'')}</button>`;
     }
     if (act) h += targetingHTML(act);
     const last = isGang() && gangPending().length===1;
@@ -1313,11 +1460,31 @@ function targetingHTML(act){
               ${t.shots>1?`Shot ${i+1}`:'Cells'} <span class="cost">${n}/${t.count}</span>
               ${t.shots>1&&i===1?'<small>Half damage</small>':''}</button>`;
     }
+  } else if (t.kind==='area'){
+    const hit = areaCells(act).filter(c => {
+      const v = unitAt(c); return v && v.side!==SIDE;
+    }).length;
+    return `<div class="step">3 · Sweep</div>
+      <p class="note">Catches every enemy standing beside it — no aiming.
+      ${hit?`<b>${hit}</b> in reach right now.`:'Nothing in reach from there.'}
+      Press <b>Enter</b> to swing.</p>`;
   } else if (t.kind==='unit'){
-    h += `<p class="note">Choose one enemy. This lands wherever it moves.</p>`;
+    h += `<p class="note">Choose one enemy${draft.target==null?' — click it on the board':''}. This lands wherever it moves.</p>`;
     for (const u of foeUnits().filter(u=>u.alive)){
       h += `<button class="btn ${draft.target===u.id?'on':''}" onclick="draft.target=${u.id};err='';render()">
               ${u.name} <span class="cost">${cn(u.cell)}</span></button>`;
+    }
+  } else if (t.kind==='lane'){
+    const shots = laneShots();
+    h += `<div class="step">3 · Lane</div>`;
+    h += shots.length
+      ? `<p class="note">Hits the first enemy down that lane — damage is how far away it is.${
+           draft.direction ? '' : ' <b>Pick one</b> (or click it on the board).'}</p>`
+      : `<p class="note">No shot from here: no enemy in this row or column, or your own line is in the way. <b>Enter</b> holds.</p>`;
+    for (const l of shots){
+      h += `<button class="btn ${draft.direction===l.dir?'on':''}" onclick="draft.direction='${l.dir}';err='';render()">
+              ${DIRS[l.dir]||l.dir}<span class="cost">${l.damage} dmg</span>
+              <small>${l.target.name} at ${cn(l.target.cell)} · ${l.distance} squares away</small></button>`;
     }
   } else if (t.kind==='direction' && t.choices){
     h += `<div class="step">3 · Lane</div>`;
@@ -1348,12 +1515,12 @@ function targetingHTML(act){
     }
   } else if (t.kind==='magnitude'){
     const su = selectedUnit();
-    const maxX = Math.max(1, Math.min(su.hp, su.max_hp-1));
+    const maxX = Math.max(1, Math.min(su.hp-1, su.max_hp-1));
     if (draft.amount==null || draft.amount>maxX) draft.amount = Math.min(draft.amount||1, maxX);
     h += `<p class="note">Sacrifice max HP for the same amount of permanent attack, then <b>Enter</b>.</p>
           <input type="range" min="1" max="${maxX}" value="${draft.amount}" style="width:100%"
                  oninput="magUpdate(this.value)">
-          <p class="note">Sacrifice <b id="magv">${draft.amount}</b> → <span id="magres">+${draft.amount} atk, ${su.max_hp-draft.amount} max HP</span></p>`;
+          <p class="note">Sacrifice <b id="magv">${draft.amount}</b> → <span id="magres">+${draft.amount} atk, ${su.hp-draft.amount}/${su.max_hp-draft.amount} HP</span></p>`;
   }
   return h;
 }
@@ -1361,7 +1528,7 @@ function magUpdate(v){
   draft.amount = +v;
   const su = selectedUnit();
   document.getElementById('magv').textContent = v;
-  document.getElementById('magres').textContent = `+${v} atk, ${su.max_hp - (+v)} max HP`;
+  document.getElementById('magres').textContent = `+${v} atk, ${su.hp - (+v)}/${su.max_hp - (+v)} HP`;
 }
 
 function renderVictim(){
@@ -1398,6 +1565,8 @@ function heroDetailHTML(u){
   const tile = (k,v) => `<div class="hd-tile"><div class="k">${k}</div><div class="v">${v}</div></div>`;
   let tiles = tile('Attack', u.atk) + tile('Move', u.move);
   if (a.mode==='cell_locked') tiles += tile('Grids', u.grid ?? a.cells) + tile('Range', u.rng);
+  else if (a.mode==='line_locked') tiles += tile('Reach', 'row & column') + tile('Damage', 'distance');
+  else if (a.mode==='area_locked') tiles += tile('Reach', 'all 8 around') + tile('Hits', 'everyone');
   else if (a.mode==='weapon') tiles += tile('Weapon', 'varies');
   else tiles += tile('Reach', 'any enemy');
   const status = (u.status||[]).map(s =>
