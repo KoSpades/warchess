@@ -55,6 +55,10 @@ class CellLockedAttack(ActionInstance):
         """If the attacker was bounced, the pattern is re-derived from where it
         actually stands: being blocked displaces your shot, it does not void it."""
         actual = self.attacker.cell
+        if actual is None or self.intended_origin is None:
+            # It never made it onto the board — a 鬼魂 whose square was taken by
+            # somebody else in the same exchange. Nothing to fire from.
+            return []
         dc = actual[0] - self.intended_origin[0]
         dr = actual[1] - self.intended_origin[1]
         out = []
