@@ -82,7 +82,8 @@ ok(`every phase and hero card renders (${Object.keys(F).length} states)`, !broke
 const needsATarget = [
   ['ally_heal', 'ability:heal'], ['any_cell_ignite', 'ability:ignite'],
   ['direction_sweep', 'ability:sweep'], ['weapon_master', null],
-  ['unit_locked', null], ['line_cut', 'ability:gale_slash'],
+  ['unit_locked', null], ['shape_cut', 'ability:gale_slash'],
+  ['shape_blast', 'ability:self_destruct'],
 ];
 for (const [name, key] of needsATarget) {
   if (!F[name]) continue;
@@ -169,12 +170,12 @@ if (F.cone) {
      JSON.stringify(lastSent().payload.action));
 }
 
-// ------------------------------------------------------- the row-or-column cut
+// --------------------------------------------------- shapes centred on the hero
 
-if (F.line_cut) {
-  HOLD_FIRST(F.line_cut);
+if (F.shape_cut) {
+  HOLD_FIRST(F.shape_cut);
   C.chooseAction('ability:gale_slash');
-  ok('swordsman: neither line is aimed until one is picked', C.draft.direction == null,
+  ok('swordsman: no shape is aimed until one is picked', C.draft.direction == null,
      String(C.draft.direction));
   ok('swordsman: its own square settles nothing, so it is not clickable',
      !C.clickableCell([3, 3]));
@@ -188,6 +189,26 @@ if (F.line_cut) {
      `${C.sweepPreview().length} squares`);
   C.sealFromKeyboard();
   ok('swordsman: Enter cuts it', lastSent().payload.action.direction === 'column',
+     JSON.stringify(lastSent().payload.action));
+}
+
+if (F.shape_blast) {
+  HOLD_FIRST(F.shape_blast);
+  C.chooseAction('ability:self_destruct');
+  C.onCell(4, 4);                       // a diagonal — only the ring covers it
+  ok('bomber: a diagonal square can only mean the ring',
+     C.draft.direction === 'surround8', String(C.draft.direction));
+  ok('bomber: the ring is 8 squares', C.sweepPreview().length === 8,
+     `${C.sweepPreview().length} squares`);
+  C.onCell(4, 3);                       // both the row and the ring cover this one
+  ok('bomber: a square two shapes share aims nothing',
+     C.draft.direction === 'surround8' && !C.clickableCell([4, 3]),
+     String(C.draft.direction));
+  C.onCell(8, 3);                       // far down the row — unambiguous
+  ok('bomber: a far square down the row picks the row', C.draft.direction === 'row',
+     String(C.draft.direction));
+  C.sealFromKeyboard();
+  ok('bomber: Enter sets it off', lastSent().payload.action.direction === 'row',
      JSON.stringify(lastSent().payload.action));
 }
 

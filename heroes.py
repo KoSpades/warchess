@@ -548,45 +548,33 @@ class Slam(Ability):
         )
 
 
-class GaleSlash(Ability):
-    """剑客's 狂风绝息斩. One cut down the whole row or the whole column it stands
-    in — which of the two is sealed with the order, but the line itself is drawn
-    from wherever it ends up standing, so a step sideways swings the sweep onto a
-    different rank entirely.
+class ShapeAbility(Ability):
+    """An ability that offers a choice of shapes centred on the caster — your row,
+    your column, the squares around you. Which one is sealed with the order, but
+    the shape itself is drawn at resolution from the square the hero actually
+    reached, so a step sideways swings it somewhere else entirely.
 
-    The mark it leaves is the generic `vulnerable` stack damage.py already reads:
-    nothing here knows how it is applied later, only that it goes on."""
+    Subclasses list their options in `targeting` and set DAMAGE; everything about
+    enumerating and previewing them is the same for all of them."""
 
-    key = "gale_slash"
-    name = "狂风绝息斩 Gale Slash"
-    ap_cost = 3
-    targeting = {"kind": "line", "options": ["row", "column"]}
-    blurb = ("5 damage to every enemy in your whole row, or your whole column — "
-             "you choose. Everyone caught takes 1 more from everything for the "
-             "rest of the match, and the marks stack.")
-    DAMAGE = 5
-    MARK = 1
+    DAMAGE = 0
 
     @staticmethod
-    def line(match, actor, which):
-        """The squares the cut covers, from where the hero is standing now."""
-        if not actor.cells:
-            return []
-        col, row = actor.cell
-        return match.topology.row(row) if which == "row" else match.topology.column(col)
+    def cells_of(match, actor, which):
+        """The squares one option covers, from where the hero is standing now."""
+        return match.shape_cells(actor.cell, which) if actor.cells else []
 
     def victims(self, match, actor, which):
-        cells = set(self.line(match, actor, which))
+        cells = set(self.cells_of(match, actor, which))
         return [e for e in match.living()
                 if e.side != actor.side and (e.cells & cells)]
 
-    def lines(self, match, actor):
-        """Both cuts, with the squares each covers, so the client can show a line
-        before it is chosen. A preview only — the real one is drawn at resolution,
-        from the square the hero actually reached."""
+    def shapes(self, match, actor):
+        """Every option with the squares it covers, so the client can show one
+        before it is chosen. A preview only — the real one is drawn at resolution."""
         out = []
         for which in self.targeting["options"]:
-            cells = self.line(match, actor, which)
+            cells = self.cells_of(match, actor, which)
             if not cells:
                 continue
             out.append({"dir": which,
@@ -594,6 +582,23 @@ class GaleSlash(Ability):
                         "victims": [v.id for v in self.victims(match, actor, which)],
                         "damage": self.DAMAGE})
         return out
+
+
+class GaleSlash(ShapeAbility):
+    """剑客's 狂风绝息斩. One cut down the whole row or the whole column it stands in.
+
+    The mark it leaves is the generic `vulnerable` stack damage.py already reads:
+    nothing here knows how it is applied later, only that it goes on."""
+
+    key = "gale_slash"
+    name = "狂风绝息斩 Gale Slash"
+    ap_cost = 3
+    targeting = {"kind": "shape", "options": ["row", "column"]}
+    blurb = ("5 damage to every enemy in your whole row, or your whole column — "
+             "you choose. Everyone caught takes 1 more from everything for the "
+             "rest of the match, and the marks stack.")
+    DAMAGE = 5
+    MARK = 1
 
     def build_damage(self, match, actor, params):
         hit = self.victims(match, actor, params.get("direction"))
@@ -621,6 +626,36 @@ class GaleSlash(Ability):
                 + ", ".join(f"{match.label(e)} +{e.vars['vulnerable']}" for e in marked)
                 + " to everything from here on."
             )
+
+
+class SelfDestruct(ShapeAbility):
+    """炸弹客's 自爆. The hero itself is the cost: its health goes to nothing and it
+    takes one shape of the board with it.
+
+    体力降至0 is a setting, not a blow — it is not a DamageEvent, so no ward, no
+    reduction and no 增伤 mark touches it, and nothing can soften it into survival.
+    The blast and the death land in the same instant: the engine sweeps the dead
+    only once every hit of an exchange has been applied, so killing the bomber in
+    the same breath does not put the fuse out."""
+
+    key = "self_destruct"
+    name = "自爆 Self-Destruct"
+    ap_cost = 3
+    targeting = {"kind": "shape", "options": ["row", "column", "surround8"]}
+    blurb = ("Drop your own health to nothing. 6 damage to every enemy in one shape "
+             "you choose: your row, your column, or the 8 squares around you.")
+    DAMAGE = 6
+
+    def build_damage(self, match, actor, params):
+        return [DMG.DamageEvent(source=actor, target=e, amount=self.DAMAGE,
+                                category=DMG.ABILITY)
+                for e in self.victims(match, actor, params.get("direction"))]
+
+    def side_effects(self, match, actor, params):
+        if not actor.alive:
+            return
+        actor.hp = 0
+        match.log_line(f"{match.label(actor)} goes up with it — nothing left.")
 
 
 class Recurse(Ability):
@@ -1594,6 +1629,18 @@ ROSTER = [
         blurb="Cuts a whole rank open and leaves everyone in it easier to kill.",
     ),
     HeroDef(
+        key="bomber",
+        name="炸弹客",
+        name_en="bomber",
+        max_hp=15,
+        atk=3,
+        move=2,
+        max_ap=3,
+        attack={"mode": CELL, "cells": 2, "range": 2},
+        abilities=[SelfDestruct()],
+        blurb="Walks in fast and spends itself all at once — a whole rank, or everything around it.",
+    ),
+    HeroDef(
         key="sabretooth",
         name="剑齿虎",
         name_en="sabretooth",
@@ -1809,7 +1856,7 @@ BY_KEY[DUMMY.key] = DUMMY
 # whenever you add heroes; --test fills the rest of your side with dummies.
 # Whoever is newest goes here — --test always deploys the hero just added, so it
 # can be played immediately. Up to two; the rest of the side is padded with dummies.
-TEST_HEROES = ["strongman", "swordsman"]
+TEST_HEROES = ["swordsman", "bomber"]
 
 
 
@@ -1818,7 +1865,7 @@ TEST_HEROES = ["strongman", "swordsman"]
 # half of that which Python can see.
 TARGETING_KINDS = {
     "none", "ally", "unit", "two_units", "any_cell", "direction",
-    "magnitude", "weapon", "cells", "lane", "area", "cone", "line",
+    "magnitude", "weapon", "cells", "lane", "area", "cone", "shape",
 }
 
 

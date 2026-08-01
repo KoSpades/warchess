@@ -445,11 +445,11 @@ class Match:
             if params.get("direction") not in t.get("options", []):
                 return "Choose a direction."
 
-        elif kind == "line":
-            # Which of the two lines through the hero to cut. The squares depend on
-            # where it ends up standing, so only the choice itself is checked here.
+        elif kind == "shape":
+            # Which shape centred on the hero to use. The squares depend on where it
+            # ends up standing, so only the choice itself is checked here.
             if params.get("direction") not in t.get("options", []):
-                return "Choose a row or a column."
+                return "Choose a shape."
 
         elif kind == "any_cell":
             cell = params.get("cell")
@@ -861,8 +861,8 @@ class Match:
             t["options"] = [e.id for e in self.living() if e.cells]
         if hasattr(ab, "lanes"):
             t["choices"] = ab.lanes(self, e)
-        if hasattr(ab, "lines"):
-            t["choices"] = ab.lines(self, e)
+        if hasattr(ab, "shapes"):
+            t["choices"] = ab.shapes(self, e)
         if hasattr(ab, "cells"):
             t["cells"] = [list(c) for c in ab.cells(self, e)]
         if hasattr(ab, "throwable"):
@@ -933,20 +933,28 @@ class Match:
             if (dc or dr) and self.topology.in_bounds((c + dc, r + dr))
         ]
 
+    def shape_cells(self, origin, shape):
+        """The squares a named shape covers around a square. One definition, so an
+        area attack and an ability offering a choice of shapes can never disagree
+        about what "your row" means."""
+        origin = tuple(origin)
+        if shape == "surround8":
+            return self._surround8(origin)
+        if shape == "row":
+            return self.topology.row(origin[1])
+        if shape == "column":
+            return self.topology.column(origin[0])
+        return []
+
     def attack_shape(self, e, origin=None):
         """The squares an area attack covers from a given square. Named shapes, so a
-        future hero can sweep a cross or a row without new plumbing."""
+        future hero can sweep a cross or a row without new plumbing. A swing never
+        catches the square it is thrown from."""
         origin = tuple(origin) if origin else e.cell
         if origin is None:
             return []
         shape = e.hero.attack.get("shape", "surround8")
-        if shape == "surround8":
-            return self._surround8(origin)
-        if shape == "row":
-            return [c for c in self.topology.row(origin[1]) if c != origin]
-        if shape == "column":
-            return [c for c in self.topology.column(origin[0]) if c != origin]
-        return []
+        return [c for c in self.shape_cells(origin, shape) if c != origin]
 
     def _apply_stance(self, e, w):
         buff = w.get("buff")

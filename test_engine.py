@@ -1732,6 +1732,90 @@ turn(m, sw.id, cut("row"), cannon.id, hold)
 ok("a cut costs the whole bar", before_ap - sw.ap == 3 - 1,
    f"{before_ap} -> {sw.ap} (+1 at turn end)")
 
+# 51 — 炸弹客: spends itself all at once, in one of three shapes
+def bomb_arena():
+    m = arena([("bomber", (3, 3)), ("gatekeeper", (1, 1))],
+              [("gatekeeper", (7, 3)), ("cannoneer", (7, 2)), ("dummy", (7, 1))])
+    bo = unit(m, LEFT, "bomber"); bo.ap = bo.max_ap
+    return (m, bo, unit(m, LEFT, "gatekeeper"), unit(m, RIGHT, "gatekeeper"),
+            unit(m, RIGHT, "cannoneer"), unit(m, RIGHT, "dummy"))
+
+blast = lambda which: {"destination": None,
+                       "action": {"key": "ability:self_destruct", "direction": which}}
+
+# the row: 6 to everyone in it, and the bomber is gone
+m, bo, ally, gate, cannon, d = bomb_arena()
+hp0 = (gate.hp, cannon.hp)
+turn(m, bo.id, blast("row"), cannon.id, hold)
+ok("the blast takes everyone in the row for 6", hp0[0] - gate.hp == 6, f"took {hp0[0] - gate.hp}")
+ok("...and nobody outside it", cannon.hp == hp0[1], f"took {hp0[1] - cannon.hp}")
+ok("the bomber spends itself", not bo.alive and bo.hp == 0, f"{bo.hp} hp, alive={bo.alive}")
+
+# the column
+m, bo, ally, gate, cannon, d = bomb_arena()
+cannon.set_cell((3, 1)); gate.set_cell((3, 5))
+hp0 = (cannon.hp, gate.hp, d.hp)
+turn(m, bo.id, blast("column"), d.id, hold)
+ok("the column catches its whole height",
+   (hp0[0] - cannon.hp, hp0[1] - gate.hp) == (6, 6), f"{hp0[0] - cannon.hp}, {hp0[1] - gate.hp}")
+ok("...and leaves the rest of the board alone", d.hp == hp0[2])
+
+# the 8 around it — diagonals included, and nothing further out
+m, bo, ally, gate, cannon, d = bomb_arena()
+gate.set_cell((4, 4)); cannon.set_cell((4, 3)); d.set_cell((5, 3))
+hp0 = (gate.hp, cannon.hp, d.hp)
+turn(m, bo.id, blast("surround8"), d.id, hold)
+ok("the ring catches a diagonal neighbour", hp0[0] - gate.hp == 6, f"took {hp0[0] - gate.hp}")
+ok("...and the one straight beside it", hp0[1] - cannon.hp == 6, f"took {hp0[1] - cannon.hp}")
+ok("...but not the one two squares out", d.hp == hp0[2], f"took {hp0[2] - d.hp}")
+
+# its own line walks away
+m, bo, ally, gate, cannon, d = bomb_arena()
+ally.set_cell((4, 3))
+hp0 = ally.hp
+turn(m, bo.id, blast("row"), cannon.id, hold)
+ok("allies standing in the blast are untouched", ally.hp == hp0, f"took {hp0 - ally.hp}")
+
+# the shape is drawn from where it ends up — move 2 is what makes it a threat
+m, bo, ally, gate, cannon, d = bomb_arena()
+gate.set_cell((6, 4)); cannon.set_cell((5, 2)); d.set_cell((1, 1))
+hp0 = (gate.hp, cannon.hp)
+turn(m, bo.id, {"destination": [5, 3],
+                "action": {"key": "ability:self_destruct", "direction": "surround8"}},
+     d.id, hold)
+ok("it walks two squares in and blows up there",
+   (hp0[0] - gate.hp, hp0[1] - cannon.hp) == (6, 6), f"{hp0[0] - gate.hp}, {hp0[1] - cannon.hp}")
+
+# 体力降至0 is a setting, not a blow: nothing wards it, softens it or is marked by it
+m, bo, ally, gate, cannon, d = bomb_arena()
+bo.vars["damage_reduction"] = 99
+bo.vars["blessed"] = ally.id
+turn(m, bo.id, blast("row"), cannon.id, hold)
+ok("no ward or reduction keeps the bomber standing", not bo.alive and bo.hp == 0)
+ok("...and the blessing is not spent putting it out", bo.vars.get("blessed") == ally.id)
+
+# killed in the same breath, the fuse still burns — simultaneity, same as mutual kills
+m, bo, ally, gate, cannon, d = bomb_arena()
+gate.set_cell((4, 3)); bo.hp = 3
+hp0 = gate.hp
+turn(m, bo.id, blast("row"),
+     gate.id, {"destination": None, "action": {"key": "attack", "shots": [[[3, 3]]]}})
+ok("a bomber cut down in the same instant still goes off",
+   hp0 - gate.hp == 6 and not bo.alive, f"took {hp0 - gate.hp}, bomber alive={bo.alive}")
+
+# all three shapes are offered, and it costs the whole bar
+m, bo, ally, gate, cannon, d = bomb_arena()
+ok("all three shapes are on offer",
+   [c["dir"] for c in m.ability_targeting(bo, bo.abilities[0])["choices"]]
+   == ["row", "column", "surround8"])
+m.select_hero(LEFT, bo.id)
+ok("a shape it does not have is refused", m.commit(LEFT, blast("diagonal")) is not None)
+m.deselect(LEFT)
+m, bo, ally, gate, cannon, d = bomb_arena()
+bo.ap = 2
+entry = next(a for a in m.action_menu(bo) if a["key"] == "ability:self_destruct")
+ok("two AP is not enough to set it off", not entry["affordable"])
+
 print("\nlog tail:")
 for line in m.log[-5:]:
     print("   ", line["text"])

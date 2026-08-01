@@ -62,7 +62,13 @@ def build():
     m = arena([("swordsman", (3, 3))], [("dummy", (7, 3)), ("cannoneer", (7, 2))])
     unit(m, RIGHT, "dummy").set_cell((5, 3))
     unit(m, RIGHT, "cannoneer").set_cell((3, 5))
-    snap("line_cut", m, select=m.living(LEFT)[0].id, full_ap=[m.living(LEFT)[0]])
+    snap("shape_cut", m, select=m.living(LEFT)[0].id, full_ap=[m.living(LEFT)[0]])
+
+    # three shapes rather than two, so the overlapping-square rule gets exercised
+    m = arena([("bomber", (3, 3))], [("dummy", (7, 3)), ("cannoneer", (7, 2))])
+    unit(m, RIGHT, "dummy").set_cell((4, 4))
+    unit(m, RIGHT, "cannoneer").set_cell((6, 3))
+    snap("shape_blast", m, select=m.living(LEFT)[0].id, full_ap=[m.living(LEFT)[0]])
 
     m = arena([("blood_mage", (3, 3))], [("dummy", (7, 3))])
     snap("magnitude", m, select=m.living(LEFT)[0].id, full_ap=[m.living(LEFT)[0]])
