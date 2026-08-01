@@ -59,41 +59,57 @@ Four exchanges make a round; then everyone refreshes and AP has ticked up.
 ## Tests
 
 ```
-python test_engine.py
+python test_engine.py     # engine rules
+python make_fixtures.py && node test_client.js    # the browser client
 ```
 
-13 checks on the rules that are easiest to get wrong: bouncing, swap
-prevention, mutual kills, sequential vs simultaneous damage, tile ownership,
-AP timing.
+The engine suite covers the rules that are easiest to get wrong — bouncing, swap
+prevention, mutual kills, sequential vs simultaneous damage, tile ownership, AP
+timing — and then one section per hero. The client suite replays real engine
+states (written out by `make_fixtures.py`, never hand-authored) through the
+browser code, so the two can never drift apart.
+
+`python game.py --test` skips draft and deployment and puts the heroes named in
+`TEST_HEROES` straight on the board, padded with dummies. Every new hero goes in
+that list so it can be played the moment it exists.
 
 ## Known issue: the Robot stalemate
 
-The Robot heals 4 at the end of its own turn and attacks for 3, so it cannot
-kill another Robot. Neither can the Spearman (4, exactly cancelled), the Rock
-Giant (2), the Fire Mage (2), or the Thunder Dragon (1). Only the Gunslinger
-out-damages the regeneration, at 4 + 2 = 6.
-
-If both sides' last surviving hero is a Robot, the match cannot end. In 500
-bot-played matches this accounted for every game that failed to terminate.
-Any fix works — cap the heal, suppress it in a round the Robot took damage, or
-add a round limit — but it needs one before serious play.
+The Robot heals 4 at the end of its own turn, so anything that cannot out-damage
+that regeneration cannot kill it. If both sides' last surviving hero is a Robot,
+the match cannot end. Bot play still shows a meaningful share of matches ending
+in a draw rather than a result. Any fix works — cap the heal, suppress it in a
+round the Robot took damage, or add a round limit — but it needs one before
+serious play.
 
 ## Layout
 
+Every module sits at the repository root; there is no package directory.
+
 | file | role |
 |---|---|
-| `warchess/topology.py` | every adjacency and distance query |
-| `warchess/events.py` | global event bus, priority-ordered hooks |
-| `warchess/damage.py` | damage pipeline, source categories, simultaneous batches |
-| `warchess/entities.py` | modifier-stack stat reads, positions as cell sets |
-| `warchess/board.py` | cell-effect layer |
-| `warchess/actions.py` | commitments becoming resolvable instances |
-| `warchess/heroes.py` | the six heroes, as data |
-| `warchess/match.py` | setup, exchanges, re-entrant resolution |
-| `warchess/view.py` | per-player filtering |
-| `warchess/server.py` | HTTP API |
-| `warchess/static/index.html` | client |
+| `topology.py` | every adjacency and distance query |
+| `events.py` | global event bus, priority-ordered hooks |
+| `damage.py` | damage pipeline, source categories, simultaneous batches, and the global rules that read a var and name no hero (blessing, poison, 增伤, curse) |
+| `entities.py` | modifier-stack stat reads, positions as cell sets |
+| `board.py` | cell-effect layer |
+| `attacks.py` | attack modes — how a hero's normal attack is aimed and resolved |
+| `actions.py` | commitments becoming resolvable instances |
+| `heroes.py` | the whole roster, as data: stat blocks, abilities, passives |
+| `match.py` | setup, exchanges, re-entrant resolution |
+| `view.py` | per-player filtering |
+| `server.py` | HTTP API |
+| `index.html` + `app.js` | client |
+| `playtest.py` | headless bot play and balance tournaments |
+| `make_fixtures.py` | real engine states written out for `test_client.js` |
 
 Adding a hero should mean editing `heroes.py` only. If it doesn't, the engine
 is missing a primitive — that's the signal to add one rather than special-case
-the hero.
+the hero. Recent heroes have earned their primitives that way: a choice of
+shapes centred on the caster (`shape` targeting), a status that ticks at round
+end (`damage.py`'s poison), and a body placed relative to another rather than
+walking (`move_zone` / `move_anchor`). Each is generic, names no hero, and the
+next design that needs it gets it for free.
+
+A new targeting kind must be added to `TARGETING_KINDS` in `heroes.py` **and**
+handled in `app.js`; `check_roster()` catches only the half Python can see.

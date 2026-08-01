@@ -1970,8 +1970,9 @@ ROSTER = [
 
 BY_KEY = {h.key: h for h in ROSTER}
 
-# 哥布林团伙's bodies. Not in ROSTER — they are never drafted directly, only
-# deployed by the gang card, so they live in BY_KEY alongside the dummy.
+# Squad bodies — 哥布林团伙's crew and 蛇帝's two halves. Not in ROSTER: they are
+# never drafted directly, only deployed by their card, so they live in BY_KEY
+# alongside the dummy.
 SQUAD_MEMBERS = [
     HeroDef(
         key="goblin_javelin",
@@ -2000,8 +2001,6 @@ SQUAD_MEMBERS = [
         gang="goblin_gang",
         blurb="Barely a fighter — but he makes the whole gang hit harder.",
     ),
-]
-SQUAD_MEMBERS += [
     HeroDef(
         key=SNAKE_HEAD,
         name="蛇首",

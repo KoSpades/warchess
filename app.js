@@ -275,8 +275,10 @@ function renderBoard(){
         : isLinked() ? linkedOrder().map(g => placedPos()[g.entity]).filter(Boolean)
         : [draft.destination, draft.tentative].filter(Boolean);
       if (aimed.some(x => eq(x, cell))) cls.push('dest');
+      // Just the styling here — `pick` is added below from clickableCell, which is
+      // the single answer to "can this square be clicked".
       if (S.phase==='commit' && draft && !draft.destination && !draft.held &&
-          has(curMoves(),cell)) cls.push('legal','pick');
+          has(curMoves(),cell)) cls.push('legal');
       if (has(sweepCells,cell)) cls.push('preview');
       if (draft && draft.shots){
         draft.shots.forEach((sh,i)=>{ if (has(sh,cell)){ cls.push('marked'); mark = draft.shots.length>1?(i+1):'x'; }});
