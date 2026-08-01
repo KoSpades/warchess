@@ -59,6 +59,11 @@ def build():
     m = arena([("spearman", (3, 3))], [("dummy", (7, 3))])
     snap("direction_sweep", m, select=m.living(LEFT)[0].id, full_ap=[m.living(LEFT)[0]])
 
+    m = arena([("swordsman", (3, 3))], [("dummy", (7, 3)), ("cannoneer", (7, 2))])
+    unit(m, RIGHT, "dummy").set_cell((5, 3))
+    unit(m, RIGHT, "cannoneer").set_cell((3, 5))
+    snap("line_cut", m, select=m.living(LEFT)[0].id, full_ap=[m.living(LEFT)[0]])
+
     m = arena([("blood_mage", (3, 3))], [("dummy", (7, 3))])
     snap("magnitude", m, select=m.living(LEFT)[0].id, full_ap=[m.living(LEFT)[0]])
 

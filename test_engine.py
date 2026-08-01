@@ -776,8 +776,8 @@ for _ in range(3):
         right = [e.id for e in m.unacted(RIGHT)]
         turn(m, left[0] if left else None, hold, right[0] if right else None, hold)
     seen.append(m.frozen(cannon))
-ok("frozen for exactly the next two rounds, then free again",
-   seen[:2] == [True, True] and seen[2] is False, str(seen))
+ok("it loses exactly its next turn, then acts again",
+   seen == [True, False, False], str(seen))
 
 # it cannot be picked up while frozen
 m, doll, gate, cannon, d = curse_arena()
@@ -1081,6 +1081,30 @@ ok("the haunt it was holding lifts with it", cannon.stat("damage_dealt") == 0)
 before = g.hp
 DMG.apply_batch(m, [DMG.DamageEvent(source=cannon, target=g, amount=3, category=DMG.NORMAL_ATTACK)])
 ok("and it can finally be hurt", before - g.hp == 3, f"took {before - g.hp}")
+
+# the body it builds is made of what it drained
+m, g, gate, cannon, d = ghost_arena()
+possess = lambda t: {"destination": None, "action": {"key": "ability:possess", "target": t.id}}
+drained = 0
+for _ in range(3):
+    before_hp = cannon.hp
+    ghost_round(m, g, possess(cannon))
+    drained += before_hp - cannon.hp
+ok("it counts every point it takes", g.vars.get("harvest") == drained,
+   f"harvest {g.vars.get('harvest')}, actually drained {drained}")
+squares = m.legal_moves(g)
+ghost_round(m, g, {"destination": squares[0], "action": {"key": "none"}})
+ok("it takes flesh with exactly that much health",
+   g.max_hp == drained and g.hp == drained, f"{g.hp}/{g.max_hp} from {drained} drained")
+
+# a ghost that drained nothing still steps out alive
+m, g, gate, cannon, d = ghost_arena()
+g.vars["turns_done"] = 3
+g.vars["haunting"] = cannon.id
+squares = m.legal_moves(g)
+ghost_round(m, g, {"destination": squares[0], "action": {"key": "none"}})
+ok("one that drained nothing still has a point of life",
+   g.alive and g.max_hp == 1, f"{g.hp}/{g.max_hp}")
 # 41 — 猛犸: one swing catches every enemy standing beside it, diagonals included
 m = arena([("mammoth", (3, 3)), ("gatekeeper", (3, 1))],
           [("dummy", (7, 1)), ("cannoneer", (7, 2)), ("gatekeeper", (7, 3)), ("berserker", (7, 4))])
@@ -1421,6 +1445,292 @@ turn(m, mag.id, {"destination": None,
      gk.id, hold)
 ok("being swapped moves it anyway — that is not its own movement",
    gk.cell != was, f"{was} -> {gk.cell}")
+
+# 47 — 再咒: the doll may lay another curse, but only once the last one sprang
+def doll_arena():
+    m = arena([("cursed_doll", (3, 3)), ("gatekeeper", (3, 1)), ("cannoneer", (3, 2))],
+              [("spearman", (7, 1)), ("dummy", (7, 3))])
+    doll = unit(m, LEFT, "cursed_doll")
+    gate, can = unit(m, LEFT, "gatekeeper"), unit(m, LEFT, "cannoneer")
+    sp, d = unit(m, RIGHT, "spearman"), unit(m, RIGHT, "dummy")
+    assert m.opening_choose(LEFT, {"target": gate.id}) is None
+    return m, doll, gate, can, sp, d
+
+m, doll, gate, can, sp, d = doll_arena()
+doll.ap = doll.max_ap
+ok("再咒 is hidden while the first curse still sits unsprung",
+   "ability:recurse" not in [a["key"] for a in m.action_menu(doll)],
+   str([a["key"] for a in m.action_menu(doll)]))
+m.select_hero(LEFT, doll.id)
+ok("...and committing it is refused",
+   m.commit(LEFT, {"destination": None,
+                   "action": {"key": "ability:recurse", "target": can.id}}) is not None)
+
+# spring it
+DMG.apply_batch(m, [DMG.DamageEvent(source=sp, target=gate, amount=4,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("springing the curse frees the doll to lay another",
+   "ability:recurse" in [a["key"] for a in m.action_menu(doll)])
+ok("...and the mark it was holding is gone", not gate.vars.get("curse_mark"))
+
+before_ap = doll.ap
+turn(m, doll.id, {"destination": None,
+                  "action": {"key": "ability:recurse", "target": can.id}},
+     d.id, hold)
+ok("再咒 costs its 2 AP", before_ap - doll.ap == 2 - 1, f"{before_ap} -> {doll.ap} (+1 at turn end)")
+ok("the new ally carries the mark", can.vars.get("curse_mark") == doll.id)
+ok("and 再咒 is hidden again until this one springs",
+   "ability:recurse" not in [a["key"] for a in m.action_menu(doll)])
+
+# the fresh curse bites just like the first
+d.vars["frozen_at_round"] = None
+DMG.apply_batch(m, [DMG.DamageEvent(source=d, target=can, amount=3,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("the replacement curse freezes whoever springs it",
+   d.vars.get("frozen_at_round") is not None)
+ok("and the cycle can begin again",
+   "ability:recurse" in [a["key"] for a in m.action_menu(doll)])
+
+# 48 — 大力士: seize an adjacent enemy and hurl it to the square opposite
+def strong_arena():
+    m = arena([("strongman", (3, 3)), ("cannoneer", (3, 1))],
+              [("gatekeeper", (7, 3)), ("dummy", (7, 1))])
+    st = unit(m, LEFT, "strongman"); st.ap = st.max_ap
+    return m, st, unit(m, RIGHT, "gatekeeper"), unit(m, RIGHT, "dummy")
+
+slam = lambda t: {"destination": None, "action": {"key": "ability:slam", "target": t.id}}
+
+# straight in front: thrown straight behind
+m, st, gk, d = strong_arena()
+gk.set_cell((4, 3))                                  # east of the strongman at C3
+before = gk.hp
+turn(m, st.id, slam(gk), d.id, hold)
+ok("the victim takes the slam", before - gk.hp == 3, f"took {before - gk.hp}")
+ok("and lands on the square opposite, through the thrower", gk.cell == (2, 3), str(gk.cell))
+
+# on the diagonal: reflected through the thrower just the same
+m, st, gk, d = strong_arena()
+gk.set_cell((4, 2))                                  # north-east of C3
+turn(m, st.id, slam(gk), d.id, hold)
+ok("a diagonal grab is reflected too", gk.cell == (2, 4), str(gk.cell))
+
+# two squares away is out of reach
+m, st, gk, d = strong_arena()
+gk.set_cell((5, 3))
+m.select_hero(LEFT, st.id)
+ok("it cannot reach past the squares around it", m.commit(LEFT, slam(gk)) is not None)
+ok("...and that enemy is not offered",
+   gk.id not in m.ability_targeting(st, st.abilities[0])["options"])
+
+# the landing square must be clear
+m, st, gk, d = strong_arena()
+gk.set_cell((4, 3)); d.set_cell((2, 3))              # somebody already stands behind
+m.select_hero(LEFT, st.id)
+ok("a blocked landing square forbids the throw", m.commit(LEFT, slam(gk)) is not None)
+ok("...and it is not offered either",
+   gk.id not in m.ability_targeting(st, st.abilities[0])["options"])
+
+# nor off the board
+m = arena([("strongman", (1, 1)), ("cannoneer", (3, 1))], [("gatekeeper", (7, 3)), ("dummy", (7, 1))])
+st = unit(m, LEFT, "strongman"); st.ap = st.max_ap
+gk = unit(m, RIGHT, "gatekeeper"); gk.set_cell((2, 1))
+m.select_hero(LEFT, st.id)
+ok("it cannot throw somebody off the board", m.commit(LEFT, slam(gk)) is not None)
+
+# the throw lands after everything else resolves: the victim still gets its swing
+# in, fired from where it was standing when the exchange began
+m, st, gk, d = strong_arena()
+gk.set_cell((4, 3))
+before_st, before_gk = st.hp, gk.hp
+turn(m, st.id, slam(gk),
+     gk.id, {"destination": None, "action": {"key": "attack", "shots": [[[3, 3]]]}})
+ok("the victim's own attack still lands, from where it stood",
+   before_st - st.hp == gk.atk, f"大力士 took {before_st - st.hp}")
+ok("...and it is thrown all the same",
+   before_gk - gk.hp == 3 and gk.cell == (2, 3), f"took {before_gk - gk.hp}, at {gk.cell}")
+
+# 49 — 长老: one blow turned aside, and swifter until it is
+def elder_arena():
+    m = arena([("elder", (3, 3)), ("gatekeeper", (3, 1))], [("cannoneer", (7, 3)), ("dummy", (7, 1))])
+    el = unit(m, LEFT, "elder"); el.ap = el.max_ap
+    return m, el, unit(m, LEFT, "gatekeeper"), unit(m, RIGHT, "cannoneer"), unit(m, RIGHT, "dummy")
+
+bless = lambda t: {"destination": None, "action": {"key": "ability:bless", "target": t.id}}
+
+m, el, gate, cannon, d = elder_arena()
+move0 = gate.move_allowance
+turn(m, el.id, bless(gate), d.id, hold)
+ok("the blessed hero carries the ward", gate.vars.get("blessed") == el.id)
+ok("...and moves one square further while it holds",
+   gate.move_allowance - move0 == 1, f"{move0} -> {gate.move_allowance}")
+
+hp0 = gate.hp
+DMG.apply_batch(m, [DMG.DamageEvent(source=cannon, target=gate, amount=6,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("the first blow that would hurt it is turned aside", gate.hp == hp0, f"took {hp0 - gate.hp}")
+ok("the blessing is spent by it", not gate.vars.get("blessed"))
+ok("...and the extra movement goes with it",
+   gate.move_allowance == move0, f"{gate.move_allowance}")
+DMG.apply_batch(m, [DMG.DamageEvent(source=cannon, target=gate, amount=6,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("the next blow lands in full", hp0 - gate.hp == 6, f"took {hp0 - gate.hp}")
+
+# an ability is warded off just the same
+m, el, gate, cannon, d = elder_arena()
+turn(m, el.id, bless(gate), d.id, hold)
+hp0 = gate.hp
+DMG.apply_batch(m, [DMG.DamageEvent(source=cannon, target=gate, amount=8,
+                                    category=DMG.ABILITY)])
+ok("an ability is turned aside too", gate.hp == hp0 and not gate.vars.get("blessed"))
+
+# burning ground is neither stopped by it nor spends it
+m, el, gate, cannon, d = elder_arena()
+turn(m, el.id, bless(gate), d.id, hold)
+burn = m.board.add_burning(gate.cell, RIGHT).damage
+hp0 = gate.hp
+m.select_hero(LEFT, gate.id); m.commit(LEFT, hold)
+ok("burning ground still bites through a blessing",
+   hp0 - gate.hp == burn, f"took {hp0 - gate.hp}, tile deals {burn}")
+ok("...and the blessing is still there for a real blow", gate.vars.get("blessed") == el.id)
+
+# one to a hero, but several heroes at once
+m, el, gate, cannon, d = elder_arena()
+turn(m, el.id, bless(gate), d.id, hold)
+m.select_hero(LEFT, el.id)
+ok("an already-blessed hero cannot take a second", m.commit(LEFT, bless(gate)) is not None)
+ok("...and is not offered", gate.id not in m.ability_targeting(el, el.abilities[0])["options"])
+ok("but the elder itself still can be", el.id in m.ability_targeting(el, el.abilities[0])["options"])
+m.deselect(LEFT)
+turn(m, gate.id, hold, cannon.id, hold)      # close the round out
+el.ap = el.max_ap
+turn(m, el.id, bless(el), d.id, hold)
+ok("two allies can carry blessings at once",
+   gate.vars.get("blessed") and el.vars.get("blessed"),
+   f"gate={bool(gate.vars.get('blessed'))} elder={bool(el.vars.get('blessed'))}")
+
+# 50 — 剑客: one cut down a whole rank, and everyone caught is easier to kill after
+def sword_arena():
+    m = arena([("swordsman", (3, 3)), ("gatekeeper", (1, 1))],
+              [("dummy", (7, 3)), ("cannoneer", (7, 2)), ("gatekeeper", (7, 1))])
+    sw = unit(m, LEFT, "swordsman"); sw.ap = sw.max_ap
+    return (m, sw, unit(m, LEFT, "gatekeeper"), unit(m, RIGHT, "dummy"),
+            unit(m, RIGHT, "cannoneer"), unit(m, RIGHT, "gatekeeper"))
+
+cut = lambda which: {"destination": None,
+                     "action": {"key": "ability:gale_slash", "direction": which}}
+
+# the row runs the whole width of the board, however far away they are standing
+m, sw, ally, d, cannon, gate = sword_arena()
+gate.set_cell((5, 3))                                 # 30 HP, so it lives to be poked at
+d.set_cell((7, 1))                                    # out of the row entirely
+hp0 = (gate.hp, cannon.hp, d.hp)
+turn(m, sw.id, cut("row"), cannon.id, hold)
+ok("the cut catches everyone in the row, right across the board",
+   hp0[0] - gate.hp == 5, f"took {hp0[0] - gate.hp}")
+ok("...and nobody outside it",
+   (cannon.hp, d.hp) == hp0[1:], f"{hp0[1:]} -> {(cannon.hp, d.hp)}")
+ok("the first cut lands clean — the mark is what it leaves behind",
+   gate.vars.get("vulnerable") == 1, str(gate.vars.get("vulnerable")))
+
+# and that mark makes everything afterwards land harder
+hp0 = gate.hp
+DMG.apply_batch(m, [DMG.DamageEvent(source=sw, target=gate, amount=3,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("every later blow lands 1 harder", hp0 - gate.hp == 4, f"took {hp0 - gate.hp}")
+hp0 = gate.hp
+DMG.apply_batch(m, [DMG.DamageEvent(source=sw, target=gate, amount=2, category=DMG.TILE)])
+ok("...burning ground included", hp0 - gate.hp == 3, f"took {hp0 - gate.hp}")
+hp0 = cannon.hp
+DMG.apply_batch(m, [DMG.DamageEvent(source=sw, target=cannon, amount=3,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("an unmarked hero takes what it always did", hp0 - cannon.hp == 3, f"took {hp0 - cannon.hp}")
+
+# the column is the other half of the choice
+m, sw, ally, d, cannon, gate = sword_arena()
+cannon.set_cell((3, 1)); gate.set_cell((3, 5))       # both share the swordsman's column
+hp0 = (cannon.hp, gate.hp, d.hp)
+turn(m, sw.id, cut("column"), d.id, hold)
+ok("cutting the column catches its whole height",
+   (hp0[0] - cannon.hp, hp0[1] - gate.hp) == (5, 5),
+   f"{hp0[0] - cannon.hp}, {hp0[1] - gate.hp}")
+ok("...and leaves the row alone", d.hp == hp0[2], f"took {hp0[2] - d.hp}")
+ok("both come away marked",
+   (cannon.vars.get("vulnerable"), gate.vars.get("vulnerable")) == (1, 1))
+
+# allies standing in the line are not touched by it
+m, sw, ally, d, cannon, gate = sword_arena()
+ally.set_cell((5, 3))                                 # in the swordsman's row
+hp0 = ally.hp
+turn(m, sw.id, cut("row"), cannon.id, hold)
+ok("its own line walks through the cut untouched",
+   ally.hp == hp0 and not ally.vars.get("vulnerable"), f"took {hp0 - ally.hp}")
+
+# the line is drawn from where it ends up, not from where it set off
+m, sw, ally, d, cannon, gate = sword_arena()
+d.set_cell((6, 2))                                    # a row the swordsman is not in
+hp0 = d.hp
+turn(m, sw.id, {"destination": [3, 2],
+                "action": {"key": "ability:gale_slash", "direction": "row"}},
+     cannon.id, hold)
+ok("the cut is drawn from the square it reaches, not the one it left",
+   hp0 - d.hp == 5 and sw.cell == (3, 2), f"took {hp0 - d.hp} from {sw.cell}")
+
+# the marks stack, and a second cut is amplified by the first one's mark
+m, sw, ally, d, cannon, gate = sword_arena()
+gate.set_cell((5, 3))                                 # 30 HP, so it survives both
+turn(m, sw.id, cut("row"), cannon.id, hold)
+hp0 = gate.hp
+r0 = m.round
+while m.round == r0:                                  # close the round out
+    left = [e.id for e in m.unacted(LEFT)]
+    right = [e.id for e in m.unacted(RIGHT)]
+    turn(m, left[0] if left else None, hold, right[0] if right else None, hold)
+sw.ap = sw.max_ap
+turn(m, sw.id, cut("row"), d.id, hold)
+ok("a second cut is itself sharpened by the first one's mark",
+   hp0 - gate.hp == 6, f"took {hp0 - gate.hp}")
+ok("...and the marks stack", gate.vars.get("vulnerable") == 2,
+   str(gate.vars.get("vulnerable")))
+
+# a hero the cut kills is not marked on the way down
+m, sw, ally, d, cannon, gate = sword_arena()
+d.hp = 4
+turn(m, sw.id, cut("row"), cannon.id, hold)
+ok("nothing is marked once it is dead",
+   not d.alive and not d.vars.get("vulnerable"),
+   f"alive={d.alive} mark={d.vars.get('vulnerable')}")
+
+# 石像鬼's stone still only chips: the cap sits after the mark, so it wins
+m = arena([("swordsman", (3, 3)), ("gatekeeper", (1, 1))], [("gargoyle", (7, 3))])
+sw = unit(m, LEFT, "swordsman"); sw.ap = sw.max_ap
+garg = unit(m, RIGHT, "gargoyle")
+turn(m, sw.id, cut("row"), garg.id, hold)
+ok("an ability cuts through stone in full", garg.vars.get("vulnerable") == 1)
+hp0 = garg.hp
+DMG.apply_batch(m, [DMG.DamageEvent(source=sw, target=garg, amount=6,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("but a normal attack still only chips it, marked or not",
+   hp0 - garg.hp == 1, f"took {hp0 - garg.hp}")
+
+# the line has to be named, and it costs the whole bar
+m, sw, ally, d, cannon, gate = sword_arena()
+m.select_hero(LEFT, sw.id)
+ok("it must be told which line to cut", m.commit(LEFT, cut("diagonal")) is not None)
+ok("row and column are the only two offered",
+   [c["dir"] for c in m.ability_targeting(sw, sw.abilities[0])["choices"]] == ["row", "column"])
+m.deselect(LEFT)
+m, sw, ally, d, cannon, gate = sword_arena()
+sw.ap = 2
+entry = next(a for a in m.action_menu(sw) if a["key"] == "ability:gale_slash")
+ok("two AP is not enough for it — the menu says so", not entry["affordable"])
+m.select_hero(LEFT, sw.id)
+ok("...and committing it anyway is refused", m.commit(LEFT, cut("row")) is not None)
+m.deselect(LEFT)
+sw.ap = sw.max_ap
+before_ap = sw.ap
+turn(m, sw.id, cut("row"), cannon.id, hold)
+ok("a cut costs the whole bar", before_ap - sw.ap == 3 - 1,
+   f"{before_ap} -> {sw.ap} (+1 at turn end)")
 
 print("\nlog tail:")
 for line in m.log[-5:]:

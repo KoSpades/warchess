@@ -55,6 +55,24 @@ class OutgoingShift:
             ev.amount = max(0, ev.amount + shift)
 
 
+class Vulnerability:
+    """The mirror of `damage_reduction`: a unit carrying `vulnerable` stacks takes
+    that much more from everything — attacks, abilities and burning ground alike
+    (剑客's 增伤). Stacks are just a count, so a second mark simply makes it worse.
+
+    Sits beside the flat cut, and only touches a blow that is still going to land:
+    something already softened to nothing is not revived by being easier to hurt.
+
+    Generic like the rest of this file — it reads a var and names no hero, so
+    anything that can mark a unit works through it."""
+
+    @EV.hook(priority=35)
+    def on_before_damage(self, match, ev):
+        n = ev.target.vars.get("vulnerable", 0)
+        if n and not ev.cancelled and ev.amount > 0:
+            ev.amount += n
+
+
 class FlatReduction:
     """A flat per-target cut on all incoming damage — the target's permanent
     `damage_reduction` (e.g. 森林之子's guard) plus any temporary `stance_dr`
@@ -79,6 +97,29 @@ class AbilityImmunity:
             ev.cancel("warded (太刀)")
 
 
+class Blessing:
+    """A unit marked `blessed` turns aside the next attack or ability that would
+    damage it, then the blessing is spent. Burning ground neither triggers it nor
+    is stopped by it — the same two categories 圣骑士's shield answers to.
+
+    Generic, like every other rule in here: it reads a var and names no hero, so
+    anything that can bless works through it."""
+
+    TRIGGERS = (NORMAL_ATTACK, ABILITY)
+
+    @EV.hook(priority=25)
+    def on_before_damage(self, match, ev):
+        if ev.cancelled or ev.amount <= 0 or ev.category not in self.TRIGGERS:
+            return
+        if not ev.target.vars.get("blessed"):
+            return
+        ev.target.vars["blessed"] = None
+        for m in list(ev.target.modifiers):
+            if m.source == "blessing":
+                ev.target.modifiers.remove(m)
+        ev.cancel("blessing")
+
+
 class CurseTrap:
     """诅咒娃娃's 咒毒 sits on whoever it marked: the first attack or ability that
     damages that unit costs its source the next two rounds. Generic like the other
@@ -93,7 +134,10 @@ class CurseTrap:
             return
         if not ev.target.vars.get("curse_mark") or ev.source is None:
             return
+        doll = match.entity(ev.target.vars["curse_mark"])
         ev.target.vars["curse_mark"] = None
+        if doll is not None:
+            doll.vars["curse_live"] = False      # 再咒 may lay another now
         match.freeze(ev.source, reason="咒毒")
 
 

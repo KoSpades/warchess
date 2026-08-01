@@ -45,7 +45,8 @@ function loadClient(side = 'L') {
       get err(){return err}, set err(v){err=v},
       render, heroDetailHTML, blankDraft, confirmMove, chooseAction, sealFromKeyboard,
       orderReady, curActions, curMoves, curChoices, canAct, clickableCell, onCell,
-      laneShots, areaCells, areaAttack, plannedCell, changeMove, unitAt, myUnits };`;
+      laneShots, areaCells, areaAttack, plannedCell, changeMove, unitAt, myUnits,
+      sweepPreview };`;
   const tmp = path.join(here, '.client.test.js');
   fs.writeFileSync(tmp, js + api);
   const mod = require(tmp);
@@ -81,7 +82,7 @@ ok(`every phase and hero card renders (${Object.keys(F).length} states)`, !broke
 const needsATarget = [
   ['ally_heal', 'ability:heal'], ['any_cell_ignite', 'ability:ignite'],
   ['direction_sweep', 'ability:sweep'], ['weapon_master', null],
-  ['unit_locked', null],
+  ['unit_locked', null], ['line_cut', 'ability:gale_slash'],
 ];
 for (const [name, key] of needsATarget) {
   if (!F[name]) continue;
@@ -165,6 +166,28 @@ if (F.cone) {
      String(C.draft.direction));
   C.sealFromKeyboard();
   ok('gunner: Enter fires it', lastSent().payload.action.direction === 'forward',
+     JSON.stringify(lastSent().payload.action));
+}
+
+// ------------------------------------------------------- the row-or-column cut
+
+if (F.line_cut) {
+  HOLD_FIRST(F.line_cut);
+  C.chooseAction('ability:gale_slash');
+  ok('swordsman: neither line is aimed until one is picked', C.draft.direction == null,
+     String(C.draft.direction));
+  ok('swordsman: its own square settles nothing, so it is not clickable',
+     !C.clickableCell([3, 3]));
+  C.onCell(5, 3);                       // along the row
+  ok('swordsman: clicking along the row cuts the row', C.draft.direction === 'row',
+     String(C.draft.direction));
+  C.onCell(3, 5);                       // along the column
+  ok('swordsman: clicking down the column cuts the column', C.draft.direction === 'column',
+     String(C.draft.direction));
+  ok('swordsman: the whole column lights up', C.sweepPreview().length === 5,
+     `${C.sweepPreview().length} squares`);
+  C.sealFromKeyboard();
+  ok('swordsman: Enter cuts it', lastSent().payload.action.direction === 'column',
      JSON.stringify(lastSent().payload.action));
 }
 

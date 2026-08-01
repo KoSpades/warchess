@@ -447,6 +447,23 @@ function coneArcs(){
 function currentArc(){
   return draft && draft.direction ? coneArcs().find(a=>a.dir===draft.direction) || null : null;
 }
+// The two cuts a line ability could make — the whole row and the whole column
+// through the square the hero will be standing in once it has moved.
+function lineCuts(){
+  const act = currentAction(), u = selectedUnit();
+  if (!act || act.targeting.kind!=='line' || !u) return [];
+  const o = originCell(); if (!o) return [];
+  return (act.targeting.options||[]).map(which => {
+    const cells = [];
+    if (which==='row') for (let c=1;c<=S.board.cols;c++) cells.push([c,o[1]]);
+    else               for (let r=1;r<=S.board.rows;r++) cells.push([o[0],r]);
+    const hits = cells.filter(c => { const v=unitAt(c); return v && v.side!==SIDE; }).length;
+    return {dir:which, cells, hits};
+  });
+}
+function currentCut(){
+  return draft && draft.direction ? lineCuts().find(x=>x.dir===draft.direction) || null : null;
+}
 function areaAttack(){
   return curActions().find(a => a.targeting && a.targeting.kind==='area') || null;
 }
@@ -469,6 +486,10 @@ function sweepPreview(){
   if (act && act.targeting.kind==='cone'){
     const arc = currentArc();
     return arc ? arc.cells : [];
+  }
+  if (act && act.targeting.kind==='line'){
+    const cut = currentCut();
+    return cut ? cut.cells : [];
   }
   if (!act || !draft || !draft.direction || act.targeting.kind!=='direction') return [];
   const shot = currentLane();
@@ -509,6 +530,9 @@ function clickableCell(cell){
   if (areaAttack()) return has(areaCells(areaAttack()), cell);
   if (act.targeting.kind==='cone')
     return coneArcs().some(a => has(a.cells, cell));
+  if (act.targeting.kind==='line')
+    // The square both cuts share settles nothing, so it is not offered as a click.
+    return lineCuts().filter(x => has(x.cells, cell)).length === 1;
   return false;
 }
 
@@ -603,6 +627,13 @@ function onCell(c,r){
   if (act.targeting.kind==='lane'){
     const l = laneShots().find(x => x.target.cell && eq(x.target.cell, cell));
     if (l){ draft.direction = l.dir; err=""; return render(); }
+    return;
+  }
+  if (act.targeting.kind==='line'){
+    // Every square but the hero's own belongs to exactly one of the two cuts, so
+    // clicking one aims unambiguously. The square they share is left to the buttons.
+    const cuts = lineCuts().filter(x => has(x.cells, cell));
+    if (cuts.length===1){ draft.direction = cuts[0].dir; err=""; return render(); }
     return;
   }
   if (act.targeting.kind==='any_cell'){
@@ -706,6 +737,7 @@ function stillNeeded(act){
   if (t.kind==='direction') return `Choose a direction for ${act.name}.`;
   if (t.kind==='weapon')    return draft.weapon ? 'Finish aiming this weapon.' : 'Choose a weapon first.';
   if (t.kind==='lane')      return 'Pick a lane to fire down, or choose Hold.';
+  if (t.kind==='line')      return `Pick the row or the column to cut with ${act.name}.`;
   if (t.kind==='cone')      return 'Pick a direction to spray, or choose Hold.';
   if (t.kind==='two_units')
     return (draft.pair||[]).length ? 'Choose a second unit to swap with.'
@@ -793,6 +825,7 @@ function orderReady(){
   if (t.kind==='area') return true;   // nothing to aim — it catches whatever is beside it
   if (t.kind==='lane') return true;   // no lane picked simply holds
   if (t.kind==='direction') return draft.direction!=null;
+  if (t.kind==='line') return draft.direction!=null;
   if (t.kind==='any_cell') return draft.cell!=null;
   if (t.kind==='weapon') return draft.weapon!=null;
   return false;
@@ -805,7 +838,7 @@ function sealOrder(){
   if (t.kind==='ally') action.target = draft.target;
   if (t.kind==='two_units'){ action.first = draft.pair[0]; action.second = draft.pair[1]; }
   if (t.kind==='magnitude') action.amount = draft.amount;
-  if (t.kind==='direction' || t.kind==='lane' || t.kind==='cone') action.direction = draft.direction;
+  if (t.kind==='direction' || t.kind==='lane' || t.kind==='cone' || t.kind==='line') action.direction = draft.direction;
   if (t.kind==='any_cell') action.cell = draft.cell;
   if (t.kind==='weapon'){ action.weapon = draft.weapon; const w=currentWeapon(); if (w && w.mode==='cells') action.shots = draft.shots; }
   if (isGang()){
@@ -1210,6 +1243,15 @@ function targetingHTML(act){
       h += `<button class="btn ${draft.direction===l.dir?'on':''}" onclick="draft.direction='${l.dir}';err='';render()">
               ${DIRS[l.dir]||l.dir}<span class="cost">${l.damage} dmg</span>
               <small>${l.target.name} at ${cn(l.target.cell)} · ${l.distance} squares away</small></button>`;
+    }
+  } else if (t.kind==='line'){
+    h += `<div class="step">3 · Cut</div>`;
+    h += `<p class="note">The whole row, or the whole column, through wherever you end up standing.${
+             draft.direction ? '' : ' <b>Pick one</b> (or click a square on the board).'}</p>`;
+    for (const cut of lineCuts()){
+      h += `<button class="btn ${draft.direction===cut.dir?'on':''}" onclick="draft.direction='${cut.dir}';err='';render()">
+              ${cut.dir==='row'?'Row — right across the board':'Column — top to bottom'}
+              <span class="cost">${cut.hits} caught</span></button>`;
     }
   } else if (t.kind==='direction' && t.choices){
     h += `<div class="step">3 · Lane</div>`;

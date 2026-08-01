@@ -50,8 +50,9 @@ class Match:
         self.topology = Topology()
         self.board = Board(self.topology)
         self.bus = EV.EventBus(self)
-        self.global_rules = [DMG.AbilityImmunity(), DMG.OutgoingShift(), DMG.FlatReduction(),
-                             DMG.CurseTrap(), DMG.HalvingRule()]
+        self.global_rules = [DMG.AbilityImmunity(), DMG.Blessing(), DMG.OutgoingShift(),
+                             DMG.Vulnerability(), DMG.FlatReduction(), DMG.CurseTrap(),
+                             DMG.HalvingRule()]
 
         self.entities = []
         self._ids = itertools.count(1)
@@ -146,31 +147,36 @@ class Match:
     def rooted(self, e):
         return e.vars.get("rooted_at") is not None
 
-    FREEZE_ROUNDS = 2
+    FREEZE_ROUNDS = 1
 
-    def freeze(self, e, reason=""):
-        """Take this unit's next two rounds away. The current round is untouched —
-        下两回合 — so a unit cursed after it has acted loses rounds R+1 and R+2."""
+    def freeze(self, e, reason="", rounds=None):
+        """Take this unit's next turn — or several, if an effect asks for more. The
+        current round is untouched, so a unit caught after it has already acted
+        loses the round that follows."""
+        rounds = self.FREEZE_ROUNDS if rounds is None else rounds
         e.vars["frozen_at_round"] = self.round
+        e.vars["frozen_rounds"] = rounds
         # Anything that expires on this unit's next turn must end now instead: its
         # next turn is not coming (美梦神's ward would otherwise silence forever).
         for side, eid in list(self.ability_lock.items()):
             if eid == e.id:
                 self.ability_lock[side] = None
                 self.log_line(f"{self.label(e)}'s ward fails as she seizes up.", quiet=True)
+        turns = "turn" if rounds == 1 else f"{rounds} rounds"
         self.log_line(
-            f"{self.label(e)} is struck by {reason} — no turns for the next "
-            f"{self.FREEZE_ROUNDS} rounds." if reason else
-            f"{self.label(e)} cannot act for the next {self.FREEZE_ROUNDS} rounds."
+            f"{self.label(e)} is struck by {reason} — it loses its next {turns}."
+            if reason else f"{self.label(e)} cannot act for its next {turns}."
         )
 
     def frozen(self, e):
         at = e.vars.get("frozen_at_round")
-        return at is not None and 0 < self.round - at <= self.FREEZE_ROUNDS
+        span = e.vars.get("frozen_rounds", self.FREEZE_ROUNDS)
+        return at is not None and 0 < self.round - at <= span
 
     def frozen_rounds_left(self, e):
         at = e.vars.get("frozen_at_round")
-        return 0 if at is None else max(0, at + self.FREEZE_ROUNDS - self.round + 1)
+        span = e.vars.get("frozen_rounds", self.FREEZE_ROUNDS)
+        return 0 if at is None else max(0, at + span - self.round + 1)
 
     def mark_seen(self, side):
         self.present[side] = time.time()
@@ -439,6 +445,12 @@ class Match:
             if params.get("direction") not in t.get("options", []):
                 return "Choose a direction."
 
+        elif kind == "line":
+            # Which of the two lines through the hero to cut. The squares depend on
+            # where it ends up standing, so only the choice itself is checked here.
+            if params.get("direction") not in t.get("options", []):
+                return "Choose a row or a column."
+
         elif kind == "any_cell":
             cell = params.get("cell")
             if not cell or not self.topology.in_bounds(tuple(cell)):
@@ -459,6 +471,9 @@ class Match:
             ok = tt is not None and tt.alive and ((tt.side == e.side) == want_ally)
             if not ok:
                 return "Choose a living ally." if want_ally else "Choose a living enemy."
+            allowed = t.get("options")
+            if allowed is not None and tt.id not in allowed:
+                return "That one is out of reach."
 
         elif kind == "magnitude":
             cap = ab.magnitude_cap(e)
@@ -846,8 +861,14 @@ class Match:
             t["options"] = [e.id for e in self.living() if e.cells]
         if hasattr(ab, "lanes"):
             t["choices"] = ab.lanes(self, e)
+        if hasattr(ab, "lines"):
+            t["choices"] = ab.lines(self, e)
         if hasattr(ab, "cells"):
             t["cells"] = [list(c) for c in ab.cells(self, e)]
+        if hasattr(ab, "throwable"):
+            t["options"] = ab.throwable(self, e)
+        if hasattr(ab, "blessable"):
+            t["options"] = ab.blessable(self, e)
         return t
 
     def validate_action(self, e, dest, action):

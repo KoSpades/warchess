@@ -158,7 +158,7 @@ def ability_options(m, e, a, origin):
             if f:
                 yield {"cell": list(f.cell)}, 3
 
-    elif kind in ("direction", "cone"):
+    elif kind in ("direction", "cone", "line"):
         opts = t.get("options") or [d["dir"] if isinstance(d, dict) else d
                                     for d in t.get("dirs", [])]
         for d in opts:

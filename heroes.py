@@ -303,7 +303,8 @@ class GhostForm:
     describe = ("Bodiless: holds no square and nothing can touch it, but it cannot hold "
                 "the field either. From its 4th turn it may step into an empty square "
                 "beside the hero it haunts — giving up 附身 for good — and then take "
-                "that turn as normal.")
+                "that turn as normal. The body it builds has as much health as it has "
+                "dealt damage, so the longer it haunts the stronger it steps out.")
     FROM_TURN = 4
 
     def on_match_start(self, match, owner, ctx):
@@ -312,6 +313,12 @@ class GhostForm:
         owner.cells = set()
         owner.flags.update(blocks_movement=False, counts_for_defeat=False,
                            targetable=False)
+
+    # Everything it takes while haunting is what it will be made of.
+    @EV.hook(priority=60)
+    def on_after_damage(self, match, owner, ev):
+        if ev.source is owner and ev.amount > 0 and not owner.vars.get("manifested"):
+            owner.vars["harvest"] = owner.vars.get("harvest", 0) + ev.amount
 
     @classmethod
     def ready(cls, owner):
@@ -338,10 +345,15 @@ class GhostForm:
         owner.vars["manifested"] = True
         owner.abilities = [a for a in owner.abilities if a.key != Possess.key]
         owner.flags.update(blocks_movement=True, counts_for_defeat=True, targetable=True)
+        # The body it builds is made of what it drained: as much health as it has
+        # dealt damage. Never less than 1, so it can never step out already dead.
+        owner.max_hp = max(1, owner.vars.get("harvest", 0))
+        owner.hp = owner.max_hp
         match.expire_owner_modifiers(owner)      # the haunt it was holding lifts
         match.log_line(
             f"{match.label(owner)} tears loose and takes flesh at "
-            f"{match.cell_name(ctx['to'])} — the haunting is over."
+            f"{match.cell_name(ctx['to'])} with {owner.max_hp} health — "
+            f"every point of it drained."
         )
 
     def status(self, match, owner):
@@ -353,8 +365,10 @@ class GhostForm:
             "key": "ghost", "badge": "魂", "label": "鬼魂 BODILESS",
             "text": ("Cannot be touched, and holds no ground."
                      + (f" Haunting {host.name}." if host and host.alive else "")
-                     + (f" Can take flesh in {left} more turn{'' if left == 1 else 's'}."
-                        if left else " Can take flesh beside its host now.")),
+                     + f" Drained {max(1, owner.vars.get('harvest', 0))} — the health it"
+                       " would take flesh with."
+                     + (f" Can do so in {left} more turn{'' if left == 1 else 's'}."
+                        if left else " It may do so now.")),
         }
 
 
@@ -366,13 +380,14 @@ class CursePoison(Ability):
     opening = True
     targeting = {"kind": "ally"}
     blurb = ("At game start, mark one ally (itself included). The first attack or "
-             "ability that damages the marked hero costs its source the next two "
-             "rounds. Once per match.")
+             "ability that damages the marked hero costs its source its next turn. "
+             "Once it springs, 再咒 can lay another.")
 
     def side_effects(self, match, actor, params):
         tgt = match.entity(params.get("target"))
         if tgt is None or not tgt.alive or tgt.side != actor.side:
             return
+        actor.vars["curse_live"] = True
         tgt.vars["curse_mark"] = actor.id
         # Scoped to its own seat: the enemy must not know which hero is baited.
         match.log_line(
@@ -422,6 +437,221 @@ class Transfer(Ability):
         match.log_line(
             f"{match.label(actor)} works the switch — {match.label(a)} and "
             f"{match.label(b)} trade places."
+        )
+
+
+class Bless(Ability):
+    """长老's 祝福. A one-shot ward that also quickens the one who carries it. Only
+    one to a hero — an already-blessed ally cannot take a second."""
+
+    key = "bless"
+    name = "祝福 Blessing"
+    ap_cost = 2
+    targeting = {"kind": "ally"}
+    blurb = ("Ward one ally — itself included — against the next attack or ability "
+             "that would hurt it, and give it +1 movement until that happens. One "
+             "blessing to a hero.")
+
+    def blessable(self, match, actor):
+        return [e.id for e in match.living(actor.side) if not e.vars.get("blessed")]
+
+    def validate(self, match, actor, params):
+        tgt = match.entity(params.get("target"))
+        if tgt is not None and tgt.vars.get("blessed"):
+            return f"{tgt.name} already carries a blessing."
+        return None
+
+    def side_effects(self, match, actor, params):
+        tgt = match.entity(params.get("target"))
+        if tgt is None or not tgt.alive or tgt.side != actor.side:
+            return
+        if tgt.vars.get("blessed"):
+            return
+        tgt.vars["blessed"] = actor.id
+        tgt.add_modifier(Modifier("move", "add", 1, source="blessing"))
+        match.log_line(
+            f"{match.label(actor)} blesses {match.label(tgt)} — one blow turned "
+            f"aside, and swifter until it is."
+        )
+
+
+class Slam(Ability):
+    """大力士's 摔击. Seize an adjacent enemy and hurl it to the square directly
+    opposite through you — reflected through your own cell. The landing square has
+    to be clear, so the throw is as much about geometry as about the damage."""
+
+    key = "slam"
+    name = "摔击 Slam"
+    ap_cost = 1
+    targeting = {"kind": "unit"}
+    blurb = ("Seize an enemy in any of the 8 squares around you and hurl it to the "
+             "square directly opposite, dealing 3. The landing square must be empty.")
+    DAMAGE = 3
+
+    @staticmethod
+    def landing(match, actor, target):
+        """Where the victim ends up: reflected through the strongman. None if it is
+        not adjacent, or the far square is off the board or already taken."""
+        if not actor.cells or target is None or not target.cells:
+            return None
+        (ac, ar), (tc, tr) = actor.cell, target.cell
+        dc, dr = tc - ac, tr - ar
+        if max(abs(dc), abs(dr)) != 1:      # the 8 around it, diagonals included
+            return None
+        cell = (ac - dc, ar - dr)
+        if not match.topology.in_bounds(cell) or match.occupant(cell) is not None:
+            return None
+        return cell
+
+    def throwable(self, match, actor):
+        """Every enemy it could actually seize right now, for the client to offer."""
+        return [e.id for e in match.living(other_side(actor.side))
+                if e.flags["targetable"] and self.landing(match, actor, e)]
+
+    def validate(self, match, actor, params):
+        tgt = match.entity(params.get("target"))
+        if tgt is None or not tgt.alive or tgt.side == actor.side:
+            return "Choose a living enemy."
+        if not actor.cells:
+            return f"{actor.name} has nothing to throw with."
+        (ac, ar), (tc, tr) = actor.cell, tgt.cell
+        if max(abs(tc - ac), abs(tr - ar)) != 1:
+            return "It can only seize somebody right beside it."
+        if self.landing(match, actor, tgt) is None:
+            return "Nowhere to throw it — the square behind is taken or off the board."
+        return None
+
+    def build_damage(self, match, actor, params):
+        tgt = match.entity(params.get("target"))
+        if tgt is None or not tgt.alive or tgt.side == actor.side:
+            return []
+        # Remembered now, while both are still where the order was given: the throw
+        # itself happens after the damage, once everything has landed.
+        actor.vars["slam_target"] = tgt.id
+        return [DMG.DamageEvent(source=actor, target=tgt, amount=self.DAMAGE,
+                                category=DMG.ABILITY)]
+
+    def side_effects(self, match, actor, params):
+        tgt = match.entity(actor.vars.pop("slam_target", None))
+        if tgt is None or not tgt.alive or not actor.alive:
+            return
+        cell = self.landing(match, actor, tgt)
+        if cell is None:
+            match.log_line(f"{match.label(actor)} loses its grip — nowhere to throw.")
+            return
+        frm = tgt.cell
+        tgt.set_cell(cell)
+        match.bus.emit(EV.AFTER_MOVE, {"entity": tgt, "from": frm, "to": cell})
+        match.log_line(
+            f"{match.label(actor)} hurls {match.label(tgt)} "
+            f"{match.cell_name(frm)} → {match.cell_name(cell)}."
+        )
+
+
+class GaleSlash(Ability):
+    """剑客's 狂风绝息斩. One cut down the whole row or the whole column it stands
+    in — which of the two is sealed with the order, but the line itself is drawn
+    from wherever it ends up standing, so a step sideways swings the sweep onto a
+    different rank entirely.
+
+    The mark it leaves is the generic `vulnerable` stack damage.py already reads:
+    nothing here knows how it is applied later, only that it goes on."""
+
+    key = "gale_slash"
+    name = "狂风绝息斩 Gale Slash"
+    ap_cost = 3
+    targeting = {"kind": "line", "options": ["row", "column"]}
+    blurb = ("5 damage to every enemy in your whole row, or your whole column — "
+             "you choose. Everyone caught takes 1 more from everything for the "
+             "rest of the match, and the marks stack.")
+    DAMAGE = 5
+    MARK = 1
+
+    @staticmethod
+    def line(match, actor, which):
+        """The squares the cut covers, from where the hero is standing now."""
+        if not actor.cells:
+            return []
+        col, row = actor.cell
+        return match.topology.row(row) if which == "row" else match.topology.column(col)
+
+    def victims(self, match, actor, which):
+        cells = set(self.line(match, actor, which))
+        return [e for e in match.living()
+                if e.side != actor.side and (e.cells & cells)]
+
+    def lines(self, match, actor):
+        """Both cuts, with the squares each covers, so the client can show a line
+        before it is chosen. A preview only — the real one is drawn at resolution,
+        from the square the hero actually reached."""
+        out = []
+        for which in self.targeting["options"]:
+            cells = self.line(match, actor, which)
+            if not cells:
+                continue
+            out.append({"dir": which,
+                        "cells": [list(c) for c in cells],
+                        "victims": [v.id for v in self.victims(match, actor, which)],
+                        "damage": self.DAMAGE})
+        return out
+
+    def build_damage(self, match, actor, params):
+        hit = self.victims(match, actor, params.get("direction"))
+        # Noted while the line is still the one that was cut. The marks go on
+        # afterwards, so this swing lands a clean 5 on everybody in it — only the
+        # blows that come after are the harder ones.
+        actor.vars["gale_marked"] = [e.id for e in hit]
+        return [DMG.DamageEvent(source=actor, target=e, amount=self.DAMAGE,
+                                category=DMG.ABILITY)
+                for e in hit]
+
+    def side_effects(self, match, actor, params):
+        marked = []
+        for eid in actor.vars.pop("gale_marked", []):
+            e = match.entity(eid)
+            # Side effects run before the dead are swept, so a hero the cut just
+            # killed is still flagged alive — no point marking a corpse.
+            if e is None or not e.alive or e.hp <= 0:
+                continue
+            e.vars["vulnerable"] = e.vars.get("vulnerable", 0) + self.MARK
+            marked.append(e)
+        if marked:
+            match.log_line(
+                f"{match.label(actor)} leaves the wind in the wound — "
+                + ", ".join(f"{match.label(e)} +{e.vars['vulnerable']}" for e in marked)
+                + " to everything from here on."
+            )
+
+
+class Recurse(Ability):
+    """诅咒娃娃's 再咒. Only available once the mark it laid has actually been
+    sprung — a curse still sitting on the board cannot be moved."""
+
+    key = "recurse"
+    name = "再咒 Curse Again"
+    ap_cost = 2
+    targeting = {"kind": "ally"}
+    blurb = ("Lay the curse on another ally, once the last one has been sprung. "
+             "The next hero to draw that ally's blood loses its next turn.")
+
+    def available(self, match, actor):
+        return not actor.vars.get("curse_live")
+
+    def validate(self, match, actor, params):
+        if actor.vars.get("curse_live"):
+            return "The curse it already laid has not been sprung yet."
+        return None
+
+    def side_effects(self, match, actor, params):
+        tgt = match.entity(params.get("target"))
+        if tgt is None or not tgt.alive or tgt.side != actor.side:
+            return
+        actor.vars["curse_live"] = True
+        tgt.vars["curse_mark"] = actor.id
+        match.log_line(
+            f"{match.label(actor)} curses {match.label(tgt)} again — whoever draws "
+            f"its blood loses a turn.",
+            side=actor.side,
         )
 
 
@@ -1055,7 +1285,7 @@ ROSTER = [
         key="spearman",
         name="枪兵",
         name_en="lancer",
-        max_hp=19,
+        max_hp=18,
         atk=4,
         move=1,
         max_ap=3,
@@ -1119,7 +1349,7 @@ ROSTER = [
         atk=4,
         move=1,
         max_ap=0,
-        attack={"mode": CELL, "cells": 4, "range": 5},
+        attack={"mode": CELL, "cells": 3, "range": 4},
         attacks_per_turn=2,
         halve_from_index=1,
         passives=[TwinGuns],
@@ -1201,7 +1431,7 @@ ROSTER = [
         name="小鬼",
         name_en="imp",
         max_hp=16,
-        atk=1,
+        atk=2,
         move=1,
         max_ap=3,
         attack={"mode": CELL, "cells": 4, "range": 4},
@@ -1328,6 +1558,42 @@ ROSTER = [
         blurb="Frail, but the killing blow only enrages him — two untouchable turns, then dust.",
     ),
     HeroDef(
+        key="elder",
+        name="长老",
+        name_en="elder",
+        max_hp=13,
+        atk=3,
+        move=1,
+        max_ap=4,
+        attack={"mode": CELL, "cells": 2, "range": 3},
+        abilities=[Bless()],
+        blurb="Wards one hero at a time against a single blow, and quickens them while it holds.",
+    ),
+    HeroDef(
+        key="strongman",
+        name="大力士",
+        name_en="strongman",
+        max_hp=20,
+        atk=2,
+        move=1,
+        max_ap=2,
+        attack={"mode": CELL, "cells": 2, "range": 2},
+        abilities=[Slam()],
+        blurb="Grabs whoever comes close and throws them clean over its shoulder.",
+    ),
+    HeroDef(
+        key="swordsman",
+        name="剑客",
+        name_en="swordsman",
+        max_hp=17,
+        atk=4,
+        move=1,
+        max_ap=3,
+        attack={"mode": CELL, "cells": 2, "range": 2},
+        abilities=[GaleSlash()],
+        blurb="Cuts a whole rank open and leaves everyone in it easier to kill.",
+    ),
+    HeroDef(
         key="sabretooth",
         name="剑齿虎",
         name_en="sabretooth",
@@ -1367,7 +1633,7 @@ ROSTER = [
         key="mammoth",
         name="猛犸",
         name_en="mammoth",
-        max_hp=17,
+        max_hp=18,
         atk=3,
         move=1,
         max_ap=0,
@@ -1385,7 +1651,7 @@ ROSTER = [
         attack={"mode": CELL, "cells": 1, "range": 1},
         abilities=[Possess()],
         passives=[GhostForm],
-        blurb="Untouchable but powerless, riding an enemy — until it steps into the world beside them.",
+        blurb="Untouchable but powerless, riding an enemy — and it steps into the world made of what it drained.",
     ),
     HeroDef(
         key="sniper",
@@ -1402,13 +1668,13 @@ ROSTER = [
         key="cursed_doll",
         name="诅咒娃娃",
         name_en="cursedDoll",
-        max_hp=16,
+        max_hp=15,
         atk=4,
         move=1,
-        max_ap=0,
-        attack={"mode": CELL, "cells": 2, "range": 2},
-        abilities=[CursePoison()],
-        blurb="Lays a curse on one of your own before the first move — striking them costs two rounds.",
+                max_ap=2,
+        attack={"mode": CELL, "cells": 2, "range": 3},
+        abilities=[CursePoison(), Recurse()],
+        blurb="Lays a curse on one of your own — striking them costs a turn, and it can lay another once sprung.",
     ),
     HeroDef(
         key="dream_goddess",
@@ -1463,7 +1729,7 @@ ROSTER = [
         key="shopkeeper",
         name="杂货店爷爷",
         name_en="shopkeeper",
-        max_hp=19,
+        max_hp=17,
         atk=3,
         move=1,
         max_ap=0,
@@ -1543,7 +1809,7 @@ BY_KEY[DUMMY.key] = DUMMY
 # whenever you add heroes; --test fills the rest of your side with dummies.
 # Whoever is newest goes here — --test always deploys the hero just added, so it
 # can be played immediately. Up to two; the rest of the side is padded with dummies.
-TEST_HEROES = ["sabretooth", "magician"]
+TEST_HEROES = ["strongman", "swordsman"]
 
 
 
@@ -1552,7 +1818,7 @@ TEST_HEROES = ["sabretooth", "magician"]
 # half of that which Python can see.
 TARGETING_KINDS = {
     "none", "ally", "unit", "two_units", "any_cell", "direction",
-    "magnitude", "weapon", "cells", "lane", "area", "cone",
+    "magnitude", "weapon", "cells", "lane", "area", "cone", "line",
 }
 
 
@@ -1630,6 +1896,19 @@ def status_of(match, entity):
             "private": True,      # only the side that laid the curse may see it
             "text": "The first attack or ability that damages this hero costs its "
                     "source the next two rounds.",
+        })
+    if entity.vars.get("blessed"):
+        out.append({
+            "key": "blessed", "badge": "佑", "label": "祝福 BLESSED",
+            "text": "The next attack or ability that would hurt it is turned aside. "
+                    "+1 movement until then. Burning ground still bites.",
+        })
+    if entity.vars.get("vulnerable"):
+        n = entity.vars["vulnerable"]
+        out.append({
+            "key": "vulnerable", "badge": f"伤+{n}", "label": "增伤 EXPOSED",
+            "text": f"Takes {n} more from every hit — attacks, abilities and "
+                    f"burning ground alike. It does not wear off.",
         })
     if match.rooted(entity):
         out.append({
