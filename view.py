@@ -173,7 +173,9 @@ def state_for(m, side):
         "both_present": m.both_present(),
         "board": {"cols": m.topology.cols, "rows": m.topology.rows},
         "zone": [list(c) for c in m.topology.deployment_zone(side)],
-        "tiles": m.board.serialise(),
+        # Per side: a hidden effect (潜水者's bombs) is only ever sent to the side
+        # that laid it, the same way a curse mark is.
+        "tiles": m.board.serialise(side),
         "units": units,
         "log": [l for l in m.log if l.get("side") in (None, side)][-60:],
         "reveal": m.last_reveal,

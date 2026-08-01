@@ -1960,6 +1960,169 @@ while m.round == r0:
         turn(m, None, None, right[0] if right else None, hold)
 ok("but venom still bites through it", hp0 - pal.hp == 1, f"took {hp0 - pal.hp}")
 
+# 53 — 潜水者: mines the ground, and only your side can see them
+import board as BOARD
+
+def diver_arena(bomb_at=(5, 3)):
+    m = arena([("diver", (3, 3)), ("gatekeeper", (3, 1))],
+              [("cannoneer", (7, 3)), ("dummy", (7, 1))])
+    dv = unit(m, LEFT, "diver")
+    assert m.opening_choose(LEFT, {"cell": list(bomb_at)}) is None
+    return m, dv, unit(m, LEFT, "gatekeeper"), unit(m, RIGHT, "cannoneer"), unit(m, RIGHT, "dummy")
+
+m, dv, ally, cannon, d = diver_arena()
+ok("the opening charge is buried where you asked",
+   m.board.has_kind((5, 3), "big_bomb"), str(m.board.serialise()))
+ok("...and it is set for two rounds from now",
+   m.board.effects_at((5, 3))[0].fuse_round == 2,
+   str(m.board.effects_at((5, 3))[0].fuse_round))
+
+# only the side that laid it is told about it
+ok("your own side sees the charge",
+   any(t["kind"] == "big_bomb" for t in m.board.serialise(LEFT)))
+ok("the enemy is told nothing",
+   not any(t["kind"] == "big_bomb" for t in m.board.serialise(RIGHT)),
+   str(m.board.serialise(RIGHT)))
+ok("...and the whole truth is still available server-side",
+   any(t["kind"] == "big_bomb" for t in m.board.serialise()))
+
+# the fuse: it goes off at the start of round 2, on whoever is standing there
+m, dv, ally, cannon, d = diver_arena()
+cannon.set_cell((5, 3))
+hp0 = cannon.hp
+r0 = m.round
+while m.round == r0:
+    left = [e.id for e in m.unacted(LEFT)]
+    right = [e.id for e in m.unacted(RIGHT)]
+    turn(m, left[0] if left else None, hold, right[0] if right else None, hold)
+ok("the charge goes off at the start of round 2", m.round == 2, str(m.round))
+ok("...for 6, on whoever is standing on it", hp0 - cannon.hp == 6, f"took {hp0 - cannon.hp}")
+ok("...and it is spent", not m.board.has_kind((5, 3), "big_bomb"))
+
+# it only catches an enemy — your own hero standing there is fine
+m, dv, ally, cannon, d = diver_arena()
+ally.set_cell((5, 3))
+hp0 = ally.hp
+r0 = m.round
+while m.round == r0:
+    left = [e.id for e in m.unacted(LEFT)]
+    right = [e.id for e in m.unacted(RIGHT)]
+    turn(m, left[0] if left else None, hold, right[0] if right else None, hold)
+ok("your own hero walks away from your own charge", ally.hp == hp0, f"took {hp0 - ally.hp}")
+
+# the small bomb: offered only on a turn it actually moved
+m, dv, ally, cannon, d = diver_arena()
+m.select_hero(LEFT, dv.id); m.commit(LEFT, hold)
+m.select_hero(RIGHT, d.id); m.commit(RIGHT, hold)
+ok("no charge is offered on a turn it held still", not m.followups[LEFT],
+   str(m.followups[LEFT]))
+
+m, dv, ally, cannon, d = diver_arena()
+turn(m, dv.id, {"destination": [4, 3], "action": {"key": "none"}}, d.id, hold)
+task = (m.followups[LEFT] or [None])[0]
+ok("moving offers a small charge beside it", task and task["key"] == "small_bomb",
+   str(task))
+ok("...and only into empty squares next to where it ended up",
+   task and all(m.topology.distance((4, 3), tuple(c)) == 1 for c in task["options"]),
+   str(task and task["options"]))
+m.choose_followup(LEFT, task["options"][0])
+laid = tuple(task["options"][0])
+ok("choosing one buries it", m.board.has_kind(laid, "small_bomb"))
+
+# an enemy stepping onto it sets it off; an ally does not
+m = arena([("diver", (3, 3))], [("gatekeeper", (7, 3))])
+dv, gk = unit(m, LEFT, "diver"), unit(m, RIGHT, "gatekeeper")
+m.opening_choose(LEFT, {"cell": [1, 1]})
+gk.set_cell((6, 3))
+m.board.add_effect((5, 3), BOARD.SmallBomb(LEFT))
+hp0 = gk.hp
+turn(m, dv.id, hold, gk.id, {"destination": [5, 3], "action": {"key": "none"}})
+ok("an enemy stepping on a small bomb takes 3", hp0 - gk.hp == 3, f"took {hp0 - gk.hp}")
+ok("...and the bomb is spent", not m.board.has_kind((5, 3), "small_bomb"))
+
+m = arena([("diver", (3, 3)), ("gatekeeper", (3, 1))], [("dummy", (7, 3))])
+dv, ally, d = unit(m, LEFT, "diver"), unit(m, LEFT, "gatekeeper"), unit(m, RIGHT, "dummy")
+m.opening_choose(LEFT, {"cell": [1, 1]})
+m.board.add_effect((4, 1), BOARD.SmallBomb(LEFT))
+hp0 = ally.hp
+turn(m, ally.id, {"destination": [4, 1], "action": {"key": "none"}}, d.id, hold)
+ok("your own hero walks over your own mine safely", ally.hp == hp0, f"took {hp0 - ally.hp}")
+ok("...and does not set it off", m.board.has_kind((4, 1), "small_bomb"))
+
+# a thrown hero trips a mine too — the trigger is movement, not walking
+m = arena([("strongman", (3, 3)), ("diver", (3, 1))], [("gatekeeper", (7, 3))])
+st, dv2, gk = unit(m, LEFT, "strongman"), unit(m, LEFT, "diver"), unit(m, RIGHT, "gatekeeper")
+m.opening_choose(LEFT, {"cell": [1, 1]})
+gk.set_cell((4, 3))
+st.ap = st.max_ap
+m.board.add_effect((2, 3), BOARD.SmallBomb(LEFT))
+hp0 = gk.hp
+turn(m, st.id, {"destination": None, "action": {"key": "ability:slam", "target": gk.id}},
+     gk.id, hold)
+ok("a hero hurled onto a mine sets it off", hp0 - gk.hp == 3 + 3,
+   f"took {hp0 - gk.hp} (3 slam + 3 mine)")
+
+# the parting charge: it dies, and its side still gets to place one
+m, dv, ally, cannon, d = diver_arena()
+dv.hp = 2
+turn(m, ally.id, hold,
+     cannon.id, {"destination": None, "action": {"key": "attack", "shots": [[[3, 3]]]}})
+ok("the diver is destroyed", not dv.alive, f"{dv.hp} hp")
+task = (m.followups[LEFT] or [None])[0]
+ok("its side is still asked for one last charge",
+   task and task["key"] == "last_charge", str(task))
+ok("...and it may go anywhere on the board", task and len(task["options"]) == 45,
+   str(task and len(task["options"])))
+m.choose_followup(LEFT, [8, 5])
+ok("the last charge is buried", m.board.has_kind((8, 5), "big_bomb"))
+ok("...and it is offered only once", not any(
+   f["key"] == "last_charge" for f in m.followups[LEFT]))
+
+# charges pile up on one square — no cap on either kind
+m = arena([("diver", (3, 3))], [("gatekeeper", (7, 3))])
+dv, gk = unit(m, LEFT, "diver"), unit(m, RIGHT, "gatekeeper")
+m.opening_choose(LEFT, {"cell": [1, 1]})
+gk.set_cell((6, 3))
+for _ in range(3):
+    m.board.add_effect((5, 3), BOARD.SmallBomb(LEFT))
+ok("three small charges sit on one square",
+   len(m.board.effects_at((5, 3))) == 3, str(len(m.board.effects_at((5, 3)))))
+hp0 = gk.hp
+turn(m, dv.id, hold, gk.id, {"destination": [5, 3], "action": {"key": "none"}})
+ok("stepping there sets off every one of them", hp0 - gk.hp == 9, f"took {hp0 - gk.hp}")
+ok("...and the square is swept clean", not m.board.effects_at((5, 3)))
+
+# big charges stack too, and each pays out in full
+m = arena([("diver", (3, 3))], [("gatekeeper", (7, 3))])
+dv, gk = unit(m, LEFT, "diver"), unit(m, RIGHT, "gatekeeper")
+m.opening_choose(LEFT, {"cell": [1, 1]})
+gk.set_cell((5, 3))
+laid = m.round
+m.board.add_effect((5, 3), BOARD.BigBomb(LEFT, laid))
+m.board.add_effect((5, 3), BOARD.BigBomb(LEFT, laid))  # same fuse, same square
+m.board.add_effect((5, 3), BOARD.SmallBomb(LEFT))      # a mine can share it too
+ok("two big charges and a mine share one square",
+   len(m.board.effects_at((5, 3))) == 3, str(len(m.board.effects_at((5, 3)))))
+hp0 = gk.hp
+while m.round < laid + BOARD.BigBomb.FUSE:
+    left = [e.id for e in m.unacted(LEFT)]
+    right = [e.id for e in m.unacted(RIGHT)]
+    turn(m, left[0] if left else None, hold, right[0] if right else None, hold)
+ok("both big charges go off together for 12", hp0 - gk.hp == 12, f"took {hp0 - gk.hp}")
+ok("...and the mine is untouched — nobody stepped onto it",
+   m.board.has_kind((5, 3), "small_bomb"), str(m.board.serialise()))
+
+# a small bomb may be dropped onto a square that already holds one
+m, dv, ally, cannon, d = diver_arena()
+m.board.add_effect((4, 3), BOARD.SmallBomb(LEFT))
+turn(m, dv.id, {"destination": [4, 2], "action": {"key": "none"}}, d.id, hold)
+task = (m.followups[LEFT] or [None])[0]
+ok("a square already holding a charge is still offered",
+   task and [4, 3] in task["options"], str(task and task["options"]))
+m.choose_followup(LEFT, [4, 3])
+ok("...and the second one piles on top",
+   len(m.board.effects_at((4, 3))) == 2, str(len(m.board.effects_at((4, 3)))))
+
 print("\nlog tail:")
 for line in m.log[-5:]:
     print("   ", line["text"])

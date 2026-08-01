@@ -14,7 +14,7 @@ import attacks as ATK
 import damage as DMG
 import events as EV
 import heroes as HEROES
-from board import Board
+from board import Board, Minefield
 from entities import Entity, UNTIL_OWNER_NEXT_TURN, UNTIL_TURN_END
 from topology import LEFT, RIGHT, Topology, other_side
 
@@ -52,7 +52,13 @@ class Match:
         self.bus = EV.EventBus(self)
         self.global_rules = [DMG.AbilityImmunity(), DMG.Blessing(), DMG.OutgoingShift(),
                              DMG.Vulnerability(), DMG.FlatReduction(), DMG.CurseTrap(),
-                             DMG.Poison(), DMG.HalvingRule()]
+                             DMG.Poison(), DMG.HalvingRule(), Minefield()]
+        # Damage from the board itself, banked as it is triggered so a whole
+        # exchange's worth lands in one instant (mines under two movers).
+        self.pending_hazards = []
+        # Units that died during the exchange being resolved. They are gone from
+        # the board but may still owe the player a parting decision.
+        self.recent_deaths = []
 
         self.entities = []
         self._ids = itertools.count(1)
@@ -493,7 +499,24 @@ class Match:
             e.has_acted = False
         self.bus.emit(EV.ROUND_START, {})
         self.log_line(f"— Round {self.round} —")
+        self.detonate_due()
+        if self.check_victory():
+            return
         self.start_exchange()
+
+    def detonate_due(self):
+        """Every timer on the board whose round has come, all in one instant — two
+        charges going off together kill together. Spent effects are cleared whether
+        or not they caught anybody."""
+        batch = []
+        for cell, eff in self.board.due(self.round):
+            fn = getattr(eff, "detonate", None)
+            events = fn(self, cell) if fn else []
+            self.board.remove_effect(cell, eff)
+            self.log_line(f"{self.cell_name(cell)} goes up — {eff.describe()}.")
+            batch.extend(events)
+        if batch:
+            DMG.apply_batch(self, batch)
 
     def end_round(self):
         self.bus.emit(EV.ROUND_END, {})
@@ -515,6 +538,8 @@ class Match:
         # Whose attacks connected this exchange, for the turn-resolved hooks.
         self.landed = set()
         self.followups = {LEFT: [], RIGHT: []}
+        self.recent_deaths = []
+        self.pending_hazards = []
         self.take_snapshot()
 
         # A side with nobody left to act sits the exchange out; the other side
@@ -1081,6 +1106,14 @@ class Match:
 
         self.apply_movement(movers)
         self.apply_move_effects()
+        # Anything the board did to whoever walked onto it. Applied as one batch
+        # once every unit has finished moving, so mines under two movers land in
+        # the same instant and mutual kills work as they do everywhere else.
+        if self.pending_hazards:
+            batch, self.pending_hazards = self.pending_hazards, []
+            DMG.apply_batch(self, batch)
+            if self.check_victory():
+                return
 
         plan = {LEFT: [], RIGHT: []}
         for side in (LEFT, RIGHT):
@@ -1262,6 +1295,11 @@ class Match:
                 mark = len(self.log)
                 inst.side_effects(self)
                 self.note_on_reveal(side, inst, mark)
+            # A side effect can move somebody (大力士's throw, 半人马's charge), so
+            # the board may have caught another victim. Part of this same instant.
+            for ev in self.pending_hazards:
+                DMG.deal(self, ev)
+            self.pending_hazards = []
             # Now the instant is complete — heals included — so settle who died.
             self.sweep_deaths()
 
@@ -1317,6 +1355,7 @@ class Match:
                     continue
                 e.alive = False
                 e.cells = set()
+                self.recent_deaths.append(e)
                 self.bus.emit(EV.DEATH, {"entity": e})
                 self.log_line(f"{self.label(e)} is destroyed.")
 
@@ -1371,22 +1410,36 @@ class Match:
 
         A passive reacts by implementing `on_turn_resolved` (no input needed) or
         `followup`/`apply_followup` (a choice), mirroring the `turn_choice` pair
-        that fires at the start of a turn."""
+        that fires at the start of a turn.
+
+        A unit that died in this exchange is asked too, wherever on the board it
+        fell — a parting shot belongs to whoever just lost the hero (潜水者's last
+        charge), and it never got a turn to ask for it on."""
         self.followups = {LEFT: [], RIGHT: []}
+        asked = set()
+
+        def collect(side, e, acted):
+            if e.id in asked:
+                return
+            asked.add(e.id)
+            ctx = {"entity": e, "landed": e.id in self.landed, "died": not e.alive}
+            if acted:
+                self.bus.emit(EV.TURN_RESOLVED, ctx)
+            for p in e.passives:
+                fn = getattr(p, "followup", None)
+                task = fn(self, e, ctx) if fn else None
+                if task and task.get("options"):
+                    self.followups[side].append(dict(task, entity=e.id))
+
         for side in (LEFT, RIGHT):
             c = self.commits.get(side)
             if not c or c["kind"] not in ("action", "gang", "dead"):
                 continue
             for e in self.turn_units(side, c):
-                if not e.alive:
-                    continue
-                ctx = {"entity": e, "landed": e.id in self.landed}
-                self.bus.emit(EV.TURN_RESOLVED, ctx)
-                for p in e.passives:
-                    fn = getattr(p, "followup", None)
-                    task = fn(self, e, ctx) if fn else None
-                    if task and task.get("options"):
-                        self.followups[side].append(dict(task, entity=e.id))
+                if e.alive:
+                    collect(side, e, acted=True)
+        for e in self.recent_deaths:
+            collect(e.side, e, acted=False)
         if not any(self.followups.values()):
             return False
         self.phase = RESOLVED
@@ -1407,7 +1460,10 @@ class Match:
             return "Not one of the squares on offer."
         if choice is None and not task.get("optional"):
             return "You must choose one."
-        if e is not None and e.alive:
+        # Not gated on `alive`: a follow-up is only ever offered because a passive
+        # asked for it, and a parting shot is asked for precisely by a unit that
+        # has just died. Passives that need a body of their own check for one.
+        if e is not None:
             for p in e.passives:
                 fn = getattr(p, "apply_followup", None)
                 if fn:

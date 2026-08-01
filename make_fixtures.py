@@ -8,6 +8,7 @@ against payloads the server would really send — not hand-written ones that dri
 
 import json
 
+import board
 import view
 from match import Match
 from topology import LEFT, RIGHT
@@ -30,7 +31,9 @@ def arena(left, right):
         assert guard < 10, "opening never finished"
         for side in (LEFT, RIGHT):
             if m.opening and m.opening["pending"][side]:
-                m.opening_choose(side, {"target": m.living(side)[0].id})
+                # Both keys, so this works whichever kind the opening asks for —
+                # an ally (森林之子, 诅咒娃娃) or a square (潜水者).
+                m.opening_choose(side, {"target": m.living(side)[0].id, "cell": [1, 1]})
     return m
 
 
@@ -123,6 +126,14 @@ def build():
                ("goblin_commander", (2, 3))], [("dummy", (8, 3))])
     snap("gang", m, select=m.living(LEFT)[0].id,
          full_ap=[unit(m, LEFT, "goblin_commander")])
+
+    # --- buried charges: the same board seen from both sides ------------------
+    m = arena([("diver", (3, 3))], [("gatekeeper", (7, 3))])
+    dv = unit(m, LEFT, "diver")
+    m.board.add_effect((5, 3), board.SmallBomb(LEFT))
+    m.select_hero(LEFT, dv.id)
+    out["mined_owner"] = view.state_for(m, LEFT)
+    out["mined_enemy"] = view.state_for(m, RIGHT)
 
     # --- two halves of one body, positioned together before either aims -------
     m = arena([("snake_head", (2, 2)), ("snake_tail", (2, 3))], [("dummy", (8, 3))])

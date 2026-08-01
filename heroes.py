@@ -6,6 +6,7 @@ hero subclasses Entity, and nothing here is referenced by the core loop.
 
 from dataclasses import dataclass, field
 
+import board as BOARD
 import damage as DMG
 import events as EV
 from entities import Modifier, UNTIL_OWNER_NEXT_TURN, UNTIL_TURN_END
@@ -656,6 +657,108 @@ class SelfDestruct(ShapeAbility):
             return
         actor.hp = 0
         match.log_line(f"{match.label(actor)} goes up with it — nothing left.")
+
+
+class LayBigBomb(Ability):
+    """潜水者's opening charge. Any square on the board — it is invisible to the
+    other side, so there is nothing to give away by burying it under their feet."""
+
+    key = "big_bomb"
+    name = "大炸弹 Big Bomb"
+    ap_cost = 0
+    use_limit = 1
+    opening = True
+    targeting = {"kind": "any_cell"}
+    blurb = ("Before the first exchange, bury a charge in any square. It goes off at "
+             "the start of the round two later for 6 — and only your side can see it.")
+
+    def side_effects(self, match, actor, params):
+        plant_big_bomb(match, actor, tuple(params["cell"]))
+
+
+def plant_big_bomb(match, actor, cell):
+    """Shared by the opening charge and the one laid as 潜水者 goes down."""
+    bomb = BOARD.BigBomb(actor.side, match.round)
+    match.board.add_effect(cell, bomb)
+    match.log_line(
+        f"{match.label(actor)} buries a charge at {match.cell_name(cell)} — "
+        f"it goes off at the start of round {bomb.fuse_round}.",
+        side=actor.side,
+    )
+
+
+class BombLayer:
+    """潜水者. Two habits, both of them choices offered once the exchange has
+    settled, the way 男枪's step is: a small charge dropped beside it whenever it
+    moved, and one last big one as it dies.
+
+    Neither needs new machinery — the board owns the bombs and the follow-up pair
+    owns the asking."""
+
+    describe = ("Lays a small bomb in an empty square beside it at the end of any turn "
+                "it moved — 3 damage to the first enemy that steps on it. Buries a big "
+                "charge before the first exchange, and another as it dies. Only your "
+                "side can see them.")
+    SMALL = "small_bomb"
+    LAST = "last_charge"
+
+    def on_turn_start(self, match, owner, ctx):
+        if ctx.get("entity") is owner:
+            owner.vars["moved_this_turn"] = False
+
+    def on_after_move(self, match, owner, ctx):
+        if ctx.get("entity") is owner and ctx.get("from") is not None:
+            owner.vars["moved_this_turn"] = True
+
+    def followup(self, match, owner, ctx):
+        if ctx.get("entity") is not owner:
+            return None
+        if ctx.get("died"):
+            # It never gets another turn, so this is the only moment to ask.
+            if owner.vars.get("last_charge_spent"):
+                return None
+            return {
+                "key": self.LAST,
+                "name": "大炸弹 Last Charge",
+                "text": "It goes down laying one more. Choose any square — it blows "
+                        "two rounds from now, for 6.",
+                "kind": "cell",
+                "optional": True,
+                "options": [list(c) for c in match.topology.all_cells()],
+            }
+        if not owner.alive or not owner.cells or not owner.vars.get("moved_this_turn"):
+            return None
+        # 空格 means empty of units — a square that already holds charges is still
+        # fair game, and they pile up.
+        free = [c for c in match.topology.neighbours(owner.cell)
+                if match.occupant(c) is None]
+        if not free:
+            return None
+        return {
+            "key": self.SMALL,
+            "name": "小炸弹 Small Bomb",
+            "text": "It moved this turn — drop a small charge in a square beside it, "
+                    "or keep it. 3 damage to the first enemy that steps there.",
+            "kind": "cell",
+            "optional": True,
+            "options": [list(c) for c in free],
+        }
+
+    def apply_followup(self, match, owner, key, choice):
+        if not choice:
+            return
+        cell = tuple(choice)
+        if key == self.LAST:
+            owner.vars["last_charge_spent"] = True
+            plant_big_bomb(match, owner, cell)
+        elif key == self.SMALL:
+            if match.occupant(cell) is not None:
+                return
+            match.board.add_effect(cell, BOARD.SmallBomb(owner.side))
+            match.log_line(
+                f"{match.label(owner)} drops a small charge at {match.cell_name(cell)}.",
+                side=owner.side,
+            )
 
 
 class Recurse(Ability):
@@ -1937,6 +2040,19 @@ ROSTER = [
         blurb="Keeps nothing for himself — every turn, an ally leaves with an extra point.",
     ),
     HeroDef(
+        key="diver",
+        name="潜水者",
+        name_en="diver",
+        max_hp=8,
+        atk=2,
+        move=2,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 2, "range": 2},
+        abilities=[LayBigBomb()],
+        passives=[BombLayer],
+        blurb="Mines the ground as it goes, and leaves one last charge behind when it falls.",
+    ),
+    HeroDef(
         key="snake_emperor",
         name="蛇帝",
         name_en="snakeEmperor",
@@ -2053,7 +2169,7 @@ BY_KEY[DUMMY.key] = DUMMY
 # whenever you add heroes; --test fills the rest of your side with dummies.
 # Whoever is newest goes here — --test always deploys the hero just added, so it
 # can be played immediately. Up to two; the rest of the side is padded with dummies.
-TEST_HEROES = ["bomber", "snake_emperor"]
+TEST_HEROES = ["snake_emperor", "diver"]
 
 
 

@@ -229,6 +229,24 @@ if (F.shape_blast) {
      JSON.stringify(lastSent().payload.action));
 }
 
+// ----------------------------------- 潜水者: a charge only one side can see
+
+if (F.mined_owner && F.mined_enemy) {
+  C.S = F.mined_owner; C.draft = null; C.err = '';
+  ok('diver: the side that laid it is told about the charge',
+     (F.mined_owner.tiles || []).some(t => t.kind === 'small_bomb'),
+     JSON.stringify(F.mined_owner.tiles));
+  ok('diver: and the board marks the square', cellHas([5, 3], 'mined'),
+     boardCells().get('5,3'));
+
+  C.S = F.mined_enemy; C.draft = null; C.err = '';
+  ok('diver: the enemy is told nothing at all',
+     !(F.mined_enemy.tiles || []).some(t => t.hidden),
+     JSON.stringify(F.mined_enemy.tiles));
+  ok('diver: and their board shows a plain square', !cellHas([5, 3], 'mined'),
+     boardCells().get('5,3'));
+}
+
 // ------------------------------------- 蛇帝: position the whole body, then aim
 
 if (F.linked) {

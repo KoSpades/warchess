@@ -267,8 +267,20 @@ function renderBoard(){
       cls.push(c<=3 ? 'regL' : c>=cols-2 ? 'regR' : 'regM');
       let mark='', extra='';
       if (S.phase==='setup' && has(S.zone,cell)) cls.push('zone');
-      const tile = (S.tiles||[]).find(t=>eq(t.cell,cell));
+      // A square can carry several effects at once — burning ground you can both
+      // see, and a charge only your side knows about.
+      const effs = (S.tiles||[]).filter(t=>eq(t.cell,cell));
+      const tile = effs.find(t => t.kind==='burning');
+      // Charges pile up without limit, so the marker counts them rather than
+      // showing only the first: ◆ small (×n), ◈ big with the nearest fuse.
+      const smalls = effs.filter(t => t.kind==='small_bomb').length;
+      const bigs = effs.filter(t => t.kind==='big_bomb');
+      let mineTxt = '';
+      if (smalls) mineTxt += '◆' + (smalls>1 ? smalls : '');
+      if (bigs.length) mineTxt += (mineTxt?' ':'') + '◈' +
+        Math.min(...bigs.map(b => b.fuse_round)) + (bigs.length>1 ? '×'+bigs.length : '');
       if (tile) cls.push('burn');
+      if (mineTxt) cls.push('mined');
       if (origin && cspec &&
           Math.abs(origin[0]-c)+Math.abs(origin[1]-r) <= cspec.range) cls.push('inrange');
       const aimed = !draft ? []
@@ -307,6 +319,7 @@ function renderBoard(){
             + ` onclick="onCell(${c},${r})"${dnd}>`
             + `<span class="tick"></span>${extra}`
             + (tile?`<span class="flame">▲${tile.stacks}</span>`:'')
+            + (mineTxt?`<span class="bomb">${mineTxt}</span>`:'')
             + `</button>`;
     }
     html += '</div></div>';
