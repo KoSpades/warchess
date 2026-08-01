@@ -52,7 +52,7 @@ class Match:
         self.bus = EV.EventBus(self)
         self.global_rules = [DMG.AbilityImmunity(), DMG.Blessing(), DMG.OutgoingShift(),
                              DMG.Vulnerability(), DMG.FlatReduction(), DMG.CurseTrap(),
-                             DMG.HalvingRule()]
+                             DMG.Poison(), DMG.HalvingRule()]
 
         self.entities = []
         self._ids = itertools.count(1)
@@ -648,11 +648,43 @@ class Match:
             return False
         return True
 
-    def legal_moves(self, e):
+    def move_anchor_of(self, e):
+        """For a unit placed relative to another (蛇帝's tail): which unit, and by
+        what rule. The client needs this to work out legal squares while the order
+        is still being drafted — a position it can never propose is better than one
+        it proposes and has refused."""
+        for p in e.passives:
+            fn = getattr(p, "move_anchor", None)
+            if fn is None:
+                continue
+            got = fn(self, e)
+            if got:
+                return got
+        return None
+
+    def move_zone(self, e, pending=None):
+        """(cells, dictated) for a unit whose square is placed by a passive rather
+        than walked to — 蛇帝's tail, which goes wherever the head ends up. Only a
+        passive that actually returns a list counts: one that answers None for this
+        body (the head carries the same passive as the tail) leaves it walking
+        normally. `pending` is the destinations already sealed this turn."""
+        for p in e.passives:
+            fn = getattr(p, "move_zone", None)
+            if fn is None:
+                continue
+            zone = fn(self, e, pending or {})
+            if zone is not None:
+                return [list(c) for c in zone], True
+        return None, False
+
+    def legal_moves(self, e, pending=None):
         # A rooted unit has nowhere it may put itself. This also covers a bodiless
         # hero's squares to appear on, since those come through here.
         if self.rooted(e):
             return []
+        zone, dictated = self.move_zone(e, pending)
+        if dictated:
+            return zone
 
         """Every cell reachable within the hero's move allowance, walking one step
         at a time through cells empty in the current snapshot (you cannot move
@@ -789,13 +821,19 @@ class Match:
                 if fn:
                     fn(self, e, ch["key"], target)
 
-    def _build_order(self, e, payload):
-        """Validate one unit's move + action. Returns (order, error)."""
+    def _build_order(self, e, payload, pending=None):
+        """Validate one unit's move + action. Returns (order, error). `pending` is
+        the destinations sealed earlier in the same gang turn, for a unit whose
+        legal squares depend on where a comrade is going."""
         dest = payload.get("destination")
         dest = tuple(dest) if dest else e.cell
-        if dest != e.cell:
-            if dest not in [tuple(c) for c in self.legal_moves(e)]:
-                return None, "That cell is not an open adjacent square."
+        # A unit whose square is dictated by another's has to justify standing
+        # still too: if the head walks off, the tail cannot simply stay behind.
+        _zone, dictated = self.move_zone(e, pending)
+        if dest != e.cell or dictated:
+            if dest not in [tuple(c) for c in self.legal_moves(e, pending)]:
+                return None, ("That square is not beside the rest of you."
+                              if dictated else "That cell is not an open adjacent square.")
 
         action = payload.get("action") or {"key": "none"}
         key = action.get("key", "none")
@@ -821,6 +859,10 @@ class Match:
         living = {a.id: a for a in actors}
         seen = []
         orders = []
+        # Destinations sealed so far this turn, so a body that has to stand beside
+        # a comrade (蛇帝's tail) is checked against where that comrade is going,
+        # not where it currently stands.
+        pending = {}
         for item in raw:
             e = self.entity(item.get("entity"))
             if e is None or e.side != side or self.gang_of(e) != self.gang_of(picked):
@@ -833,13 +875,19 @@ class Match:
             if e.id in seen:
                 return "Each goblin acts once."
             seen.append(e.id)
-            order, err = self._build_order(e, item)
+            order, err = self._build_order(e, item, pending)
             if err:
                 return f"{e.name}: {err}"
             orders.append(order)
+            pending[e.id] = tuple(order["destination"]) if order["destination"] else None
         missing = [a for a in actors if a.id not in seen]
         if missing:
             return f"Still waiting on orders for {', '.join(a.name for a in missing)}."
+        # Most squads act in whatever order you like; one whose members declare a
+        # rank does not (蛇帝's head leads and the tail follows it).
+        ranks = [self.entity(i).hero.gang_rank for i in seen]
+        if any(r is not None for r in ranks) and ranks != sorted(r or 0 for r in ranks):
+            return "This one acts in a fixed order — the head leads."
 
         for o in orders:
             self.apply_choices(self.entity(o["entity"]), o)

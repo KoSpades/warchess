@@ -1816,6 +1816,150 @@ bo.ap = 2
 entry = next(a for a in m.action_menu(bo) if a["key"] == "ability:self_destruct")
 ok("two AP is not enough to set it off", not entry["affordable"])
 
+# 52 — 蛇帝: one creature on two squares, head leading and tail following
+def snake_arena(right=(("gatekeeper", (7, 3)), ("dummy", (7, 1)))):
+    m = arena([("snake_head", (3, 3)), ("snake_tail", (3, 4))], list(right))
+    hd, tl = unit(m, LEFT, "snake_head"), unit(m, LEFT, "snake_tail")
+    return (m, hd, tl) + tuple(unit(m, RIGHT, k) for k, _ in right)
+
+def snake_turn(m, hd, tl, head_order, tail_order, rs=None, ra=None):
+    """A gang turn: one order per body, head first."""
+    assert m.select_hero(LEFT, hd.id) is None
+    assert m.commit(LEFT, {"orders": [dict(head_order, entity=hd.id),
+                                      dict(tail_order, entity=tl.id)]}) is None, "head+tail order"
+    if rs is not None:
+        assert m.select_hero(RIGHT, rs) is None
+        assert m.commit(RIGHT, ra) is None
+    guard = 0
+    while m.phase == "victim":
+        guard += 1
+        assert guard < 20
+        for side in (LEFT, RIGHT):
+            opts = m.res["options"][side]
+            if opts and m.res["picks"][side] is None:
+                m.choose_victim(side, opts[0])
+
+stay = lambda c: {"destination": list(c), "action": {"key": "none"}}
+bite = lambda c, cells: {"destination": list(c), "action": {"key": "attack", "shots": [cells]}}
+
+# picking either half brings both — it is one turn
+m, hd, tl, gate, d = snake_arena()
+ok("picking the head brings the tail into the same turn",
+   sorted(e.id for e in m.turn_actors(hd)) == sorted([hd.id, tl.id]))
+ok("...and picking the tail does the same",
+   sorted(e.id for e in m.turn_actors(tl)) == sorted([hd.id, tl.id]))
+
+# one HP pool: a blow to the tail wounds the snake
+m, hd, tl, gate, d = snake_arena()
+ok("both halves start on the same 25", (hd.hp, tl.hp) == (25, 25), f"{hd.hp}/{tl.hp}")
+DMG.apply_batch(m, [DMG.DamageEvent(source=gate, target=tl, amount=6,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("a blow to the tail comes off the shared pool", hd.hp == 19, f"head {hd.hp}")
+ok("...and the tail reads the same", tl.hp == 19, f"tail {tl.hp}")
+DMG.apply_batch(m, [DMG.DamageEvent(source=gate, target=hd, amount=4,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("a blow to the head comes off the same pool too", (hd.hp, tl.hp) == (15, 15),
+   f"{hd.hp}/{tl.hp}")
+
+# kill it once and the whole snake goes
+m, hd, tl, gate, d = snake_arena()
+DMG.apply_batch(m, [DMG.DamageEvent(source=gate, target=tl, amount=25,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("25 through the tail kills the whole snake", not hd.alive and not tl.alive,
+   f"head alive={hd.alive} tail alive={tl.alive}")
+ok("...and both squares are cleared", not hd.cells and not tl.cells)
+m.check_victory()
+ok("it counted as one hero, so that is the match", m.phase == "gameover", m.phase)
+
+# the bite poisons, and poison ticks at the end of the round
+m, hd, tl, gate, d = snake_arena()
+gate.set_cell((4, 3))                                  # in reach of the head (rng 1)
+hp0 = gate.hp
+snake_turn(m, hd, tl, bite((3, 3), [[4, 3]]), stay((3, 4)), d.id, hold)
+ok("the bite lands", hp0 - gate.hp == 3, f"took {hp0 - gate.hp}")
+ok("...and leaves venom for two rounds", gate.vars.get("poison_rounds") == 2,
+   str(gate.vars.get("poison_rounds")))
+before = gate.hp
+r0 = m.round
+while m.round == r0:                                   # close the round out
+    left = [e.id for e in m.unacted(LEFT)]
+    right = [e.id for e in m.unacted(RIGHT)]
+    if left:
+        snake_turn(m, hd, tl, stay(hd.cell), stay(tl.cell),
+                   right[0] if right else None, hold)
+    else:
+        turn(m, None, None, right[0] if right else None, hold)
+ok("venom bites at the end of the round", before - gate.hp == 1, f"took {before - gate.hp}")
+ok("...and one dose is spent", gate.vars.get("poison_rounds") == 1,
+   str(gate.vars.get("poison_rounds")))
+
+# only an unpoisoned hero can be poisoned — no refresh
+m, hd, tl, gate, d = snake_arena()
+gate.set_cell((4, 3))
+gate.vars["poison_rounds"] = 1
+snake_turn(m, hd, tl, bite((3, 3), [[4, 3]]), stay((3, 4)), d.id, hold)
+ok("a hero already poisoned takes no second dose", gate.vars.get("poison_rounds") == 1,
+   str(gate.vars.get("poison_rounds")))
+
+# the pincer: head and tail on the same victim, +1 on the tail's blow
+m, hd, tl, gate, d = snake_arena()
+gate.set_cell((4, 3))
+hp0 = gate.hp
+snake_turn(m, hd, tl, bite((3, 3), [[4, 3]]), bite((3, 4), [[4, 3]]), d.id, hold)
+ok("head 3 + tail 3 + 1 for the pincer", hp0 - gate.hp == 7, f"took {hp0 - gate.hp}")
+
+# on different victims there is no bonus
+m, hd, tl, gate, d = snake_arena()
+gate.set_cell((4, 3)); d.set_cell((5, 4))
+hp0 = (gate.hp, d.hp)
+snake_turn(m, hd, tl, bite((3, 3), [[4, 3]]), bite((3, 4), [[5, 4]]), gate.id, hold)
+ok("two different victims each take a plain 3",
+   (hp0[0] - gate.hp, hp0[1] - d.hp) == (3, 3),
+   f"{hp0[0] - gate.hp}, {hp0[1] - d.hp}")
+
+# the tail reaches 3 squares where the head reaches 1
+m, hd, tl, gate, d = snake_arena()
+ok("the head reaches 1 and marks 2", (hd.rng, hd.grid) == (1, 2), f"{hd.rng}/{hd.grid}")
+ok("the tail reaches 3 and marks 3", (tl.rng, tl.grid) == (3, 3), f"{tl.rng}/{tl.grid}")
+
+# the tail goes where the head goes — it must end up beside it
+m, hd, tl, gate, d = snake_arena()
+zone = [tuple(c) for c in m.legal_moves(tl, {hd.id: (4, 3)})]
+ok("the tail may take any square beside the head's destination",
+   sorted(zone) == sorted([(4, 2), (4, 4), (5, 3), (3, 3)]), str(sorted(zone)))
+ok("...including the square the head is vacating", (3, 3) in zone)
+m.select_hero(LEFT, hd.id)
+ok("a tail left behind is refused",
+   m.commit(LEFT, {"orders": [dict(bite((4, 3), [[5, 3]]), entity=hd.id),
+                              dict(stay((3, 4)), entity=tl.id)]}) is not None)
+ok("...but following the head is fine",
+   m.commit(LEFT, {"orders": [dict(bite((4, 3), [[5, 3]]), entity=hd.id),
+                              dict(stay((4, 4)), entity=tl.id)]}) is None)
+
+# the head leads: the tail cannot be ordered first
+m, hd, tl, gate, d = snake_arena()
+m.select_hero(LEFT, hd.id)
+ok("the tail cannot act before the head",
+   m.commit(LEFT, {"orders": [dict(stay((3, 4)), entity=tl.id),
+                              dict(stay((3, 3)), entity=hd.id)]}) is not None)
+
+# venom is STATUS: 圣骑士's shield neither stops it nor is spent on it
+m, hd, tl, pal, d = snake_arena(right=(("paladin", (7, 3)), ("dummy", (7, 1))))
+pal.set_cell((4, 3))
+snake_turn(m, hd, tl, bite((3, 3), [[4, 3]]), stay((3, 4)), d.id, hold)
+ok("the bite trips the holy shield", pal.vars.get("aegis_spent") is True)
+hp0 = pal.hp
+r0 = m.round
+while m.round == r0:
+    left = [e.id for e in m.unacted(LEFT)]
+    right = [e.id for e in m.unacted(RIGHT)]
+    if left:
+        snake_turn(m, hd, tl, stay(hd.cell), stay(tl.cell),
+                   right[0] if right else None, hold)
+    else:
+        turn(m, None, None, right[0] if right else None, hold)
+ok("but venom still bites through it", hp0 - pal.hp == 1, f"took {hp0 - pal.hp}")
+
 print("\nlog tail:")
 for line in m.log[-5:]:
     print("   ", line["text"])

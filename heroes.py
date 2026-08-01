@@ -1202,6 +1202,154 @@ class Almsgiving:
             )
 
 
+SNAKE_HEAD = "snake_head"
+SNAKE_TAIL = "snake_tail"
+
+
+def _other_half(match, owner, key):
+    """The other body of a two-bodied hero, or None once it is gone."""
+    return next((e for e in match.living(owner.side)
+                 if e.hero.gang == owner.hero.gang and e.key == key), None)
+
+
+class SerpentBody:
+    """蛇帝 is one creature standing on two squares. Whichever half is struck, the
+    wound goes to the same 25 points: the tail hands on everything dealt to it and
+    the head holds the pool. When the head falls the tail goes with it — there is
+    no half a snake — and only the head counts toward defeat, so the pair is one
+    hero on the board and one hero in the victory check."""
+
+    describe = ("Head and tail are one 25 HP body across two adjacent squares. A blow "
+                "to either wounds the whole snake, and both fall together.")
+
+    # Earliest slot in the pipeline, so every rule after it — wards, guards, 增伤,
+    # the lot — reads the head as the thing being hit.
+    @EV.hook(priority=5)
+    def on_before_damage(self, match, owner, ev):
+        if ev.target is not owner or owner.key != SNAKE_TAIL:
+            return
+        head = _other_half(match, owner, SNAKE_HEAD)
+        if head is not None and head.alive:
+            ev.target = head
+
+    @EV.hook(priority=95)
+    def on_after_damage(self, match, owner, ev):
+        self._mirror(match, owner)
+
+    def on_match_start(self, match, owner, ctx):
+        if owner.key == SNAKE_TAIL:
+            # One hero, not two: the tail is a body on the board, never a life to take.
+            owner.flags["counts_for_defeat"] = False
+        self._mirror(match, owner)
+
+    def on_turn_start(self, match, owner, ctx):
+        self._mirror(match, owner)
+
+    def on_round_start(self, match, owner, ctx):
+        self._mirror(match, owner)
+
+    def on_heal(self, match, owner, ctx):
+        self._mirror(match, owner)
+
+    @staticmethod
+    def _mirror(match, owner):
+        """The tail shows the head's health, so reading either square tells you the
+        snake's real state."""
+        if owner.key != SNAKE_TAIL:
+            return
+        head = _other_half(match, owner, SNAKE_HEAD)
+        if head is not None:
+            owner.max_hp, owner.hp = head.max_hp, head.hp
+
+    def on_death(self, match, owner, ctx):
+        """Hung off the tail rather than the head: a dying unit is already marked
+        dead before DEATH is emitted, so its own passives never hear it."""
+        if owner.key != SNAKE_TAIL or not owner.alive:
+            return
+        dead = ctx.get("entity")
+        if dead is None or dead.key != SNAKE_HEAD or dead.side != owner.side:
+            return
+        if dead.hero.gang != owner.hero.gang:
+            return
+        owner.hp = 0
+        match.log_line(f"{match.label(owner)} goes limp as the head falls.")
+        match.sweep_deaths()
+
+    def move_anchor(self, match, owner):
+        """Who this body is placed against, so the client can offer only the squares
+        that will actually be legal instead of refusing them after the fact."""
+        if owner.key != SNAKE_TAIL:
+            return None
+        head = _other_half(match, owner, SNAKE_HEAD)
+        return None if head is None else {"entity": head.id, "rule": "neighbours"}
+
+    def move_zone(self, match, owner, pending):
+        """The tail does not walk — the body follows the head. It may be put on any
+        empty square orthogonally beside wherever the head is going, which includes
+        the square the head is leaving and the one the tail is already on, since
+        both halves are moving at once."""
+        if owner.key != SNAKE_TAIL:
+            return None
+        head = _other_half(match, owner, SNAKE_HEAD)
+        if head is None or not head.cells:
+            return None
+        dest = pending.get(head.id) or head.cell
+        free = {owner.id, head.id}
+        return [c for c in match.topology.neighbours(dest)
+                if match.occupant(c) is None or match.occupant(c).id in free]
+
+
+class VenomFangs:
+    """蛇帝's head. Anything its bite draws blood from carries venom for two rounds.
+    A hero already poisoned cannot take a second dose — no stacking and no
+    refreshing — so a fresh victim is always worth more than the same one twice.
+
+    It also notes what it bit this turn, which is what the tail closes on."""
+
+    describe = ("Its bite poisons for 2 rounds — 1 damage at each round's end. Only a "
+                "hero not already poisoned can be poisoned.")
+    ROUNDS = 2
+
+    def on_turn_start(self, match, owner, ctx):
+        if ctx.get("entity") is owner:
+            owner.vars["bit_this_turn"] = set()
+
+    @EV.hook(priority=60)
+    def on_after_damage(self, match, owner, ev):
+        if ev.source is not owner or ev.category != DMG.NORMAL_ATTACK or ev.amount <= 0:
+            return
+        if ev.target.side == owner.side:
+            return
+        owner.vars.setdefault("bit_this_turn", set()).add(ev.target.id)
+        if ev.target.vars.get("poison_rounds", 0) > 0:
+            return      # 只有未中毒的才能中毒 — no second dose, no refresh
+        ev.target.vars["poison_rounds"] = self.ROUNDS
+        ev.target.vars["poison_source"] = owner.id
+        match.log_line(
+            f"{match.label(ev.target)} is poisoned — 1 at the end of each of the "
+            f"next {self.ROUNDS} rounds."
+        )
+
+
+class PincerStrike:
+    """蛇帝's tail. Where the head has already drawn blood this turn, the tail's blow
+    lands 1 harder — the pincer closing on one victim. The head always acts first,
+    so the tail is always the half that completes it."""
+
+    describe = ("Strikes from 3 squares away. Anything the head already bit this turn "
+                "takes 1 more from the tail.")
+    BONUS = 1
+
+    @EV.hook(priority=15)
+    def on_before_damage(self, match, owner, ev):
+        if ev.source is not owner or ev.cancelled or ev.amount <= 0:
+            return
+        head = _other_half(match, owner, SNAKE_HEAD)
+        if head is None or ev.target.id not in head.vars.get("bit_this_turn", set()):
+            return
+        ev.amount += self.BONUS
+
+
 class GangTactics:
     """Display-only: the ordering rule itself lives in the turn loop (a gang
     commits one order per living member and they resolve in the chosen order)."""
@@ -1276,6 +1424,10 @@ class HeroDef:
     # Set on the members: which squad card they belong to. Members sharing a gang
     # key on the same side act together in one turn.
     gang: str = None
+    # Where this body falls in its squad's turn. None everywhere means the player
+    # picks the order (哥布林团伙); ranked members must act in ascending order
+    # (蛇帝's head leads, the tail follows).
+    gang_rank: int = None
     blurb: str = ""
 
 
@@ -1785,6 +1937,21 @@ ROSTER = [
         blurb="Keeps nothing for himself — every turn, an ally leaves with an extra point.",
     ),
     HeroDef(
+        key="snake_emperor",
+        name="蛇帝",
+        name_en="snakeEmperor",
+        # Card-level numbers describe the whole snake; the two bodies below carry
+        # the real stats. The 25 HP is a single pool that both halves share.
+        max_hp=25,
+        atk=3,
+        move=1,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 2, "range": 1},
+        squad=[SNAKE_HEAD, SNAKE_TAIL],
+        passives=[SerpentBody],
+        blurb="One creature on two squares — a poisoning bite up close, and a tail that reaches.",
+    ),
+    HeroDef(
         key="goblin_gang",
         name="哥布林团伙",
         name_en="goblinGang",
@@ -1834,6 +2001,37 @@ SQUAD_MEMBERS = [
         blurb="Barely a fighter — but he makes the whole gang hit harder.",
     ),
 ]
+SQUAD_MEMBERS += [
+    HeroDef(
+        key=SNAKE_HEAD,
+        name="蛇首",
+        name_en="snakeHead",
+        max_hp=25,          # the pool for the whole snake; the tail mirrors it
+        atk=3,
+        move=1,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 2, "range": 1},
+        passives=[SerpentBody, VenomFangs],
+        gang="snake_emperor",
+        gang_rank=0,        # the head takes the turn; the tail follows it
+        blurb="Bites at arm's length and leaves venom in the wound.",
+    ),
+    HeroDef(
+        key=SNAKE_TAIL,
+        name="蛇尾",
+        name_en="snakeTail",
+        max_hp=25,          # display only — every blow is passed to the head
+        atk=3,
+        move=1,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 3, "range": 3},
+        passives=[SerpentBody, PincerStrike],
+        gang="snake_emperor",
+        gang_rank=1,
+        blurb="Lashes out three squares, and hits harder where the head has already bitten.",
+    ),
+]
+
 for _m in SQUAD_MEMBERS:
     BY_KEY[_m.key] = _m
 
@@ -1856,7 +2054,7 @@ BY_KEY[DUMMY.key] = DUMMY
 # whenever you add heroes; --test fills the rest of your side with dummies.
 # Whoever is newest goes here — --test always deploys the hero just added, so it
 # can be played immediately. Up to two; the rest of the side is padded with dummies.
-TEST_HEROES = ["swordsman", "bomber"]
+TEST_HEROES = ["bomber", "snake_emperor"]
 
 
 
@@ -1949,6 +2147,14 @@ def status_of(match, entity):
             "key": "blessed", "badge": "佑", "label": "祝福 BLESSED",
             "text": "The next attack or ability that would hurt it is turned aside. "
                     "+1 movement until then. Burning ground still bites.",
+        })
+    if entity.vars.get("poison_rounds"):
+        n = entity.vars["poison_rounds"]
+        out.append({
+            "key": "poisoned", "badge": "毒", "label": "中毒 POISONED",
+            "text": f"Loses 1 at the end of each of the next {n} round"
+                    f"{'' if n == 1 else 's'}. It cannot be poisoned again until "
+                    f"this wears off.",
         })
     if entity.vars.get("vulnerable"):
         n = entity.vars["vulnerable"]

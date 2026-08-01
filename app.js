@@ -64,6 +64,9 @@ function syncDraft(){
   // server's `selected` only records which one opened the gang's turn.
   if (isGang()){
     draft.gangOrders = draft.gangOrders || [];
+    draft.pos = draft.pos || {};
+    draft.posIdx = draft.posIdx || 0;
+    draft.stage = draft.stage || 'move';
     // Switching away and back leaves a stale id behind — rebuild rather than
     // render a panel for a hero that isn't in this gang.
     if (draft.entity != null && !gangMember(draft.entity)) draft = blankDraft(sel);
@@ -74,7 +77,7 @@ function syncDraft(){
 function blankDraft(entity){
   return {entity, destination:null, held:false, tentative:null, actionKey:null, shots:[], shotIndex:0,
           target:null, direction:null, cell:null, amount:null, weapon:null, pair:[],
-          choices:{}, gangOrders:[]};
+          choices:{}, gangOrders:[], pos:{}, posIdx:0, stage:'move'};
 }
 function resetLeg(){
   // Clear one unit's half-built order, keeping the gang's sealed-so-far list.
@@ -91,8 +94,57 @@ function gangMember(id){ return gangMembers().find(x => x.entity === id) || null
 function gangOrders(){ return (draft && draft.gangOrders) || []; }
 function isOrdered(id){ return gangOrders().some(o => o.entity === id); }
 function gangPending(){ return gangMembers().filter(x => !isOrdered(x.entity)); }
+/* ---------------- linked bodies (蛇帝) ---------------- */
+// A squad whose halves are placed against one another rather than walking about
+// independently. The whole body is positioned first and confirmed in one go, and
+// only then does each half aim — so an illegal position is never offered at all.
+// 哥布林团伙 has no such link (three units that merely share a turn) and keeps the
+// per-goblin move-then-attack flow untouched.
+function isLinked(){ return isGang() && gangMembers().some(g => g.move_anchor); }
+function linkedOrder(){
+  return gangMembers().slice().sort(
+    (a,b) => ((a.rank==null)?99:a.rank) - ((b.rank==null)?99:b.rank));
+}
+function linkedAt(i){ return linkedOrder()[i] || null; }
+function placedPos(){ return (draft && draft.pos) || {}; }
+function placedAll(){ return linkedOrder().every(g => placedPos()[g.entity]); }
+// Where the i-th body may be put, given where the earlier ones are going. Both
+// halves are moving at once, so neither blocks the other's old square.
+function linkedMoves(i){
+  const ms = linkedOrder(), g = ms[i];
+  if (!g) return [];
+  const own = ms.map(x => x.cell).filter(Boolean);
+  const taken = ms.filter((x,j) => j!==i && placedPos()[x.entity]).map(x => placedPos()[x.entity]);
+  const open = c => {
+    if (c[0]<1 || c[1]<1 || c[0]>S.board.cols || c[1]>S.board.rows) return false;
+    if (has(taken, c)) return false;
+    const u = unitAt(c);
+    return !u || has(own, c);
+  };
+  if (g.move_anchor){
+    const a = placedPos()[g.move_anchor.entity] || (gangMember(g.move_anchor.entity)||{}).cell;
+    if (!a) return [];
+    return [[a[0]+1,a[1]],[a[0]-1,a[1]],[a[0],a[1]+1],[a[0],a[1]-1]].filter(open);
+  }
+  // A body that walks: the server's own list (holding is always allowed).
+  return (g.legal_moves||[]).concat(g.cell?[g.cell]:[]).filter(open);
+}
+function beginLinkedLeg(){
+  const g = linkedAt(draft.posIdx);
+  if (!g) return render();
+  resetLeg();
+  draft.entity = g.entity;
+  draft.destination = placedPos()[g.entity];
+  err=""; finishMove();
+}
+function resetLinked(){
+  draft.pos = {}; draft.posIdx = 0; draft.stage = 'move'; draft.gangOrders = [];
+  draft.entity = null; resetLeg(); err=""; render();
+}
+
 // The move list / action menu for whoever is being ordered right now.
 function curMoves(){
+  if (isLinked()) return draft.stage==='act' ? [] : linkedMoves(draft.posIdx||0);
   if (isGang()){
     const g = gangMember(draft && draft.entity);
     return g ? g.legal_moves : [];
@@ -144,6 +196,10 @@ function currentAction(){
 function plannedCell(u){
   if (!u) return null;
   if (S.phase!=='commit' || !draft) return u.cell;
+  // A linked body is placed before either half aims, so both know where they are
+  // going from the moment they are put down — including the one whose turn to aim
+  // has not come round yet.
+  if (isLinked() && placedPos()[u.id]) return placedPos()[u.id];
   // u.cell may be null (鬼魂 before it takes flesh) — the aim still counts.
   if (draft.entity === u.id) return draft.destination || draft.tentative || u.cell;
   const o = gangOrders().find(x => x.entity === u.id);
@@ -187,6 +243,9 @@ function renderBoard(){
     if (su && to && !eq(to, su.cell)) previews.push({u:su, to});
   };
   if (S.phase==='commit' && draft){
+    // Both halves of a linked body show where they are going as soon as they are
+    // placed — before anything is confirmed and before either has aimed.
+    if (isLinked()) for (const g of linkedOrder()) ghostFor(g.entity, placedPos()[g.entity]);
     const su = selectedUnit();
     if (su) ghostFor(su.id, draft.destination || draft.tentative);
     // Goblins already ordered keep their ghost while the rest of the gang is aimed.
@@ -212,7 +271,10 @@ function renderBoard(){
       if (tile) cls.push('burn');
       if (origin && cspec &&
           Math.abs(origin[0]-c)+Math.abs(origin[1]-r) <= cspec.range) cls.push('inrange');
-      if (draft && ((draft.destination && eq(draft.destination,cell)) || (draft.tentative && eq(draft.tentative,cell)))) cls.push('dest');
+      const aimed = !draft ? []
+        : isLinked() ? linkedOrder().map(g => placedPos()[g.entity]).filter(Boolean)
+        : [draft.destination, draft.tentative].filter(Boolean);
+      if (aimed.some(x => eq(x, cell))) cls.push('dest');
       if (S.phase==='commit' && draft && !draft.destination && !draft.held &&
           has(curMoves(),cell)) cls.push('legal','pick');
       if (has(sweepCells,cell)) cls.push('preview');
@@ -521,6 +583,13 @@ function clickableCell(cell){
     return !!(t && has(t.options, cell));
   }
   if (S.phase!=='commit' || !draft || S.commit.sealed) return false;
+  if (isLinked() && draft.stage!=='act'){
+    // The squares still to be placed, plus either half itself — clicking a body
+    // goes back to positioning it, so it has to stay live once both are down.
+    if (has(curMoves(), cell)) return true;
+    const u = unitAt(cell);
+    return !!(u && linkedOrder().some(g => g.entity === u.id));
+  }
   if (!draft.destination && !draft.held) return has(curMoves(),cell);
   const act = currentAction(); if (!act) return false;
   const cs = cellSpec();
@@ -574,6 +643,26 @@ function onCell(c,r){
     return;
   }
   if (!draft) return;
+  if (isLinked() && draft.stage!=='act'){
+    // Placing the body. Only squares that will still be legal once the earlier
+    // half lands are offered, so nothing here can be refused later.
+    if (has(linkedMoves(draft.posIdx||0), cell)){
+      draft.pos[linkedAt(draft.posIdx||0).entity] = cell;
+      draft.posIdx = Math.min((draft.posIdx||0)+1, linkedOrder().length);
+      err=""; return render();
+    }
+    const u = unitAt(cell);
+    const idx = u ? linkedOrder().findIndex(g => g.entity===u.id) : -1;
+    if (idx >= 0){
+      // Clicking one of your own halves goes back to placing it, dropping the
+      // choices that were made after it.
+      draft.posIdx = idx;
+      for (let j=idx; j<linkedOrder().length; j++) delete draft.pos[linkedAt(j).entity];
+      err=""; return render();
+    }
+    if (canAct(u)) return cmd({cmd:'select', entity:u.id});
+    return;
+  }
   if (isGang() && !draft.destination && !draft.held){
     const u = unitAt(cell);
     if (canAct(u)){
@@ -679,11 +768,21 @@ function commitActive(){
   return S && S.phase==='commit' && S.commit && !S.commit.sealed && S.commit.selected && draft;
 }
 function moveInputActive(){
+  if (isLinked()) return !!commitActive() && draft.stage!=='act';
   return commitActive() && !draft.destination && !draft.held
       && (!isGang() || !!draft.entity);
 }
 function confirmMove(){
   if (!moveInputActive()) return;
+  if (isLinked()){
+    // One Enter settles the whole body; only then does either half aim.
+    if (!placedAll()){
+      err = `Place ${linkedAt(draft.posIdx||0).name} first.`;
+      return render();
+    }
+    draft.stage = 'act'; draft.posIdx = 0;
+    return beginLinkedLeg();
+  }
   if (draft.tentative) draft.destination = draft.tentative;
   else draft.held = true;              // Enter with no move = hold position
   draft.tentative = null; err="";
@@ -798,6 +897,9 @@ function chooseAction(key){
   err=""; render();
 }
 function changeMove(){
+  // A linked body is positioned as a whole, so re-opening the step restarts the
+  // placement rather than freeing one half of it.
+  if (isLinked()) return resetLinked();
   // Re-opening the movement step drops the action aimed from the old square — a
   // lane or a marked cell chosen from there is meaningless once you move.
   Object.assign(draft, {destination:null, held:false, tentative:null, actionKey:null,
@@ -849,6 +951,14 @@ function sealOrder(){
   if (t.kind==='direction' || t.kind==='lane' || t.kind==='cone' || t.kind==='shape') action.direction = draft.direction;
   if (t.kind==='any_cell') action.cell = draft.cell;
   if (t.kind==='weapon'){ action.weapon = draft.weapon; const w=currentWeapon(); if (w && w.mode==='cells') action.shots = draft.shots; }
+  if (isLinked()){
+    draft.gangOrders.push({entity: draft.entity, destination: draft.destination, action,
+                           choices: Object.assign({}, draft.choices)});
+    draft.posIdx++;
+    if (draft.posIdx < linkedOrder().length){ beginLinkedLeg(); return render(); }
+    pendingMoves = gangOrders().filter(o=>o.destination).map(o=>({id:o.entity, to:o.destination}));
+    return cmd({cmd:'commit', payload:{orders: gangOrders()}});
+  }
   if (isGang()){
     draft.gangOrders.push({entity: draft.entity, destination: draft.destination, action,
                            choices: Object.assign({}, draft.choices)});
@@ -1090,7 +1200,13 @@ function renderCommit(){
 
   if (!draft){ document.getElementById('leftbody').innerHTML = h; return; }
   const u = selectedUnit(), act = currentAction();
-  if (isGang()){
+  if (isLinked()){
+    h += linkedHeaderHTML();
+    if (draft.stage!=='act'){                 // still positioning the whole body
+      h += `<p class="err">${err}</p>`;
+      document.getElementById('leftbody').innerHTML = h; return;
+    }
+  } else if (isGang()){
     h += gangHeaderHTML();
     if (!draft.entity){                       // nobody up: choose who acts next
       h += `<p class="err">${err}</p>`;
@@ -1114,8 +1230,9 @@ function renderCommit(){
               <small>Moves ${u.name} itself — pick this instead of a move.</small></button>`;
     }
   } else {
+    const staying = draft.held || (draft.destination && u.cell && eq(draft.destination, u.cell));
     h += `<button class="btn on" onclick="changeMove()">
-            ${draft.held?'Holding position':'Moving to '+cn(draft.destination)} <small>Click to change</small></button>`;
+            ${staying?'Holding position':'Moving to '+cn(draft.destination)} <small>Click to change</small></button>`;
   }
   if (draft.destination || draft.held){
     for (const ch of curChoices()){
@@ -1136,7 +1253,9 @@ function renderCommit(){
     }
     if (act) h += targetingHTML(act);
     const last = isGang() && gangPending().length===1;
-    const label = !isGang() ? 'Seal order' : (last ? 'Seal the gang’s orders' : 'Lock this goblin in');
+    const label = !isGang() ? 'Seal order'
+                : last ? (isLinked() ? 'Seal both attacks' : 'Seal the gang’s orders')
+                : (isLinked() ? `Lock in ${u.name}’s attack` : 'Lock this goblin in');
     h += `<button class="btn primary" ${orderReady()?'':'disabled'} onclick="sealFromKeyboard()">${label} — <b>Enter</b></button>`;
   }
   h += `<p class="err">${err}</p>`;
@@ -1149,6 +1268,32 @@ function gangActionLabel(m, action){
   const a = ((m && m.actions)||[]).find(x=>x.key===action.key);
   return a ? a.name : action.key;
 }
+function linkedHeaderHTML(){
+  const ms = linkedOrder(), pos = placedPos();
+  const rows = ms.map(mm => `<div class="gang-row"><b>${mm.name}</b>
+      <small>${pos[mm.entity] ? cn(pos[mm.entity]) : 'not placed yet'}</small></div>`).join('');
+  if (draft.stage!=='act'){
+    const g = linkedAt(draft.posIdx||0);
+    let h = `<div class="step">1 · Position</div>`;
+    h += g
+      ? `<p class="note">Click a highlighted square to place <b>${g.name}</b>.${
+           g.move_anchor ? ' It can only go beside the head.'
+                         : ' The tail then goes beside wherever it lands.'}</p>`
+      : `<p class="note">Both halves placed — <b>Enter</b> confirms, then each one aims.</p>`;
+    h += `<div class="gang-done">${rows}</div>`;
+    if (placedAll())
+      h += `<button class="btn primary" onclick="confirmMove()">Confirm position</button>`;
+    if (Object.keys(pos).length)
+      h += `<button class="btn" onclick="resetLinked()">Start the position again</button>`;
+    h += `<button class="btn" onclick="dropGang()">← Order a different hero instead</button>`;
+    return h;
+  }
+  let h = `<div class="step">Position · settled</div><div class="gang-done">${rows}</div>`;
+  h += `<button class="btn" onclick="resetLinked()">Change position</button>`;
+  h += `<div class="step">Attacks · ${gangOrders().length}/${ms.length}</div>`;
+  return h;
+}
+
 function gangHeaderHTML(){
   const done = gangOrders(), pending = gangPending(), all = gangMembers();
   let h = `<div class="step">Gang turn · ${done.length}/${all.length} ordered</div>`;

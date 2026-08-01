@@ -124,6 +124,10 @@ def build():
     snap("gang", m, select=m.living(LEFT)[0].id,
          full_ap=[unit(m, LEFT, "goblin_commander")])
 
+    # --- two halves of one body, positioned together before either aims -------
+    m = arena([("snake_head", (2, 2)), ("snake_tail", (2, 3))], [("dummy", (8, 3))])
+    snap("linked", m, select=unit(m, LEFT, "snake_head").id)
+
     # --- a hero with no square of its own, ready to take one ------------------
     m = arena([("ghost", (3, 3)), ("gatekeeper", (3, 1))], [("cannoneer", (7, 3)), ("dummy", (7, 1))])
     g = unit(m, LEFT, "ghost")

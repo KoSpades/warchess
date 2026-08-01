@@ -158,7 +158,7 @@ def ability_options(m, e, a, origin):
             if f:
                 yield {"cell": list(f.cell)}, 3
 
-    elif kind in ("direction", "cone", "line"):
+    elif kind in ("direction", "cone", "shape"):
         opts = t.get("options") or [d["dir"] if isinstance(d, dict) else d
                                     for d in t.get("dirs", [])]
         for d in opts:
@@ -185,10 +185,14 @@ def ability_options(m, e, a, origin):
             yield {"amount": max(1, cap // 2)}, 4
 
 
-def best_order(m, e):
-    """The order this hero should give, by a one-ply greedy score."""
+def best_order(m, e, pending=None):
+    """The order this hero should give, by a one-ply greedy score. `pending` is the
+    destinations already chosen by comrades in the same gang turn, so a body placed
+    relative to another (蛇帝's tail) is scored against where that one is going."""
     menu = m.action_menu(e)
-    dests = [None] + [tuple(c) for c in m.legal_moves(e)]
+    zone, dictated = m.move_zone(e, pending)
+    dests = [tuple(c) for c in zone] if dictated \
+        else [None] + [tuple(c) for c in m.legal_moves(e, pending)]
     best = (float("-inf"), {"destination": None, "action": {"key": "none"}})
 
     for dest in dests:
@@ -240,9 +244,14 @@ def take_turn(m, side):
         return
     actors = m.turn_actors(e)
     if m.gang_of(e) and len(actors) > 1:
-        orders = []
+        # Ranked squads act in a fixed order (蛇帝: head, then tail); unranked ones
+        # keep deployment order. Each body is scored knowing where the earlier ones
+        # are going, so two of them never claim the same square.
+        actors = sorted(actors, key=lambda g: (g.hero.gang_rank is None, g.hero.gang_rank or 0))
+        orders, pending = [], {}
         for g in actors:
-            _, p = best_order(m, g)
+            _, p = best_order(m, g, pending)
+            pending[g.id] = tuple(p["destination"]) if p["destination"] else g.cell
             orders.append(free_picks(m, g, dict(p, entity=g.id)))
         err = m.commit(side, {"orders": orders})
     else:

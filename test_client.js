@@ -23,8 +23,13 @@ const stub = () => ({
 
 function loadClient(side = 'L') {
   const sent = [];
+  // Memoised per id, so a test can read back what actually got rendered — the
+  // board's cell classes are the only place a movement preview is visible.
+  const els = {};
+  const byId = id => (els[id] = els[id] || stub());
   global.document = {
-    getElementById: stub, querySelector: () => null, querySelectorAll: () => [],
+    getElementById: byId, __els: els,
+    querySelector: () => null, querySelectorAll: () => [],
     createElement: stub, body: { classList: { add() {}, remove() {} } },
     addEventListener() {}, hidden: false,
   };
@@ -46,7 +51,7 @@ function loadClient(side = 'L') {
       render, heroDetailHTML, blankDraft, confirmMove, chooseAction, sealFromKeyboard,
       orderReady, curActions, curMoves, curChoices, canAct, clickableCell, onCell,
       laneShots, areaCells, areaAttack, plannedCell, changeMove, unitAt, myUnits,
-      sweepPreview };`;
+      sweepPreview, linkedOrder, linkedMoves, isLinked, confirmMove };`;
   const tmp = path.join(here, '.client.test.js');
   fs.writeFileSync(tmp, js + api);
   const mod = require(tmp);
@@ -64,6 +69,18 @@ const F = JSON.parse(fs.readFileSync(path.join(here, 'fixtures.json'), 'utf8'));
 const C = loadClient();
 const HOLD_FIRST = st => { C.S = st; C.err = ''; C.draft = C.blankDraft(st.commit.selected); C.confirmMove(); };
 const lastSent = () => C.sent[C.sent.length - 1];
+
+// The rendered board, cell by cell in row-major order, so a test can ask what a
+// player would actually see on a square.
+function boardCells() {
+  C.render();
+  const html = global.document.getElementById('rows').innerHTML || '';
+  const out = new Map();
+  for (const m of html.matchAll(/class="([^"]*)"[^>]*data-cell="(\d+,\d+)"/g)) out.set(m[2], m[1]);
+  return out;
+}
+const cellHas = (cell, cls) => (boardCells().get(cell.join(',')) || '').split(/\s+/).includes(cls);
+const cellsWith = cls => [...boardCells()].filter(([, v]) => v.split(/\s+/).includes(cls)).map(([k]) => k);
 
 // ------------------------------------------------- every panel must render
 
@@ -210,6 +227,84 @@ if (F.shape_blast) {
   C.sealFromKeyboard();
   ok('bomber: Enter sets it off', lastSent().payload.action.direction === 'row',
      JSON.stringify(lastSent().payload.action));
+}
+
+// ------------------------------------- 蛇帝: position the whole body, then aim
+
+if (F.linked) {
+  C.S = F.linked; C.err = ''; C.draft = C.blankDraft(F.linked.commit.selected);
+  const ms = C.linkedOrder();
+  ok('snake: head is ordered before tail', ms.map(g => g.name_en).join(',') === 'snakeHead,snakeTail',
+     ms.map(g => g.name_en).join(','));
+
+  // nothing illegal is even offered
+  let lit = 0;
+  for (let c = 1; c <= 9; c++) for (let r = 1; r <= 5; r++) if (C.clickableCell([c, r])) lit++;
+  ok('snake: only the head’s own squares are clickable first', lit > 0 && lit <= 5, `${lit} squares`);
+
+  const before = C.sent.length;
+  C.confirmMove();                       // Enter, while the body is still moving
+  ok('snake: Enter before the body is placed explains itself',
+     C.draft.stage === 'move' && C.sent.length === before && !!C.err,
+     C.err || 'moved on silently');
+
+  C.onCell(3, 2);                        // head steps east
+  ok('snake: the head takes the square', C.draft.pos[ms[0].entity] &&
+     C.draft.pos[ms[0].entity].join(',') === '3,2', JSON.stringify(C.draft.pos));
+
+  // the tail may now only go beside the head's NEW square
+  const zone = C.linkedMoves(1);
+  const beside = zone.every(([c, r]) => Math.abs(c - 3) + Math.abs(r - 2) === 1);
+  ok('snake: only squares beside the head’s destination are offered for the tail',
+     zone.length > 0 && beside, JSON.stringify(zone));
+  ok('snake: the head’s old square is among them', zone.some(([c, r]) => c === 2 && r === 2));
+  ok('snake: a square far from the head is not clickable', !C.clickableCell([7, 5]));
+  ok('snake: the old zone around the head’s START is gone',
+     !zone.some(([c, r]) => c === 1 && r === 2), JSON.stringify(zone));
+
+  // the preview must show the moment a square is picked, before anything is confirmed
+  const headUnit = () => C.myUnits().find(u => u.id === ms[0].entity);
+  const tailUnit = () => C.myUnits().find(u => u.id === ms[1].entity);
+  ok('snake: the head plans from its proposed square',
+     C.plannedCell(headUnit()).join(',') === '3,2', JSON.stringify(C.plannedCell(headUnit())));
+  ok('snake: and that square is marked on the board', cellHas([3, 2], 'dest'),
+     cellsWith('dest').join(' '));
+  ok('snake: the square it is leaving is marked as vacated',
+     cellHas([2, 2], 'movefrom'), boardCells().get('2,2'));
+
+  C.onCell(3, 1);                        // tail placed beside the head
+  ok('snake: both halves are placed', C.draft.pos[ms[1].entity].join(',') === '3,1',
+     JSON.stringify(C.draft.pos));
+  ok('snake: the tail plans from its proposed square too',
+     C.plannedCell(tailUnit()).join(',') === '3,1', JSON.stringify(C.plannedCell(tailUnit())));
+  ok('snake: both proposed squares are marked at once',
+     cellHas([3, 2], 'dest') && cellHas([3, 1], 'dest'), cellsWith('dest').join(' '));
+  ok('snake: nothing else is marked', cellsWith('dest').length === 2, cellsWith('dest').join(' '));
+
+  C.confirmMove();
+  ok('snake: confirming moves on to the attacks', C.draft.stage === 'act', String(C.draft.stage));
+  ok('snake: the head aims first', C.draft.entity === ms[0].entity);
+  ok('snake: it aims from where it will stand', C.draft.destination.join(',') === '3,2',
+     JSON.stringify(C.draft.destination));
+  ok('snake: the tail keeps its preview while the head is aiming',
+     cellHas([3, 1], 'dest') && cellHas([2, 3], 'movefrom'),
+     `dest=${cellsWith('dest').join(' ')} tailFrom=${boardCells().get('2,3')}`);
+  ok('snake: the tail plans its reach from its new square, not its old one',
+     C.plannedCell(tailUnit()).join(',') === '3,1', JSON.stringify(C.plannedCell(tailUnit())));
+
+  C.sealFromKeyboard();                  // head's attack
+  ok('snake: nothing is sent until the tail has aimed too', C.sent.length === before,
+     `${C.sent.length - before} sent`);
+  ok('snake: the tail aims next', C.draft.entity === ms[1].entity);
+  C.sealFromKeyboard();                  // tail's attack
+  const sent = lastSent();
+  ok('snake: both orders travel together, head first',
+     sent.payload.orders.map(o => o.entity).join(',') === ms.map(g => g.entity).join(','),
+     JSON.stringify(sent.payload.orders.map(o => o.entity)));
+  ok('snake: each half carries the square it was placed on',
+     sent.payload.orders[0].destination.join(',') === '3,2' &&
+     sent.payload.orders[1].destination.join(',') === '3,1',
+     JSON.stringify(sent.payload.orders.map(o => o.destination)));
 }
 
 if (F.followup) {

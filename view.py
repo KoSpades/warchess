@@ -254,6 +254,11 @@ def state_for(m, side):
                             "legal_moves": m.legal_moves(g),
                             "actions": m.action_menu(g),
                             "choices": m.turn_choices(g),
+                            # Squads that act in a fixed order say so, and a body
+                            # placed against another names it — 哥布林团伙 sends
+                            # neither, being three units that merely share a turn.
+                            "rank": g.hero.gang_rank,
+                            "move_anchor": m.move_anchor_of(g),
                         }
                         for g in m.turn_actors(e)
                     ],

@@ -141,6 +141,31 @@ class CurseTrap:
         match.freeze(ev.source, reason="咒毒")
 
 
+class Poison:
+    """A poisoned unit loses 1 at the end of every round until the doses run out
+    (蛇帝's bite). STATUS damage, so it sits where burning ground sits: 圣骑士's
+    shield neither stops it nor is spent on it, 石像鬼's stone does not blunt it
+    and a blessing does not turn it aside. Flat reduction and 增伤 still apply —
+    it is a real hit, just not one anybody swung.
+
+    Every tick of a round lands in the same instant, so two units dying of venom
+    together both die. Generic like the rest of this file: it reads a var and
+    names no hero. `poison_source` is only ever used for the log."""
+
+    @EV.hook(priority=50)
+    def on_round_end(self, match, ctx):
+        batch = []
+        for e in match.living():
+            left = e.vars.get("poison_rounds", 0)
+            if left <= 0:
+                continue
+            e.vars["poison_rounds"] = left - 1
+            batch.append(DamageEvent(source=match.entity(e.vars.get("poison_source")),
+                                     target=e, amount=1, category=STATUS))
+        if batch:
+            apply_batch(match, batch)
+
+
 class HalvingRule:
     """The gunslinger's second shot halves *after* every other modifier, so it
     sits at the very end of the pipeline rather than being folded into the
