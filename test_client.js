@@ -206,6 +206,25 @@ if (F.two_units) {
      JSON.stringify(a));
 }
 
+// ------------------------------------------------------ a pinned hero can fight
+
+if (F.rooted) {
+  const C2 = loadClient('R');
+  C2.S = F.rooted; C2.err = '';
+  C2.draft = C2.blankDraft(F.rooted.commit.selected);
+  ok('pinned: no square is offered to move to', C2.curMoves().length === 0,
+     JSON.stringify(C2.curMoves()));
+  let lit = 0;
+  for (let c = 1; c <= 9; c++) for (let r = 1; r <= 5; r++) if (C2.clickableCell([c, r])) lit++;
+  ok('pinned: the board offers it nowhere to walk', lit === 0, `${lit} squares`);
+  C2.confirmMove();
+  ok('pinned: it still gets its attack', C2.curActions().some(a => a.key === 'attack'),
+     C2.curActions().map(a => a.key).join());
+  const u = (F.rooted.units || []).find(x => x.id === F.rooted.commit.selected);
+  ok('pinned: it wears a badge saying so',
+     (u.status || []).some(x => x.key === 'rooted'), JSON.stringify((u.status||[]).map(x=>x.key)));
+}
+
 // ------------------------------------------------- frozen heroes are not offered
 
 if (F.frozen) {

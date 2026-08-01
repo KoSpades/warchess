@@ -210,6 +210,24 @@ class Possess(Ability):
         )
 
 
+class Pounce:
+    """剑齿虎 pins what it mauls: anything its normal attack draws blood from cannot
+    move on its next turn. It can still fight from where it stands."""
+
+    describe = ("Anything its normal attack hits cannot move on its next turn — it "
+                "may still attack and cast from where it stands.")
+
+    # Late in the pipeline, so it only fires on damage that actually got through.
+    @EV.hook(priority=60)
+    def on_after_damage(self, match, owner, ev):
+        if ev.source is not owner or ev.category != DMG.NORMAL_ATTACK or ev.amount <= 0:
+            return
+        if ev.target.side == owner.side:
+            return
+        match.root(ev.target)
+        match.log_line(f"{match.label(ev.target)} is pinned — no movement on its next turn.")
+
+
 class Shotgun:
     """男枪's 散弹枪. Two halves, both hung off the turn-resolved hook: a hit ramps
     its damage (to a cap), and a hit lets it reposition once the exchange has
@@ -236,7 +254,7 @@ class Shotgun:
     def followup(self, match, owner, ctx):
         if ctx.get("entity") is not owner or not ctx.get("landed"):
             return None
-        if not owner.alive or not owner.cells:
+        if not owner.alive or not owner.cells or match.rooted(owner):
             return None
         free = [c for c in match.topology.neighbours(owner.cell)
                 if match.occupant(c) is None]
@@ -1310,6 +1328,18 @@ ROSTER = [
         blurb="Frail, but the killing blow only enrages him — two untouchable turns, then dust.",
     ),
     HeroDef(
+        key="sabretooth",
+        name="剑齿虎",
+        name_en="sabretooth",
+        max_hp=22,
+        atk=5,
+        move=1,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 2, "range": 1},
+        passives=[Pounce],
+        blurb="Hits harder than anything else on the board, and whatever it mauls cannot run.",
+    ),
+    HeroDef(
         key="magician",
         name="魔术师",
         name_en="magician",
@@ -1513,7 +1543,7 @@ BY_KEY[DUMMY.key] = DUMMY
 # whenever you add heroes; --test fills the rest of your side with dummies.
 # Whoever is newest goes here — --test always deploys the hero just added, so it
 # can be played immediately. Up to two; the rest of the side is padded with dummies.
-TEST_HEROES = ["magician", "gunner"]
+TEST_HEROES = ["sabretooth", "magician"]
 
 
 
@@ -1600,6 +1630,11 @@ def status_of(match, entity):
             "private": True,      # only the side that laid the curse may see it
             "text": "The first attack or ability that damages this hero costs its "
                     "source the next two rounds.",
+        })
+    if match.rooted(entity):
+        out.append({
+            "key": "rooted", "badge": "钉", "label": "定身 PINNED",
+            "text": "Cannot move on its next turn — it can still attack and cast.",
         })
     if match.frozen(entity):
         left = match.frozen_rounds_left(entity)

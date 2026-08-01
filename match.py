@@ -137,6 +137,15 @@ class Match:
         return [e for e in self.living(side)
                 if not e.has_acted and e.flags["takes_turns"] and not self.frozen(e)]
 
+    def root(self, e):
+        """Take the movement out of this unit's next turn. It still fights — only
+        its feet are stopped. Stamped with the exchange it was applied in, so a
+        unit rooted during its own turn is pinned on the turn after, not this one."""
+        e.vars["rooted_at"] = (self.round, self.exchange)
+
+    def rooted(self, e):
+        return e.vars.get("rooted_at") is not None
+
     FREEZE_ROUNDS = 2
 
     def freeze(self, e, reason=""):
@@ -625,6 +634,11 @@ class Match:
         return True
 
     def legal_moves(self, e):
+        # A rooted unit has nowhere it may put itself. This also covers a bodiless
+        # hero's squares to appear on, since those come through here.
+        if self.rooted(e):
+            return []
+
         """Every cell reachable within the hero's move allowance, walking one step
         at a time through cells empty in the current snapshot (you cannot move
         through an occupied square). Most heroes move 1, but the budget is the
@@ -674,6 +688,8 @@ class Match:
                 continue  # a spent limited ability disappears from the menu
             if not ab.available(self, e):
                 continue  # not yet, or no longer, part of this hero\'s kit
+            if ab.self_move and self.rooted(e):
+                continue  # rooted: it cannot carry itself anywhere
             warder = self.ability_locked(e.side)
             out.append(
                 {
@@ -859,6 +875,8 @@ class Match:
                 return f"Needs {ab.ap_cost} AP."
             if ab.use_limit is not None and e.vars.get("ability_uses", {}).get(ab.key, 0) >= ab.use_limit:
                 return "That ability is spent for the match."
+            if ab.self_move and self.rooted(e):
+                return f"{e.name} cannot move this turn."
             if ab.self_move and e.cells and dest != e.cell:
                 return f"{ab.name} does the moving — leave your movement as hold."
             return self.validate_targeting(e, ab, action) or ab.validate(self, e, action)
@@ -1246,6 +1264,10 @@ class Match:
                 continue
             for e in self.turn_units(side, c):
                 e.has_acted = True
+                # A root spends itself on the turn after it lands: keep one applied
+                # during this very exchange, drop one that has now been served.
+                if e.vars.get("rooted_at") not in (None, (self.round, self.exchange)):
+                    e.vars["rooted_at"] = None
                 # Turns this unit has finished. Read at menu-build time as well as
                 # at commit, so it must not change between the two.
                 e.vars["turns_done"] = e.vars.get("turns_done", 0) + 1

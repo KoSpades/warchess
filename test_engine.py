@@ -1353,6 +1353,75 @@ slip = view.state_for(m, LEFT)["commit"]["orders"][0]
 ok("the sealed order says who is being swapped",
    gate.name in slip["target"] and d.name in slip["target"], slip["target"])
 
+# 46 — 剑齿虎: what it mauls cannot run, but can still fight
+def tiger_arena(foe="gatekeeper"):
+    m = arena([("sabretooth", (3, 3)), ("cannoneer", (3, 1))], [(foe, (7, 3)), ("dummy", (7, 1))])
+    tig = unit(m, LEFT, "sabretooth")
+    return m, tig, unit(m, RIGHT, foe), unit(m, RIGHT, "dummy")
+
+m, tig, foe, d = tiger_arena()
+foe.set_cell((4, 3))
+ok("nobody is pinned to begin with", not m.rooted(foe))
+turn(m, tig.id, {"destination": None, "action": {"key": "attack", "shots": [[[4, 3]]]}},
+     d.id, hold)
+ok("a mauled hero is pinned", m.rooted(foe))
+ok("it can still be selected and can still fight", m.legal_moves(foe) == [] and foe.alive)
+m.select_hero(RIGHT, foe.id)
+ok("moving is refused while pinned",
+   m.commit(RIGHT, {"destination": [5, 3], "action": {"key": "none"}}) is not None)
+ok("but holding and attacking is fine",
+   m.commit(RIGHT, {"destination": None,
+                    "action": {"key": "attack", "shots": [[[3, 3]]]}}) is None)
+ally = unit(m, LEFT, "cannoneer")            # the tiger has already acted this round
+m.select_hero(LEFT, ally.id); m.commit(LEFT, hold)
+while m.phase == "victim":
+    for side in (LEFT, RIGHT):
+        o = m.res["options"][side]
+        if o and m.res["picks"][side] is None:
+            m.choose_victim(side, o[0])
+ok("the pin is spent once that turn is over", not m.rooted(foe))
+ok("...and it can move again", m.legal_moves(foe) != [])
+
+# damage that is turned aside pins nobody
+m, tig, foe, d = tiger_arena("paladin")
+foe.set_cell((4, 3))
+foe.vars["aegis_spent"] = True               # its shield is already up: the claw does nothing
+before = foe.hp
+turn(m, tig.id, {"destination": None, "action": {"key": "attack", "shots": [[[4, 3]]]}},
+     d.id, hold)
+ok("a blow that is turned aside pins nobody",
+   foe.hp == before and not m.rooted(foe), f"took {before - foe.hp}, rooted={m.rooted(foe)}")
+
+# it stops ability movement too — a rooted 半人马 cannot charge
+m = arena([("sabretooth", (3, 3)), ("cannoneer", (3, 1))], [("centaur", (7, 3)), ("dummy", (7, 1))])
+tig, cen, d = unit(m, LEFT, "sabretooth"), unit(m, RIGHT, "centaur"), unit(m, RIGHT, "dummy")
+cen.set_cell((4, 3)); cen.ap = cen.max_ap
+turn(m, tig.id, {"destination": None, "action": {"key": "attack", "shots": [[[4, 3]]]}},
+     d.id, hold)
+ok("a pinned 半人马 is not offered its charge",
+   "ability:charge" not in [a["key"] for a in m.action_menu(cen)],
+   str([a["key"] for a in m.action_menu(cen)]))
+m.select_hero(RIGHT, cen.id)
+ok("...and committing one is refused",
+   m.commit(RIGHT, {"destination": None,
+                    "action": {"key": "ability:charge", "direction": "forward"}}) is not None)
+
+# but 转移 can still move it — that is somebody else doing the moving
+m = arena([("sabretooth", (3, 3)), ("magician", (3, 1))], [("gatekeeper", (7, 3)), ("dummy", (7, 1))])
+tig, mag = unit(m, LEFT, "sabretooth"), unit(m, LEFT, "magician")
+gk, d = unit(m, RIGHT, "gatekeeper"), unit(m, RIGHT, "dummy")
+mag.ap = mag.max_ap
+gk.set_cell((4, 3))
+turn(m, tig.id, {"destination": None, "action": {"key": "attack", "shots": [[[4, 3]]]}},
+     d.id, hold)
+ok("the pinned hero is still pinned", m.rooted(gk))
+was = gk.cell
+turn(m, mag.id, {"destination": None,
+                 "action": {"key": "ability:transfer", "first": gk.id, "second": d.id}},
+     gk.id, hold)
+ok("being swapped moves it anyway — that is not its own movement",
+   gk.cell != was, f"{was} -> {gk.cell}")
+
 print("\nlog tail:")
 for line in m.log[-5:]:
     print("   ", line["text"])

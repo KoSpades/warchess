@@ -120,6 +120,18 @@ def build():
     g.vars["haunting"] = unit(m, RIGHT, "cannoneer").id
     snap("ghost_ready", m, select=g.id)
 
+    # --- a hero pinned in place, but still able to fight ---------------------
+    m = arena([("sabretooth", (3, 3)), ("cannoneer", (3, 1))],
+              [("gatekeeper", (7, 3)), ("dummy", (7, 1))])
+    tig, gk, dm = unit(m, LEFT, "sabretooth"), unit(m, RIGHT, "gatekeeper"), unit(m, RIGHT, "dummy")
+    gk.set_cell((4, 3))
+    m.select_hero(LEFT, tig.id)
+    m.commit(LEFT, {"destination": None, "action": {"key": "attack", "shots": [[[4, 3]]]}})
+    m.select_hero(RIGHT, dm.id)          # the pinned one keeps its turn for the next exchange
+    m.commit(RIGHT, HOLD)
+    assert m.rooted(gk), "the fixture needs a pinned hero"
+    snap("rooted", m, side=RIGHT, select=gk.id)
+
     # --- a hero held out of the turn by an effect -----------------------------
     m = arena([("gatekeeper", (3, 1)), ("cannoneer", (3, 3))], [("dummy", (7, 3))])
     m.freeze(unit(m, LEFT, "gatekeeper"))
