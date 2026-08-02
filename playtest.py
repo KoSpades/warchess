@@ -65,8 +65,15 @@ def attack_options(m, e, a, origin):
         yield {"shots": shots}, e.atk + kill_bonus(best, e.atk)
 
     elif kind == "unit":
-        f = min(foes, key=lambda x: x.hp)
-        yield {"target": f.id}, e.atk + kill_bonus(f, e.atk)
+        want = t.get("count", 1)
+        if want > 1:
+            picked = sorted(foes, key=lambda x: x.hp)[:want]
+            if len(picked) == want:
+                yield ({"targets": [f.id for f in picked]},
+                       e.atk * want + max(kill_bonus(f, e.atk) for f in picked))
+        else:
+            f = min(foes, key=lambda x: x.hp)
+            yield {"target": f.id}, e.atk + kill_bonus(f, e.atk)
 
     elif kind == "area":
         cells = set(map(tuple, t["cells"]))
@@ -298,6 +305,11 @@ def play_teams(left, right, seed=0, verbose=False):
                         m.opening_choose(side, {"target": e.id})
                     elif t == "any_cell":
                         m.opening_choose(side, {"cell": [5, 3]})
+                    elif t == "unit":
+                        # Name the frailest enemy: the likeliest to fall first.
+                        foes = [x for x in m.living(other_side(side)) if x.cells]
+                        m.opening_choose(
+                            side, {"target": min(foes, key=lambda x: x.hp).id if foes else e.id})
                     else:
                         m.opening_choose(side, {})
         elif m.phase == "victim":
@@ -308,21 +320,51 @@ def play_teams(left, right, seed=0, verbose=False):
                 if m.res is None or m.phase != "victim":
                     break
                 opts = m.res["options"][side]
-                if opts and m.res["picks"][side] is None:
-                    weakest = min(opts, key=lambda i: m.entity(i).hp)
-                    m.choose_victim(side, weakest)
+                # A shot may want several victims (猎人 once blooded), so keep
+                # naming until it is satisfied rather than stopping after one.
+                while opts and not m.victims_complete(side) and m.phase == "victim":
+                    picked = m.res["picks"][side] or []
+                    rest = [i for i in opts if i not in picked]
+                    if not rest:
+                        break
+                    m.choose_victim(side, min(rest, key=lambda i: m.entity(i).hp))
+        elif m.phase == "move_choice":
+            for side in (LEFT, RIGHT):
+                if m.phase != "move_choice":
+                    break
+                if m.move_choices[side]:
+                    task = m.move_choices[side][0]
+                    e = m.entity(task["entity"])
+                    # Appear on the side of the mark furthest from the rest of its
+                    # friends — a crude stand-in for not landing in a crossfire.
+                    foes = enemies_of(m, e) if e else []
+                    pick = task["options"][0]
+                    if foes:
+                        pick = max(task["options"],
+                                   key=lambda c: min(m.topology.distance(tuple(c), f.cell)
+                                                     for f in foes if f.cells))
+                    m.choose_move(side, pick)
         elif m.phase == "resolved":
             for side in (LEFT, RIGHT):
                 if m.phase != "resolved":
                     break
                 if m.followups[side]:
                     task = m.followups[side][0]
-                    e = m.entity(task["entity"])
-                    f = nearest(m, e, e.cell) if e and e.cells else None
+                    # Toward the enemy: a step after a shot, or ground worth mining.
+                    # Keyed off the enemy rather than the acting unit, because a
+                    # parting shot comes from a hero that no longer has a square.
                     pick = None
-                    if f:                       # step toward whatever it just shot
-                        pick = min(task["options"],
-                                   key=lambda c: m.topology.distance(tuple(c), f.cell))
+                    if task.get("kind") == "unit":
+                        opts = [m.entity(i) for i in task["options"]]
+                        opts = [o for o in opts if o is not None and o.alive]
+                        if opts:
+                            pick = min(opts, key=lambda o: o.hp).id
+                    else:
+                        foes = [x for x in m.living(other_side(side)) if x.cells]
+                        if foes and task["options"]:
+                            pick = min(task["options"],
+                                       key=lambda c: min(m.topology.distance(tuple(c), f.cell)
+                                                         for f in foes))
                     m.choose_followup(side, pick)
         elif m.phase == "commit":
             for side in (LEFT, RIGHT):

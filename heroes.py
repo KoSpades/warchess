@@ -166,7 +166,7 @@ class Charge(Ability):
         actor.set_cell(landing)
         match.bus.emit(EV.AFTER_MOVE, {"entity": actor, "from": frm, "to": landing})
         match.log_line(
-            f"{match.label(actor)} charges {match.cell_name(frm)} → {match.cell_name(landing)}."
+            f"{match.label(actor)} charges through the line."
         )
 
 
@@ -267,6 +267,7 @@ class Shotgun:
             "text": "The shot connected — step one square now, or hold your ground.",
             "kind": "cell",
             "optional": True,
+            "anchor": list(owner.cell),
             "options": [list(c) for c in free],
         }
 
@@ -279,10 +280,7 @@ class Shotgun:
         frm = owner.cell
         owner.set_cell(cell)
         match.bus.emit(EV.AFTER_MOVE, {"entity": owner, "from": frm, "to": cell})
-        match.log_line(
-            f"{match.label(owner)} racks the slide and slides "
-            f"{match.cell_name(frm)} → {match.cell_name(cell)}."
-        )
+        match.log_line(f"{match.label(owner)} racks the slide and steps aside.")
 
     def status(self, match, owner):
         ramp = owner.vars.get("spread_ramp", 0)
@@ -352,9 +350,8 @@ class GhostForm:
         owner.hp = owner.max_hp
         match.expire_owner_modifiers(owner)      # the haunt it was holding lifts
         match.log_line(
-            f"{match.label(owner)} tears loose and takes flesh at "
-            f"{match.cell_name(ctx['to'])} with {owner.max_hp} health — "
-            f"every point of it drained."
+            f"{match.label(owner)} tears loose and takes flesh with "
+            f"{owner.max_hp} health — every point of it drained."
         )
 
     def status(self, match, owner):
@@ -544,8 +541,7 @@ class Slam(Ability):
         tgt.set_cell(cell)
         match.bus.emit(EV.AFTER_MOVE, {"entity": tgt, "from": frm, "to": cell})
         match.log_line(
-            f"{match.label(actor)} hurls {match.label(tgt)} "
-            f"{match.cell_name(frm)} → {match.cell_name(cell)}."
+            f"{match.label(actor)} hurls {match.label(tgt)} clean over its shoulder."
         )
 
 
@@ -681,8 +677,8 @@ def plant_big_bomb(match, actor, cell):
     bomb = BOARD.BigBomb(actor.side, match.round)
     match.board.add_effect(cell, bomb)
     match.log_line(
-        f"{match.label(actor)} buries a charge at {match.cell_name(cell)} — "
-        f"it goes off at the start of round {bomb.fuse_round}.",
+        f"{match.label(actor)} buries a charge — it goes off at the start of "
+        f"round {bomb.fuse_round}.",
         side=actor.side,
     )
 
@@ -726,7 +722,9 @@ class BombLayer:
                 "optional": True,
                 "options": [list(c) for c in match.topology.all_cells()],
             }
-        if not owner.alive or not owner.cells or not owner.vars.get("moved_this_turn"):
+        if not ctx.get("acted") or not owner.alive or not owner.cells:
+            return None
+        if not owner.vars.get("moved_this_turn"):
             return None
         # 空格 means empty of units — a square that already holds charges is still
         # fair game, and they pile up.
@@ -741,6 +739,7 @@ class BombLayer:
                     "or keep it. 3 damage to the first enemy that steps there.",
             "kind": "cell",
             "optional": True,
+            "anchor": list(owner.cell),
             "options": [list(c) for c in free],
         }
 
@@ -756,9 +755,98 @@ class BombLayer:
                 return
             match.board.add_effect(cell, BOARD.SmallBomb(owner.side))
             match.log_line(
-                f"{match.label(owner)} drops a small charge at {match.cell_name(cell)}.",
+                f"{match.label(owner)} drops a small charge.",
                 side=owner.side,
             )
+
+
+class Garrote(Ability):
+    """刺客's 封喉. The order names a hero, not a square — the blink resolves once
+    everybody has finished moving, so the mark cannot walk away from it. Same
+    promise 雷霆龙's and 雾女's unit-locked attacks make.
+
+    Which square it appears on is the player's to pick, but it cannot be picked
+    when the order is sealed — the mark may not be standing where it was. So the
+    choice is offered during resolution, once everybody has stopped moving and the
+    free squares beside the mark are actually known."""
+
+    key = "garrote"
+    name = "封喉 Garrote"
+    ap_cost = 2
+    self_move = True
+    targeting = {"kind": "unit"}
+    blurb = ("Blink to a square beside any one enemy, anywhere on the board, and cut "
+             "it. It resolves after everyone has moved, so the mark cannot dodge — but "
+             "if all four squares around it are taken there is nowhere to appear.")
+
+    @staticmethod
+    def landings(match, actor, params):
+        """Every square it could appear on — the free orthogonals of the mark, read
+        from wherever the mark actually ended up."""
+        tgt = match.entity(params.get("target"))
+        if tgt is None or not tgt.alive or not tgt.cells:
+            return []
+        return [c for c in match.topology.neighbours(tgt.cell)
+                if match.occupant(c) is None]
+
+    def move_choice(self, match, actor, params):
+        """Offered mid-resolution: movement is over, so these squares are real."""
+        if not actor.alive or not actor.cells:
+            return None
+        free = self.landings(match, actor, params)
+        if not free:
+            return None
+        tgt = match.entity(params.get("target"))
+        return {
+            "key": self.key,
+            "name": self.name,
+            "text": f"Choose where to appear beside {tgt.name}.",
+            "kind": "cell",
+            "anchor": list(tgt.cell),
+            "options": [list(c) for c in free],
+        }
+
+    def validate(self, match, actor, params):
+        t = match.entity(params.get("target"))
+        if t is None or not t.alive or t.side == actor.side:
+            return "Choose a living enemy."
+        return None
+
+    def move_effects(self, match, actor, params):
+        """With movement, after every ordinary move has landed — which is exactly
+        what lets it follow a mark that ran."""
+        tgt = match.entity(params.get("target"))
+        actor.vars["garrote_target"] = None
+        if tgt is None or not tgt.alive or not actor.alive or not actor.cells:
+            return
+        free = self.landings(match, actor, params)
+        cell = match.move_picks.get(actor.id)
+        if cell not in free:
+            # No pick to honour: either the mark is hemmed in, or the one square
+            # on offer was taken silently because there was nothing to decide.
+            cell = free[0] if len(free) == 1 else None
+        if cell is None:
+            match.log_line(
+                f"{match.label(actor)} finds no way in — {match.label(tgt)} is "
+                f"hemmed in on every side."
+            )
+            return
+        frm = actor.cell
+        actor.set_cell(cell)
+        actor.vars["garrote_target"] = tgt.id
+        # A real move, so anything watching movement sees it — a mine under the
+        # square it picks goes off exactly as it would for a hero that walked there.
+        match.bus.emit(EV.AFTER_MOVE, {"entity": actor, "from": frm, "to": cell})
+        match.log_line(
+            f"{match.label(actor)} is gone, and standing over {match.label(tgt)}."
+        )
+
+    def build_damage(self, match, actor, params):
+        tgt = match.entity(actor.vars.pop("garrote_target", None))
+        if tgt is None or not tgt.alive or not actor.alive:
+            return []      # nowhere to appear, so no throat to cut
+        return [DMG.DamageEvent(source=actor, target=tgt, amount=actor.atk,
+                                category=DMG.NORMAL_ATTACK)]
 
 
 class Recurse(Ability):
@@ -949,7 +1037,7 @@ class Ignite(Ability):
         cell = tuple(params["cell"])
         tile = match.board.add_burning(cell, actor.side)
         match.log_line(
-            f"{match.label(actor)} ignites {match.cell_name(cell)} "
+            f"{match.label(actor)} sets the ground alight "
             f"(now x{tile.stacks}, {tile.damage} fire)."
         )
 
@@ -1126,9 +1214,11 @@ class Regrowth:
     def on_turn_start(self, match, owner, ctx):
         if ctx.get("entity") is not owner or not owner.alive:
             return
+        # One creature, one mend: 蛇帝's two halves share a pool and must not be
+        # healed once each.
         total = sum(
             DMG.heal(match, e, 1, source=owner)
-            for e in match.living() if e.side == owner.side
+            for e in match.bodies(owner.side)
         )
         if total:
             match.log_line(f"{match.label(owner)}'s blessing restores the line (+1 to each ally).")
@@ -1325,24 +1415,18 @@ class SerpentBody:
     describe = ("Head and tail are one 25 HP body across two adjacent squares. A blow "
                 "to either wounds the whole snake, and both fall together.")
 
-    # Earliest slot in the pipeline, so every rule after it — wards, guards, 增伤,
-    # the lot — reads the head as the thing being hit.
-    @EV.hook(priority=5)
-    def on_before_damage(self, match, owner, ev):
-        if ev.target is not owner or owner.key != SNAKE_TAIL:
-            return
-        head = _other_half(match, owner, SNAKE_HEAD)
-        if head is not None and head.alive:
-            ev.target = head
-
     @EV.hook(priority=95)
     def on_after_damage(self, match, owner, ev):
         self._mirror(match, owner)
 
     def on_match_start(self, match, owner, ctx):
         if owner.key == SNAKE_TAIL:
-            # One hero, not two: the tail is a body on the board, never a life to take.
+            # One hero, not two: the tail is a body on the board, never a life to take,
+            # and every wound and mend it receives belongs to the head.
             owner.flags["counts_for_defeat"] = False
+            head = _other_half(match, owner, SNAKE_HEAD)
+            if head is not None:
+                owner.vars["pool_holder"] = head.id
         self._mirror(match, owner)
 
     def on_turn_start(self, match, owner, ctx):
@@ -1451,6 +1535,266 @@ class PincerStrike:
         if head is None or ev.target.id not in head.vars.get("bit_this_turn", set()):
             return
         ev.amount += self.BONUS
+
+
+def read_the_omen(match, seer, target):
+    """Lay the prophecy on one enemy. What it does grows with the stars already
+    read: a mark it can never shake, then its feet, then a quarter of its life.
+    The mark and the binding are the engine's own — a `vulnerable` stack and a
+    hold — so nothing here is special-cased anywhere else."""
+    if target is None or not target.alive or target.side == seer.side:
+        return
+    stars = seer.vars.get("stars", 0)
+    # The last reading lifts: whoever it named is let go, mark and all but the 增伤,
+    # which is permanent like every other one.
+    old = match.entity(seer.vars.get("prediction")) if seer.vars.get("prediction") else None
+    if old is not None and old.vars.get("bound_by") == seer.id:
+        old.vars["bound_by"] = None
+    seer.vars["prediction"] = target.id
+    seer.vars["reading_due"] = False
+    target.vars["vulnerable"] = target.vars.get("vulnerable", 0) + 1
+    parts = ["1 增伤"]
+    if stars >= 1:
+        target.vars["bound_by"] = seer.id
+        parts.append("held where it stands")
+    if stars >= 2:
+        # 血量失去 — a loss, not a blow: no ward, guard or mark touches it, and it
+        # can never be the thing that kills (a quarter is never the whole).
+        lost = target.max_hp // 4
+        if lost:
+            target.hp = max(1, target.hp - lost)
+            parts.append(f"{lost} life torn out of it")
+    name = StarSign.OMENS[min(stars, 2)]
+    match.log_line(
+        f"{match.label(seer)} reads {name} over {match.label(target)} — "
+        + ", ".join(parts) + "."
+    )
+
+
+class Prophecy(Ability):
+    """占星师's opening reading. Every later one comes free when an enemy falls."""
+
+    key = "prophecy"
+    name = "预言 Prophecy"
+    ap_cost = 0
+    use_limit = 1
+    opening = True
+    targeting = {"kind": "unit"}
+    blurb = ("Before the first exchange, name the enemy you expect to fall first. "
+             "Name it right and you read a star; every star makes the next prophecy "
+             "worse for whoever it lands on.")
+
+    def side_effects(self, match, actor, params):
+        read_the_omen(match, actor, match.entity(params.get("target")))
+
+
+class StarSign:
+    """占星师. Names the enemy it expects to fall next. If that one does fall, it
+    reads another star and the next prophecy bites harder. A wrong call costs
+    nothing — the stars only ever go up."""
+
+    describe = ("Names the enemy it expects to fall next, at the start and again "
+                "whenever an enemy dies. Right calls earn stars: 0 — the named hero "
+                "takes 1 more from everything. 1 — it is also held where it stands. "
+                "2+ — and a quarter of its maximum life is torn out at once.")
+    OMENS = ["疑云 Doubt", "凶兆 Ill Omen", "大祸 Catastrophe"]
+
+    def on_death(self, match, owner, ctx):
+        dead = ctx.get("entity")
+        if dead is None or dead.side == owner.side or not owner.alive:
+            return
+        if owner.vars.get("prediction") == dead.id:
+            owner.vars["stars"] = owner.vars.get("stars", 0) + 1
+            match.log_line(
+                f"{match.label(owner)} called it — {match.label(dead)} falls, and "
+                f"a {owner.vars['stars']}{'st' if owner.vars['stars'] == 1 else 'th'} "
+                f"star is read."
+            )
+        # Any enemy falling calls for a new reading, but the old one is left standing
+        # until that reading is made: two heroes dying in the same instant are both
+        # measured against it, whichever order the board sweeps them in.
+        owner.vars["reading_due"] = True
+
+    def followup(self, match, owner, ctx):
+        """Offered the moment the board settles with no prophecy standing."""
+        if ctx.get("entity") is not owner or not owner.alive:
+            return None
+        if owner.vars.get("prediction") and not owner.vars.get("reading_due"):
+            return None
+        foes = [e for e in match.living(other_side(owner.side))
+                if e.flags["counts_for_defeat"] and e.flags["targetable"]]
+        if not foes:
+            return None
+        stars = owner.vars.get("stars", 0)
+        return {
+            "key": "prophecy",
+            "name": self.OMENS[min(stars, 2)],
+            "text": f"{stars} star{'' if stars == 1 else 's'} read. Name the enemy you "
+                    f"expect to fall next.",
+            "kind": "unit",
+            "options": [e.id for e in foes],
+        }
+
+    def apply_followup(self, match, owner, key, choice):
+        if key == "prophecy" and choice is not None:
+            read_the_omen(match, owner, match.entity(choice))
+
+    def status(self, match, owner):
+        stars = owner.vars.get("stars", 0)
+        tgt = match.entity(owner.vars.get("prediction")) if owner.vars.get("prediction") else None
+        return {
+            "key": "stars", "badge": f"星{stars}", "label": "星标记 STARS",
+            "text": (f"{stars} star{'' if stars == 1 else 's'} read — next prophecy is "
+                     f"{self.OMENS[min(stars, 2)]}."
+                     + (f" Watching {tgt.name}." if tgt is not None and tgt.alive
+                        else " Nobody named.")),
+        }
+
+
+class FourBeasts:
+    """四圣兽. Four squares carry a blessing, each given once and kept for good. The
+    squares are read off the topology rather than written down, so a board of
+    another shape still has all four in the right places.
+
+    Two are fixed to the board (the middle of the top and bottom rows) and two are
+    side-relative (the middle of your own back line, and of theirs) — so the Tiger
+    is always the hardest of the four to reach."""
+
+    describe = ("Four squares bless it, once each and for good. 青龙, the middle of "
+                "your own back line: heal 1 at the start of every turn. 玄武, the "
+                "middle of the top row: heal 3, +3 maximum health, and −1 to all "
+                "damage taken. 朱雀, the middle of the bottom row: its attacks set "
+                "the ground under the target alight. 白虎, the middle of the enemy "
+                "back line: +2 attack, and it strikes two enemies instead of one.")
+    NAMES = {"dragon": "青龙 Dragon", "turtle": "玄武 Turtle",
+             "phoenix": "朱雀 Phoenix", "tiger": "白虎 Tiger"}
+
+    @staticmethod
+    def shrines(match, owner):
+        """cell -> beast, from this hero's point of view."""
+        t = match.topology
+        mid_row, mid_col = (t.rows + 1) // 2, (t.cols + 1) // 2
+        own = sorted({c for c, _ in t.deployment_zone(owner.side)})
+        foe = sorted({c for c, _ in t.deployment_zone(other_side(owner.side))})
+        return {
+            (own[len(own) // 2], mid_row): "dragon",
+            (mid_col, 1): "turtle",
+            (mid_col, t.rows): "phoenix",
+            (foe[len(foe) // 2], mid_row): "tiger",
+        }
+
+    def held(self, owner):
+        return owner.vars.setdefault("beasts", set())
+
+    # Standing on one is enough, so a hero deployed straight onto its own back
+    # line has the Dragon from the first exchange.
+    def on_match_start(self, match, owner, ctx):
+        self._touch(match, owner)
+
+    def on_after_move(self, match, owner, ctx):
+        if ctx.get("entity") is owner:
+            self._touch(match, owner)
+
+    def _touch(self, match, owner):
+        if not owner.alive or not owner.cells:
+            return
+        beast = self.shrines(match, owner).get(owner.cell)
+        if beast is None or beast in self.held(owner):
+            return
+        self.held(owner).add(beast)
+        getattr(self, "_" + beast)(match, owner)
+
+    def _dragon(self, match, owner):
+        match.log_line(f"{match.label(owner)} wakes 青龙 — it mends 1 every turn from here.")
+
+    def _turtle(self, match, owner):
+        owner.max_hp += 3
+        healed = DMG.heal(match, owner, 3, source=owner)
+        owner.vars["damage_reduction"] = owner.vars.get("damage_reduction", 0) + 1
+        match.log_line(
+            f"{match.label(owner)} wakes 玄武 — {owner.hp}/{owner.max_hp} health "
+            f"(+{healed}) and 1 less from every hit."
+        )
+
+    def _phoenix(self, match, owner):
+        match.log_line(f"{match.label(owner)} wakes 朱雀 — what it strikes now burns.")
+
+    def _tiger(self, match, owner):
+        owner.add_modifier(Modifier("atk", "add", 2, source=self))
+        owner.add_modifier(Modifier("targets", "add", 1, source=self))
+        match.log_line(
+            f"{match.label(owner)} wakes 白虎 — Atk {owner.atk}, and it takes "
+            f"{owner.targets} at a time."
+        )
+
+    def on_turn_start(self, match, owner, ctx):
+        if ctx.get("entity") is not owner or "dragon" not in self.held(owner):
+            return
+        if DMG.heal(match, owner, 1, source=owner):
+            match.log_line(f"{match.label(owner)} mends — 青龙 keeps it whole.", quiet=True)
+
+    # Late, so only a blow that actually landed lights the ground.
+    @EV.hook(priority=60)
+    def on_after_damage(self, match, owner, ev):
+        if ev.source is not owner or ev.category != DMG.NORMAL_ATTACK or ev.amount <= 0:
+            return
+        if "phoenix" not in self.held(owner) or ev.target.side == owner.side:
+            return
+        if not ev.target.cells:
+            return
+        tile = match.board.add_burning(ev.target.cell, owner.side)
+        match.log_line(
+            f"朱雀's fire takes the ground under {match.label(ev.target)} "
+            f"(now x{tile.stacks}, {tile.damage} fire)."
+        )
+
+    def status(self, match, owner):
+        got = self.held(owner)
+        if not got:
+            return None
+        return {
+            "key": "beasts", "badge": f"圣{len(got)}", "label": "四圣兽 AWAKENED",
+            "text": " · ".join(self.NAMES[b] for b in
+                               ("dragon", "turtle", "phoenix", "tiger") if b in got),
+        }
+
+
+class FirstBlood:
+    """猎人. The first kill it lands opens its eye: its reach lengthens and its net
+    catches two enemies instead of one, for the rest of the match. Once only — a
+    second kill changes nothing.
+
+    Both halves are ordinary modifiers on the stack, so nothing in the attack code
+    knows about this hero: `rng` and `targets` are read live like any other stat."""
+
+    describe = ("The first time it kills an enemy: +4 attack range, and its normal "
+                "attack hits two enemies in its net instead of one. Once per match.")
+    RNG = 4
+    EXTRA_TARGETS = 1
+
+    # After the flat cuts and caps, so it only counts a blow that really landed.
+    @EV.hook(priority=70)
+    def on_after_damage(self, match, owner, ev):
+        if ev.source is not owner or owner.vars.get("first_blood"):
+            return
+        if ev.target.side == owner.side or ev.target.hp > 0:
+            return      # runs before the dead are swept, so hp 0 is the killing blow
+        owner.vars["first_blood"] = True
+        owner.add_modifier(Modifier("rng", "add", self.RNG, source=self))
+        owner.add_modifier(Modifier("targets", "add", self.EXTRA_TARGETS, source=self))
+        match.log_line(
+            f"{match.label(owner)} takes its first kill — reach now {owner.rng}, "
+            f"and its net catches {owner.targets} at once."
+        )
+
+    def status(self, match, owner):
+        if not owner.vars.get("first_blood"):
+            return None
+        return {
+            "key": "blooded", "badge": "猎", "label": "首杀 BLOODED",
+            "text": f"Reach {owner.rng}, and its attack hits {owner.targets} enemies "
+                    f"in its net instead of one.",
+        }
 
 
 class GangTactics:
@@ -1864,7 +2208,7 @@ ROSTER = [
         name="大力士",
         name_en="strongman",
         max_hp=20,
-        atk=2,
+        atk=3,
         move=1,
         max_ap=2,
         attack={"mode": CELL, "cells": 2, "range": 2},
@@ -2040,10 +2384,59 @@ ROSTER = [
         blurb="Keeps nothing for himself — every turn, an ally leaves with an extra point.",
     ),
     HeroDef(
+        key="four_beasts",
+        name="四圣兽",
+        name_en="fourBeasts",
+        max_hp=12,
+        atk=2,
+        move=1,
+        max_ap=0,
+        attack={"mode": UNIT, "range": None},
+        passives=[FourBeasts],
+        blurb="Four squares on the board wake something in it. Reaching all four takes the whole match.",
+    ),
+    HeroDef(
+        key="astrologer",
+        name="占星师",
+        name_en="astrologer",
+        max_hp=14,
+        atk=2,
+        move=1,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 3, "range": 4},
+        abilities=[Prophecy()],
+        passives=[StarSign],
+        blurb="Names who dies next. The more often it is right, the worse being named becomes.",
+    ),
+    HeroDef(
+        key="hunter",
+        name="猎人",
+        name_en="hunter",
+        max_hp=14,
+        atk=3,
+        move=1,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 3, "range": 2},
+        passives=[FirstBlood],
+        blurb="One kill is all it needs — then it sees further and takes two at a time.",
+    ),
+    HeroDef(
+        key="assassin",
+        name="刺客",
+        name_en="assassin",
+        max_hp=14,
+        atk=5,
+        move=1,
+        max_ap=2,
+        attack={"mode": CELL, "cells": 2, "range": 1},
+        abilities=[Garrote()],
+        blurb="Nowhere on the board is out of reach, and what it reaches it cuts.",
+    ),
+    HeroDef(
         key="diver",
         name="潜水者",
         name_en="diver",
-        max_hp=8,
+        max_hp=10,
         atk=2,
         move=2,
         max_ap=0,
@@ -2169,7 +2562,7 @@ BY_KEY[DUMMY.key] = DUMMY
 # whenever you add heroes; --test fills the rest of your side with dummies.
 # Whoever is newest goes here — --test always deploys the hero just added, so it
 # can be played immediately. Up to two; the rest of the side is padded with dummies.
-TEST_HEROES = ["snake_emperor", "diver"]
+TEST_HEROES = ["astrologer", "four_beasts"]
 
 
 
@@ -2278,7 +2671,13 @@ def status_of(match, entity):
             "text": f"Takes {n} more from every hit — attacks, abilities and "
                     f"burning ground alike. It does not wear off.",
         })
-    if match.rooted(entity):
+    if match.bound(entity):
+        out.append({
+            "key": "bound", "badge": "缚", "label": "束缚 BOUND",
+            "text": "Held where it stands for as long as whoever holds it lives — "
+                    "it can still attack and cast.",
+        })
+    elif match.rooted(entity):
         out.append({
             "key": "rooted", "badge": "钉", "label": "定身 PINNED",
             "text": "Cannot move on its next turn — it can still attack and cast.",

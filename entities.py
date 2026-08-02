@@ -83,6 +83,11 @@ class Entity:
         # attacks, which have no finite range.
         if name == "rng":
             return self.hero.attack.get("range")
+        if name == "targets":
+            # How many enemies one cell-locked attack may hit out of those standing
+            # in its net. Same story as rng and grid: it lives in the `attack` dict
+            # but must ride the modifier stack (猎人 widens it on its first kill).
+            return self.hero.attack.get("targets", 1)
         if name == "grid":
             # How many cells a cell-locked attack may mark. Same story as rng:
             # it lives in the `attack` dict but must be modifiable (狼人 trades
@@ -126,12 +131,20 @@ class Entity:
 
     @property
     def rng(self):
-        return self.stat("rng")
+        # Floored like `grid`: reach is stacked into by several effects at once
+        # (大雾 down to 1, then 野兽化's −2) and a negative reach makes every square
+        # fail its range check, leaving the hero unable to attack at all.
+        n = self.stat("rng")
+        return None if n is None else max(0, n)
 
     @property
     def grid(self):
         n = self.stat("grid")
         return None if n is None else max(0, n)
+
+    @property
+    def targets(self):
+        return max(1, self.stat("targets") or 1)
 
     @property
     def move_allowance(self):

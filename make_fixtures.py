@@ -10,6 +10,7 @@ import json
 
 import board
 import view
+from entities import Modifier
 from match import Match
 from topology import LEFT, RIGHT
 
@@ -127,6 +128,13 @@ def build():
     snap("gang", m, select=m.living(LEFT)[0].id,
          full_ap=[unit(m, LEFT, "goblin_commander")])
 
+    # --- a unit attack that names two heroes rather than one ------------------
+    m = arena([("four_beasts", (3, 3))], [("dummy", (7, 3)), ("gatekeeper", (7, 1))])
+    fb = unit(m, LEFT, "four_beasts")
+    fb.vars["beasts"] = {"tiger"}
+    fb.add_modifier(Modifier("targets", "add", 1))
+    snap("two_named", m, select=fb.id)
+
     # --- buried charges: the same board seen from both sides ------------------
     m = arena([("diver", (3, 3))], [("gatekeeper", (7, 3))])
     dv = unit(m, LEFT, "diver")
@@ -172,6 +180,18 @@ def build():
     m.place(LEFT, "forest_child", (3, 3)); m.place(RIGHT, "dummy", (7, 3))
     m.lock_force(LEFT); m.lock_force(RIGHT)
     out["opening"] = view.state_for(m, LEFT)
+
+    # An opening that names an enemy (占星师's prophecy).
+    m = Match(); m.assign_draft(["astrologer"], ["dummy"])
+    m.place(LEFT, "astrologer", (3, 3)); m.place(RIGHT, "dummy", (7, 3))
+    m.lock_force(LEFT); m.lock_force(RIGHT)
+    out["opening_unit"] = view.state_for(m, LEFT)
+
+    # An opening that wants a square rather than an ally (潜水者's buried charge).
+    m = Match(); m.assign_draft(["diver"], ["dummy"])
+    m.place(LEFT, "diver", (3, 3)); m.place(RIGHT, "dummy", (7, 3))
+    m.lock_force(LEFT); m.lock_force(RIGHT)
+    out["opening_cell"] = view.state_for(m, LEFT)
 
     m = arena([("gatekeeper", (3, 1))], [("dummy", (7, 3))])
     m.select_hero(LEFT, m.living(LEFT)[0].id)

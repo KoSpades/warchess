@@ -43,8 +43,11 @@ class CellLockedAttack(ActionInstance):
 
     needs_pick = True
 
-    def __init__(self, attacker, cells, intended_origin, halve=False, index=0, amount=None):
+    def __init__(self, attacker, cells, intended_origin, halve=False, index=0, amount=None,
+                 max_victims=1):
         self.attacker = attacker
+        # How many of the enemies standing in the net this shot may hit.
+        self.max_victims = max(1, max_victims)
         self.actor = attacker
         self.committed_cells = [tuple(c) for c in cells]
         self.intended_origin = tuple(intended_origin)
@@ -233,22 +236,28 @@ class UnitLockedAttack(ActionInstance):
     def __init__(self, attacker, target, index=0):
         self.attacker = attacker
         self.actor = attacker
-        self.target = target
+        # One or several named heroes, all struck in the same instant (四圣兽 with
+        # the Tiger). A single target is just the one-element case.
+        self.targets = [t for t in (target if isinstance(target, list) else [target]) if t]
         self.index = index
+
+    @property
+    def target(self):
+        return self.targets[0] if self.targets else None
 
     def eligible_victims(self, match):
         return None
 
     def build_damage(self, match, victim):
-        if self.target is None or not self.target.alive:
-            return []
         return [
             DMG.DamageEvent(
                 source=self.attacker,
-                target=self.target,
+                target=t,
                 amount=self.attacker.atk,
                 category=DMG.NORMAL_ATTACK,
             )
+            for t in self.targets
+            if t is not None and t.alive
         ]
 
 

@@ -18,13 +18,17 @@ from board import Board, Minefield
 from entities import Entity, UNTIL_OWNER_NEXT_TURN, UNTIL_TURN_END
 from topology import LEFT, RIGHT, Topology, other_side
 
-COLUMN_LETTERS = "ABCDEFGHI"
 
 DRAFT = "draft"
 SETUP = "setup"
 OPENING = "opening"
 COMMIT = "commit"
 VICTIM = "victim"
+# Everyone has finished moving but no attack has been worked out yet, and an
+# ability wants the player to choose where it puts somebody (刺客's 封喉 picking
+# which square beside its mark to appear on). The choice cannot be made when the
+# order is sealed, because it depends on where the mark ended up.
+MOVE_CHOICE = "move_choice"
 # A turn has fully resolved and something wants to act on the outcome before the
 # next pair is picked (男枪 stepping after a hit). Only entered if a follow-up
 # actually needs a decision.
@@ -50,7 +54,8 @@ class Match:
         self.topology = Topology()
         self.board = Board(self.topology)
         self.bus = EV.EventBus(self)
-        self.global_rules = [DMG.AbilityImmunity(), DMG.Blessing(), DMG.OutgoingShift(),
+        self.global_rules = [DMG.SharedPool(), DMG.AbilityImmunity(), DMG.Blessing(),
+                             DMG.OutgoingShift(),
                              DMG.Vulnerability(), DMG.FlatReduction(), DMG.CurseTrap(),
                              DMG.Poison(), DMG.HalvingRule(), Minefield()]
         # Damage from the board itself, banked as it is triggered so a whole
@@ -59,6 +64,8 @@ class Match:
         # Units that died during the exchange being resolved. They are gone from
         # the board but may still owe the player a parting decision.
         self.recent_deaths = []
+        self.move_choices = {LEFT: [], RIGHT: []}
+        self.move_picks = {}
 
         self.entities = []
         self._ids = itertools.count(1)
@@ -111,10 +118,6 @@ class Match:
         """Both sides can field the same hero, so log lines must say whose."""
         return ("Left " if e.side == LEFT else "Right ") + e.name
 
-    def cell_name(self, cell):
-        c, r = cell
-        return f"{COLUMN_LETTERS[c - 1]}{r}"
-
     def log_line(self, text, quiet=False, side=None):
         """`side` scopes a line to one seat — hidden information (诅咒娃娃 choosing
         whom to curse) must not appear in the opponent's field log."""
@@ -127,6 +130,12 @@ class Match:
             for e in self.entities
             if e.alive and (side is None or e.side == side)
         ]
+
+    def bodies(self, side=None):
+        """Living units counted once per creature: a body whose health lives on
+        another (蛇帝's tail) is not a second thing to heal. Anything that acts on
+        "every ally's health" should walk this rather than `living`."""
+        return [e for e in self.living(side) if DMG.pool_holder(self, e) is None]
 
     def entity(self, eid):
         for e in self.entities:
@@ -151,7 +160,15 @@ class Match:
         e.vars["rooted_at"] = (self.round, self.exchange)
 
     def rooted(self, e):
-        return e.vars.get("rooted_at") is not None
+        return e.vars.get("rooted_at") is not None or self.bound(e)
+
+    def bound(self, e):
+        """Held in place for as long as somebody keeps holding it — 占星师's prophecy,
+        which lasts while the seer lives rather than expiring on a turn. Checked
+        lazily like the ability lock: a prophecy whose seer has fallen is no
+        prophecy."""
+        holder = self.entity(e.vars.get("bound_by")) if e.vars.get("bound_by") else None
+        return holder is not None and holder.alive
 
     FREEZE_ROUNDS = 1
 
@@ -513,7 +530,7 @@ class Match:
             fn = getattr(eff, "detonate", None)
             events = fn(self, cell) if fn else []
             self.board.remove_effect(cell, eff)
-            self.log_line(f"{self.cell_name(cell)} goes up — {eff.describe()}.")
+            self.log_line(f"A buried charge goes up — {eff.describe()}.")
             batch.extend(events)
         if batch:
             DMG.apply_batch(self, batch)
@@ -540,6 +557,9 @@ class Match:
         self.followups = {LEFT: [], RIGHT: []}
         self.recent_deaths = []
         self.pending_hazards = []
+        # Squares an ability is waiting on, and the ones already chosen.
+        self.move_choices = {LEFT: [], RIGHT: []}
+        self.move_picks = {}
         self.take_snapshot()
 
         # A side with nobody left to act sits the exchange out; the other side
@@ -1105,6 +1125,59 @@ class Match:
         self.last_reveal = reveal
 
         self.apply_movement(movers)
+        # An ability may want the player to say where it lands, now that everyone
+        # has stopped moving. If anything does, resolution pauses here and picks up
+        # in `_resolve_after_moves` once the choices are in.
+        if self.collect_move_choices():
+            self.phase = MOVE_CHOICE
+            self.bump()
+            return
+        self._resolve_after_moves()
+
+    def collect_move_choices(self):
+        """Ask every acting ability whether it needs a square chosen. A choice with
+        only one square left is taken silently — there is nothing to decide."""
+        self.move_choices = {LEFT: [], RIGHT: []}
+        for side in (LEFT, RIGHT):
+            for o in self.orders_of(self.commits[side]):
+                key = (o.get("action") or {}).get("key", "none")
+                if not key.startswith("ability:"):
+                    continue
+                e = self.entity(o["entity"])
+                if e is None or not e.alive:
+                    continue
+                ab = next((a for a in e.abilities if a.key == key.split(":", 1)[1]), None)
+                fn = getattr(ab, "move_choice", None)
+                task = fn(self, e, o["action"]) if fn else None
+                opts = (task or {}).get("options") or []
+                if not opts:
+                    continue
+                if len(opts) == 1:
+                    self.move_picks[e.id] = tuple(opts[0])
+                    continue
+                self.move_choices[side].append(dict(task, entity=e.id))
+        return any(self.move_choices.values())
+
+    def choose_move(self, side, cell):
+        """Answer the first movement choice pending for this side."""
+        if self.phase != MOVE_CHOICE:
+            return "Nothing to decide."
+        pend = self.move_choices[side]
+        if not pend:
+            return "Nothing pending for you."
+        task = pend[0]
+        if cell is None or list(cell) not in task["options"]:
+            return "Not one of the squares on offer."
+        self.move_picks[task["entity"]] = tuple(cell)
+        pend.pop(0)
+        self.bump()
+        if not any(self.move_choices.values()):
+            self._resolve_after_moves()
+        return None
+
+    def _resolve_after_moves(self):
+        """Everything from the end of movement to the first blow. Split out so the
+        pause for a movement choice can pick up exactly where it left off."""
         self.apply_move_effects()
         # Anything the board did to whoever walked onto it. Applied as one batch
         # once every unit has finished moving, so mines under two movers land in
@@ -1175,19 +1248,17 @@ class Match:
             for e in units:
                 if e is not winner:
                     self.log_line(
-                        f"{self.label(e)} is shouldered out of {self.cell_name(d)} "
-                        f"by {self.label(winner)} — no movement."
+                        f"{self.label(e)} is shouldered aside by "
+                        f"{self.label(winner)} — no movement."
                     )
             if self.occupant(d) is not None:
-                self.log_line(f"{self.label(winner)} is blocked at {self.cell_name(d)} — no movement.")
+                self.log_line(f"{self.label(winner)} is blocked — no movement.")
                 continue
             frm = winner.cell
             winner.set_cell(d)
             self.bus.emit(EV.AFTER_MOVE, {"entity": winner, "from": frm, "to": d})
             if frm is not None:     # a mover with no origin has just taken flesh
-                self.log_line(
-                    f"{self.label(winner)} moves {self.cell_name(frm)} → {self.cell_name(d)}."
-                )
+                self.log_line(f"{self.label(winner)} moves.")
 
     def build_instances(self, e, commit):
         action = commit["action"]
@@ -1234,16 +1305,18 @@ class Match:
                 if inst is None or not inst.needs_pick:
                     res["options"][side] = []
                     continue
-                if res["picks"][side] is not None:
+                if self.victims_complete(side):
                     continue
                 opts = inst.eligible_victims(self)
                 res["options"][side] = [o.id for o in opts]
+                want = min(getattr(inst, "max_victims", 1), len(opts))
                 if len(opts) == 0:
-                    res["picks"][side] = "none"
-                    cells = ", ".join(self.cell_name(c) for c in inst.resolved_cells(self))
-                    self.log_line(f"{self.label(inst.attacker)} fires at {cells} — nobody there.")
-                elif len(opts) == 1:
-                    res["picks"][side] = opts[0].id
+                    res["picks"][side] = []
+                    self.log_line(f"{self.label(inst.attacker)} fires — nobody there.")
+                elif len(opts) <= want:
+                    # No more enemies in the net than the shot can hit: they all take
+                    # it and there is nothing to decide.
+                    res["picks"][side] = [o.id for o in opts]
                 else:
                     waiting = True
 
@@ -1258,10 +1331,13 @@ class Match:
                 if inst is None:
                     continue
                 pick = res["picks"][side]
-                victim = self.entity(pick) if isinstance(pick, int) else None
-                events = inst.build_damage(self, victim)
-                for ev in events:
-                    batch.append((side, inst, ev))
+                # One instance can hit several victims (猎人 after its first kill),
+                # so damage is built once per victim and all of it lands together.
+                victims = ([self.entity(p) for p in pick]
+                           if isinstance(pick, list) else [None])
+                for victim in victims:
+                    for ev in inst.build_damage(self, victim):
+                        batch.append((side, inst, ev))
             # Apply every hit of this instant, but do NOT resolve deaths yet: an
             # ally healing the same target in the same instant has to land first,
             # or a hero saved on the exact turn it drops would die anyway.
@@ -1329,16 +1405,36 @@ class Match:
                     break
             rv.setdefault("notes", []).append(text)
 
+    def victims_wanted(self, side):
+        """How many of the enemies in the net this side's current shot may hit."""
+        if self.res is None:
+            return 0
+        plan = self.res["plan"][side]
+        idx = self.res["index"]
+        inst = plan[idx] if idx < len(plan) else None
+        if inst is None or not inst.needs_pick:
+            return 0
+        return min(getattr(inst, "max_victims", 1), len(self.res["options"][side]))
+
+    def victims_complete(self, side):
+        picked = self.res["picks"][side] if self.res else None
+        return isinstance(picked, list) and len(picked) >= self.victims_wanted(side)
+
     def choose_victim(self, side, eid):
         if self.phase != VICTIM or self.res is None:
             return "No target choice pending."
         if eid not in self.res["options"][side]:
             return "Not a legal target."
-        self.res["picks"][side] = eid
+        picked = self.res["picks"][side]
+        picked = list(picked) if isinstance(picked, list) else []
+        if eid in picked:
+            return "That one is already marked."
+        picked.append(eid)
+        self.res["picks"][side] = picked
         pending = [
             s
             for s in (LEFT, RIGHT)
-            if self.res["options"][s] and self.res["picks"][s] is None
+            if self.res["options"][s] and not self.victims_complete(s)
         ]
         if not pending:
             self.phase = COMMIT  # transient; advance_resolution moves it on
@@ -1422,7 +1518,8 @@ class Match:
             if e.id in asked:
                 return
             asked.add(e.id)
-            ctx = {"entity": e, "landed": e.id in self.landed, "died": not e.alive}
+            ctx = {"entity": e, "landed": e.id in self.landed,
+                   "died": not e.alive, "acted": acted}
             if acted:
                 self.bus.emit(EV.TURN_RESOLVED, ctx)
             for p in e.passives:
@@ -1433,11 +1530,11 @@ class Match:
 
         for side in (LEFT, RIGHT):
             c = self.commits.get(side)
-            if not c or c["kind"] not in ("action", "gang", "dead"):
-                continue
-            for e in self.turn_units(side, c):
-                if e.alive:
-                    collect(side, e, acted=True)
+            acted_ids = set()
+            if c and c["kind"] in ("action", "gang", "dead"):
+                acted_ids = {e.id for e in self.turn_units(side, c) if e.alive}
+            for e in self.living(side):
+                collect(side, e, acted=e.id in acted_ids)
         for e in self.recent_deaths:
             collect(e.side, e, acted=False)
         if not any(self.followups.values()):
@@ -1456,8 +1553,13 @@ class Match:
             return "Nothing pending for you."
         task = pend[0]
         e = self.entity(task["entity"])
-        if choice is not None and list(choice) not in task["options"]:
-            return "Not one of the squares on offer."
+        if choice is not None:
+            # A follow-up asks for a square or for a hero; the options list says which.
+            legal = (choice in task["options"] if task.get("kind") == "unit"
+                     else list(choice) in task["options"])
+            if not legal:
+                return ("Not one of the heroes on offer." if task.get("kind") == "unit"
+                        else "Not one of the squares on offer.")
         if choice is None and not task.get("optional"):
             return "You must choose one."
         # Not gated on `alive`: a follow-up is only ever offered because a passive

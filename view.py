@@ -91,12 +91,16 @@ def order_slip(m, o):
     target = "—"
     shots = [sh for sh in (action.get("shots") or []) if sh]
     if shots:
-        target = "  /  ".join(" ".join(m.cell_name(tuple(c)) for c in sh) for sh in shots)
+        # Squares have no names a player can read off the board, so the slip says
+        # how wide the net was rather than naming cells nobody can find.
+        target = "  /  ".join(
+            f"{len(sh)} square{'' if len(sh) == 1 else 's'}" for sh in shots
+        )
     if action.get("target") is not None:
         t = m.entity(action["target"])
         target = t.name if t else "—"
     if action.get("cell"):
-        target = m.cell_name(tuple(action["cell"]))
+        target = "a square"
     if action.get("direction"):
         target = action["direction"]
     if action.get("first") is not None and action.get("second") is not None:
@@ -112,8 +116,7 @@ def order_slip(m, o):
     dest = tuple(o["destination"]) if o.get("destination") else None
     return {
         "hero": e.name,
-        "from": m.cell_name(e.cell) if e.cells else "—",
-        "move": "hold" if (dest is None or (e.cells and dest == e.cell)) else m.cell_name(dest),
+        "move": "hold" if (dest is None or (e.cells and dest == e.cell)) else "move",
         "action": name,
         "target": target,
     }
@@ -276,6 +279,14 @@ def state_for(m, side):
         }
         return out
 
+    if m.phase == M.MOVE_CHOICE:
+        pend = m.move_choices[side]
+        out["move_choice"] = {
+            "task": pend[0] if pend else None,
+            "waiting_on_opponent": (not pend) and bool(m.move_choices[foe]),
+        }
+        return out
+
     if m.phase == M.VICTIM:
         opts = m.res["options"][side] if m.res else []
         inst = None
@@ -287,11 +298,14 @@ def state_for(m, side):
         if inst is not None and hasattr(inst, "resolved_cells"):
             cells = [list(c) for c in inst.resolved_cells(m)]
         out["victim"] = {
-            "needed": bool(opts) and m.res["picks"][side] is None,
-            "options": opts,
+            "needed": bool(opts) and not m.victims_complete(side),
+            "options": [o for o in opts
+                        if o not in (m.res["picks"][side] or [])],
+            "picked": list(m.res["picks"][side] or []),
+            "wanted": m.victims_wanted(side),
             "cells": cells,
             "waiting_on_opponent": bool(m.res)
-            and not (bool(opts) and m.res["picks"][side] is None),
+            and not (bool(opts) and not m.victims_complete(side)),
         }
         return out
 

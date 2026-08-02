@@ -35,8 +35,9 @@ def build(left=L, right=R):
     return arena(left, right)
 
 
-def turn(m, ls, la, rs, ra):
-    """Commit one exchange and answer any victim prompts."""
+def turn(m, ls, la, rs, ra, land=None):
+    """Commit one exchange and answer any prompts it pauses on. `land` picks the
+    square for a movement choice (刺客's blink); the first on offer by default."""
     if ls is not None:
         assert m.select_hero(LEFT, ls) is None
         assert m.commit(LEFT, la) is None
@@ -44,12 +45,20 @@ def turn(m, ls, la, rs, ra):
         assert m.select_hero(RIGHT, rs) is None
         assert m.commit(RIGHT, ra) is None
     guard = 0
-    while m.phase == "victim":
+    while m.phase in ("victim", "move_choice"):
         guard += 1
-        assert guard < 20, "victim loop stuck"
+        assert guard < 20, "resolution loop stuck"
+        if m.phase == "move_choice":
+            for side in (LEFT, RIGHT):
+                pend = m.move_choices[side]
+                if pend:
+                    opts = pend[0]["options"]
+                    pick = land if land is not None and list(land) in opts else opts[0]
+                    assert m.choose_move(side, pick) is None
+            continue
         for side in (LEFT, RIGHT):
             opts = m.res["options"][side]
-            if opts and m.res["picks"][side] is None:
+            if opts and not m.victims_complete(side):
                 m.choose_victim(side, opts[0])
 
 
@@ -1016,7 +1025,7 @@ def ghost_round(m, g, action):
         while m.phase == "victim":
             for side in (LEFT, RIGHT):
                 o = m.res["options"][side]
-                if o and m.res["picks"][side] is None:
+                if o and not m.victims_complete(side):
                     m.choose_victim(side, o[0])
         l = next((x for x in m.unacted(LEFT)), None)
         r = next((x for x in m.unacted(RIGHT)), None)
@@ -1162,7 +1171,7 @@ def spray(m, g, direction, foe, step=None):
     while m.phase == "victim":
         for side in (LEFT, RIGHT):
             o = m.res["options"][side]
-            if o and m.res["picks"][side] is None:
+            if o and not m.victims_complete(side):
                 m.choose_victim(side, o[0])
     if m.phase == "resolved":
         m.choose_followup(LEFT, step)
@@ -1176,7 +1185,7 @@ def spray(m, g, direction, foe, step=None):
         while m.phase == "victim":
             for side in (LEFT, RIGHT):
                 o = m.res["options"][side]
-                if o and m.res["picks"][side] is None:
+                if o and not m.victims_complete(side):
                     m.choose_victim(side, o[0])
         if m.phase == "resolved":
             m.choose_followup(LEFT, None)
@@ -1401,7 +1410,7 @@ m.select_hero(LEFT, ally.id); m.commit(LEFT, hold)
 while m.phase == "victim":
     for side in (LEFT, RIGHT):
         o = m.res["options"][side]
-        if o and m.res["picks"][side] is None:
+        if o and not m.victims_complete(side):
             m.choose_victim(side, o[0])
 ok("the pin is spent once that turn is over", not m.rooted(foe))
 ok("...and it can move again", m.legal_moves(foe) != [])
@@ -1836,7 +1845,7 @@ def snake_turn(m, hd, tl, head_order, tail_order, rs=None, ra=None):
         assert guard < 20
         for side in (LEFT, RIGHT):
             opts = m.res["options"][side]
-            if opts and m.res["picks"][side] is None:
+            if opts and not m.victims_complete(side):
                 m.choose_victim(side, opts[0])
 
 stay = lambda c: {"destination": list(c), "action": {"key": "none"}}
@@ -2122,6 +2131,489 @@ ok("a square already holding a charge is still offered",
 m.choose_followup(LEFT, [4, 3])
 ok("...and the second one piles on top",
    len(m.board.effects_at((4, 3))) == 2, str(len(m.board.effects_at((4, 3)))))
+
+# 54 — 刺客: names a hero, appears beside it, and cuts
+def assassin_arena(right=(("gatekeeper", (7, 3)), ("dummy", (7, 1)))):
+    m = arena([("assassin", (1, 3)), ("cannoneer", (1, 1))], list(right))
+    asn = unit(m, LEFT, "assassin"); asn.ap = asn.max_ap
+    return (m, asn, unit(m, LEFT, "cannoneer")) + tuple(unit(m, RIGHT, k) for k, _ in right)
+
+kill = lambda t: {"destination": None, "action": {"key": "ability:garrote", "target": t.id}}
+
+# it reaches the far side of the board and strikes for its full attack
+m, asn, ally, gk, d = assassin_arena()
+hp0 = gk.hp
+turn(m, asn.id, kill(gk), d.id, hold)
+ok("it crosses the whole board in one step",
+   m.topology.distance(asn.cell, gk.cell) == 1, f"{asn.cell} vs {gk.cell}")
+ok("...and cuts for its full attack", hp0 - gk.hp == 5, f"took {hp0 - gk.hp}")
+
+# only the 4 orthogonals count as beside it
+m, asn, ally, gk, d = assassin_arena()
+turn(m, asn.id, kill(gk), d.id, hold)
+ok("it appears on an orthogonal square, never a diagonal",
+   abs(asn.cell[0] - gk.cell[0]) + abs(asn.cell[1] - gk.cell[1]) == 1, str(asn.cell))
+
+# the mark cannot walk away — the blink resolves after everyone has moved
+m, asn, ally, gk, d = assassin_arena()
+hp0 = gk.hp
+turn(m, asn.id, kill(gk), gk.id, {"destination": [6, 3], "action": {"key": "none"}})
+ok("a mark that runs is followed", gk.cell == (6, 3) and
+   m.topology.distance(asn.cell, gk.cell) == 1, f"{asn.cell} chasing {gk.cell}")
+ok("...and cut anyway", hp0 - gk.hp == 5, f"took {hp0 - gk.hp}")
+
+# hemmed in on all four sides: nowhere to appear, and no strike
+m = arena([("assassin", (1, 3)), ("cannoneer", (1, 1))],
+          [("gatekeeper", (9, 1)), ("dummy", (8, 1)), ("berserker", (9, 2))])
+asn = unit(m, LEFT, "assassin"); asn.ap = asn.max_ap
+gk = unit(m, RIGHT, "gatekeeper")
+# A corner has only two neighbours, and both are held by its own side.
+ok("the mark is boxed in", all(m.occupant(c) is not None
+                               for c in m.topology.neighbours(gk.cell)), str(gk.cell))
+was, hp0 = asn.cell, gk.hp
+turn(m, asn.id, kill(gk), unit(m, RIGHT, "dummy").id, hold)
+ok("a mark hemmed in on all four sides cannot be reached", asn.cell == was, str(asn.cell))
+ok("...and takes nothing", gk.hp == hp0, f"took {hp0 - gk.hp}")
+
+# it is a 普通攻击, so the stone shrugs it off
+m, asn, ally, garg, d = assassin_arena(right=(("gargoyle", (7, 3)), ("dummy", (7, 1))))
+hp0 = garg.hp
+turn(m, asn.id, kill(garg), d.id, hold)
+ok("stone chips for 1 even from an assassin", hp0 - garg.hp == 1, f"took {hp0 - garg.hp}")
+
+# 封喉 carries the hero, so the turn's own movement is not used
+m, asn, ally, gk, d = assassin_arena()
+m.select_hero(LEFT, asn.id)
+ok("it cannot also walk somewhere",
+   m.commit(LEFT, {"destination": [2, 3],
+                   "action": {"key": "ability:garrote", "target": gk.id}}) is not None)
+m.deselect(LEFT)
+
+# blinking onto a mine sets it off, exactly as walking there would
+m = arena([("assassin", (1, 3)), ("diver", (1, 1))], [("gatekeeper", (7, 3)), ("dummy", (7, 1))])
+asn, gk = unit(m, LEFT, "assassin"), unit(m, RIGHT, "gatekeeper")
+m.opening_choose(LEFT, {"cell": [1, 5]})
+asn.ap = asn.max_ap
+m.board.add_effect((6, 3), BOARD.SmallBomb(RIGHT))     # the enemy's mine
+hp0 = asn.hp
+turn(m, asn.id, kill(gk), unit(m, RIGHT, "dummy").id, hold, land=[6, 3])
+ok("it appears on the square you picked", asn.cell == (6, 3), str(asn.cell))
+ok("...and the mine there goes off under it", hp0 - asn.hp == 3, f"took {hp0 - asn.hp}")
+
+# the landing square is yours to choose, mid-resolution
+m, asn, ally, gk, d = assassin_arena()
+m.select_hero(LEFT, asn.id); m.commit(LEFT, kill(gk))
+m.select_hero(RIGHT, d.id); m.commit(RIGHT, hold)
+ok("resolution pauses to ask where it appears", m.phase == "move_choice", m.phase)
+task = m.move_choices[LEFT][0]
+ok("every free square beside the mark is offered",
+   sorted(map(tuple, task["options"])) == sorted(m.topology.neighbours(gk.cell)),
+   str(task["options"]))
+ok("the other seat is not asked anything", not m.move_choices[RIGHT])
+ok("a square that was not offered is refused", m.choose_move(LEFT, [1, 1]) is not None)
+ok("choosing one resumes the exchange", m.choose_move(LEFT, task["options"][-1]) is None
+   and m.phase != "move_choice", m.phase)
+ok("...and it stands exactly where you put it",
+   list(asn.cell) == task["options"][-1], f"{asn.cell} vs {task['options'][-1]}")
+
+# only one way in: taken silently, with nothing to decide
+m = arena([("assassin", (1, 3)), ("cannoneer", (1, 1))],
+          [("gatekeeper", (9, 1)), ("dummy", (8, 1))])
+asn, gk = unit(m, LEFT, "assassin"), unit(m, RIGHT, "gatekeeper")
+asn.ap = asn.max_ap
+free = [c for c in m.topology.neighbours(gk.cell) if m.occupant(c) is None]
+ok("the mark has exactly one open side", len(free) == 1, str(free))
+m.select_hero(LEFT, asn.id); m.commit(LEFT, kill(gk))
+m.select_hero(RIGHT, unit(m, RIGHT, "dummy").id); m.commit(RIGHT, hold)
+ok("no prompt when there is nothing to choose between",
+   m.phase != "move_choice" and asn.cell == free[0], f"{m.phase} {asn.cell}")
+
+# AP: it costs the whole bar
+m, asn, ally, gk, d = assassin_arena()
+asn.ap = 1
+entry = next(a for a in m.action_menu(asn) if a["key"] == "ability:garrote")
+ok("one AP is not enough", not entry["affordable"])
+
+# 55 — 猎人: one kill and it sees further, and takes two at a time
+from entities import Modifier
+def hunter_arena(right=(("dummy", (7, 3)), ("dummy", (7, 1)), ("gatekeeper", (7, 2)))):
+    m = arena([("hunter", (3, 3)), ("cannoneer", (3, 1))], list(right))
+    return (m, unit(m, LEFT, "hunter")) + tuple(m.living(RIGHT))
+
+m, hn, d1, d2, gk = hunter_arena()
+rng0, tgt0 = hn.rng, hn.targets
+ok("it starts with its own reach and one target at a time", (rng0, tgt0) == (2, 1),
+   f"{rng0}/{tgt0}")
+
+# a kill opens its eye
+d1.set_cell((4, 3)); d1.hp = 3
+turn(m, hn.id, {"destination": None, "action": {"key": "attack", "shots": [[[4, 3]]]}},
+     gk.id, hold)
+ok("the kill lands", not d1.alive, f"{d1.hp} hp")
+ok("...and its reach lengthens by 4", hn.rng - rng0 == 4, f"{rng0} -> {hn.rng}")
+ok("...and its net now catches two", hn.targets - tgt0 == 1, f"{tgt0} -> {hn.targets}")
+ok("...and it says so on the card",
+   any(s["key"] == "blooded" for s in HEROES.status_of(m, hn)),
+   str([s["key"] for s in HEROES.status_of(m, hn)]))
+
+# a second kill changes nothing more
+rng1, tgt1 = hn.rng, hn.targets
+r0 = m.round
+while m.round == r0:                       # the hunter has already acted this round
+    left = [e.id for e in m.unacted(LEFT)]
+    right = [e.id for e in m.unacted(RIGHT)]
+    turn(m, left[0] if left else None, hold, right[0] if right else None, hold)
+d2.set_cell((4, 4)); d2.hp = 2
+turn(m, hn.id, {"destination": None, "action": {"key": "attack", "shots": [[[4, 4]]]}},
+     gk.id, hold)
+ok("a second kill adds nothing", (hn.rng, hn.targets) == (rng1, tgt1),
+   f"{hn.rng}/{hn.targets}")
+
+# before the kill, two enemies in the net means picking one
+m, hn, d1, d2, gk = hunter_arena()
+d1.set_cell((4, 3)); d2.set_cell((4, 2))
+hp0 = (d1.hp, d2.hp)
+m.select_hero(LEFT, hn.id)
+m.commit(LEFT, {"destination": None, "action": {"key": "attack", "shots": [[[4, 3], [4, 2]]]}})
+m.select_hero(RIGHT, gk.id); m.commit(RIGHT, hold)
+ok("two in the net, one shot: it has to choose", m.phase == "victim", m.phase)
+ok("...and it wants exactly one", m.victims_wanted(LEFT) == 1, str(m.victims_wanted(LEFT)))
+m.choose_victim(LEFT, d1.id)
+ok("only the one chosen is hit",
+   (hp0[0] - d1.hp, hp0[1] - d2.hp) == (3, 0), f"{hp0[0]-d1.hp}, {hp0[1]-d2.hp}")
+
+# once blooded, both in the net are hit
+m, hn, d1, d2, gk = hunter_arena()
+hn.vars["first_blood"] = True
+hn.add_modifier(Modifier("targets", "add", 1))
+d1.set_cell((4, 3)); d2.set_cell((4, 2))
+hp0 = (d1.hp, d2.hp)
+turn(m, hn.id,
+     {"destination": None, "action": {"key": "attack", "shots": [[[4, 3], [4, 2]]]}},
+     gk.id, hold)
+ok("both enemies in the net take the shot",
+   (hp0[0] - d1.hp, hp0[1] - d2.hp) == (3, 3), f"{hp0[0]-d1.hp}, {hp0[1]-d2.hp}")
+
+# three in the net, two shots: it picks which two
+m, hn, d1, d2, gk = hunter_arena()
+hn.add_modifier(Modifier("targets", "add", 1))
+d1.set_cell((4, 3)); d2.set_cell((4, 2)); gk.set_cell((4, 4))
+hp0 = (d1.hp, d2.hp, gk.hp)
+m.select_hero(LEFT, hn.id)
+m.commit(LEFT, {"destination": None,
+                "action": {"key": "attack", "shots": [[[4, 3], [4, 2], [4, 4]]]}})
+m.select_hero(RIGHT, gk.id); m.commit(RIGHT, hold)
+ok("three in the net means a choice again", m.phase == "victim", m.phase)
+ok("...and it wants two of them", m.victims_wanted(LEFT) == 2, str(m.victims_wanted(LEFT)))
+ok("one pick is not enough", m.choose_victim(LEFT, d1.id) is None and m.phase == "victim",
+   m.phase)
+ok("the same one twice is refused", m.choose_victim(LEFT, d1.id) is not None)
+m.choose_victim(LEFT, gk.id)
+ok("the two it chose are hit and the third is spared",
+   (hp0[0] - d1.hp, hp0[2] - gk.hp, hp0[1] - d2.hp) == (3, 3, 0),
+   f"{hp0[0]-d1.hp}, {hp0[2]-gk.hp}, {hp0[1]-d2.hp}")
+
+# 56 — 占星师: names who dies next, and being named gets worse each time it is right
+def seer_arena():
+    # A fourth body on the right so the side never runs dry mid-exchange: these
+    # checks kill units directly, outside the flow that would sit a side out.
+    m = arena([("astrologer", (3, 3)), ("gatekeeper", (3, 1))],
+              [("dummy", (7, 3)), ("dummy", (7, 1)), ("cannoneer", (7, 2)),
+               ("berserker", (8, 3))])
+    seer = unit(m, LEFT, "astrologer")
+    d1, d2, cannon = m.living(RIGHT)[:3]
+    return m, seer, unit(m, LEFT, "gatekeeper"), d1, d2, cannon
+
+def settle(m):
+    """Play exchanges until something needs answering, or the round turns over."""
+    guard = 0
+    while m.phase == "commit" and guard < 12:
+        guard += 1
+        left = [e.id for e in m.unacted(LEFT)]
+        right = [e.id for e in m.unacted(RIGHT)]
+        if not left and not right:
+            break
+        turn(m, left[0] if left else None, hold, right[0] if right else None, hold)
+
+# 0 stars — 疑云: the named hero just takes 1 more from everything
+m, seer, ally, d1, d2, cannon = seer_arena()
+ok("it must name somebody before the first exchange", m.phase == "opening", m.phase)
+assert m.opening_choose(LEFT, {"target": d1.id}) is None
+ok("the named hero carries the mark", d1.vars.get("vulnerable") == 1,
+   str(d1.vars.get("vulnerable")))
+ok("...but is not held at 0 stars", not m.rooted(d1))
+ok("...and loses no life at 0 stars", d1.hp == d1.max_hp, f"{d1.hp}/{d1.max_hp}")
+ok("the reading is on show to both seats",
+   any(s["key"] == "stars" and not s.get("private")
+       for s in HEROES.status_of(m, seer)),
+   str([s["key"] for s in HEROES.status_of(m, seer)]))
+
+# calling it right earns a star, and a fresh prophecy is offered
+DMG.apply_batch(m, [DMG.DamageEvent(source=cannon, target=d1, amount=99,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("the named hero falls", not d1.alive)
+ok("...and a star is read", seer.vars.get("stars") == 1, str(seer.vars.get("stars")))
+turn(m, ally.id, hold, cannon.id, hold)
+task = (m.followups[LEFT] or [None])[0]
+ok("a fresh prophecy is offered once the board settles",
+   task and task["key"] == "prophecy" and task["kind"] == "unit", str(task))
+ok("...offering the enemies still standing, and not the one that fell",
+   d1.id not in task["options"] and {d2.id, cannon.id} <= set(task["options"]),
+   str(task["options"]))
+ok("a hero not on offer is refused", m.choose_followup(LEFT, 999) is not None)
+
+# 1 star — 凶兆: marked and held
+m.choose_followup(LEFT, d2.id)
+ok("the second name carries the mark too", d2.vars.get("vulnerable") == 1)
+ok("...and at 1 star is held where it stands", m.rooted(d2))
+ok("...but still loses no life", d2.hp == d2.max_hp, f"{d2.hp}/{d2.max_hp}")
+ok("a held hero is offered nowhere to walk", m.legal_moves(d2) == [])
+
+# 2 stars — 大祸: a quarter of its maximum torn out at once
+DMG.apply_batch(m, [DMG.DamageEvent(source=cannon, target=d2, amount=99,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("a second right call reads a second star", seer.vars.get("stars") == 2,
+   str(seer.vars.get("stars")))
+settle(m)
+task = (m.followups[LEFT] or [None])[0]
+if task is None:
+    m.select_hero(LEFT, seer.id); m.commit(LEFT, hold)
+    m.select_hero(RIGHT, cannon.id); m.commit(RIGHT, hold)
+    task = (m.followups[LEFT] or [None])[0]
+hp0, quarter = cannon.hp, cannon.max_hp // 4
+ok("the last enemy is named", task and cannon.id in task["options"], str(task))
+m.choose_followup(LEFT, cannon.id)
+ok("at 2 stars a quarter of its maximum is torn out",
+   hp0 - cannon.hp == quarter, f"took {hp0 - cannon.hp}, quarter is {quarter}")
+ok("...and it is marked and held as well",
+   cannon.vars.get("vulnerable") == 1 and m.rooted(cannon))
+
+# the mark is the ordinary 增伤, so every later blow lands harder
+hp0 = cannon.hp
+DMG.apply_batch(m, [DMG.DamageEvent(source=seer, target=cannon, amount=3,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("the prophecy's mark works like any other 增伤", hp0 - cannon.hp == 4,
+   f"took {hp0 - cannon.hp}")
+
+# the loss is a loss, not a blow: nothing wards it and it never kills
+m, seer, ally, d1, d2, cannon = seer_arena()
+seer.vars["stars"] = 2
+cannon.vars["damage_reduction"] = 99
+cannon.hp = 1
+assert m.opening_choose(LEFT, {"target": cannon.id}) is None
+ok("no guard keeps the life in", cannon.hp == 1 and cannon.alive, f"{cannon.hp} hp")
+ok("...and a quarter is never the whole — it cannot kill", cannon.alive)
+
+# a wrong call costs nothing
+m, seer, ally, d1, d2, cannon = seer_arena()
+assert m.opening_choose(LEFT, {"target": d1.id}) is None
+DMG.apply_batch(m, [DMG.DamageEvent(source=ally, target=d2, amount=99,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("the wrong hero dying reads no star", seer.vars.get("stars", 0) == 0,
+   str(seer.vars.get("stars", 0)))
+ok("...but a fresh reading is called for", seer.vars.get("reading_due") is True)
+ok("...and the old name is still standing until one is made",
+   seer.vars.get("prediction") == d1.id, str(seer.vars.get("prediction")))
+
+# the prophecy lifts if the seer falls
+m, seer, ally, d1, d2, cannon = seer_arena()
+seer.vars["stars"] = 1
+assert m.opening_choose(LEFT, {"target": d1.id}) is None
+ok("the named hero is held while the seer watches", m.rooted(d1))
+DMG.apply_batch(m, [DMG.DamageEvent(source=cannon, target=seer, amount=99,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("kill the seer and the hold lifts", not seer.alive and not m.rooted(d1))
+ok("...though the mark it already left stays", d1.vars.get("vulnerable") == 1)
+
+# 57 — 四圣兽: four squares, four blessings, each taken once and kept
+def beast_arena(start=(1, 1)):
+    m = arena([("four_beasts", start), ("cannoneer", (1, 5))],
+              [("gatekeeper", (7, 3)), ("dummy", (7, 1)), ("berserker", (9, 5))])
+    fb = unit(m, LEFT, "four_beasts")
+    return (m, fb, unit(m, LEFT, "cannoneer")) + tuple(m.living(RIGHT))
+
+def close_round(m):
+    """Play the rest of the round out so everyone is fresh again."""
+    r0 = m.round
+    while m.round == r0:
+        left = [e.id for e in m.unacted(LEFT)]
+        right = [e.id for e in m.unacted(RIGHT)]
+        turn(m, left[0] if left else None, hold, right[0] if right else None, hold)
+
+m, fb, ally, gk, d, bers = beast_arena()
+cells = HEROES.FourBeasts.shrines(m, fb)
+ok("the four squares are where the board says",
+   sorted(cells.items(), key=lambda kv: kv[1]) ==
+   sorted({(2, 3): "dragon", (5, 1): "turtle", (5, 5): "phoenix", (8, 3): "tiger"}.items(),
+          key=lambda kv: kv[1]), str(cells))
+
+# 青龙 — deployed straight onto it, so it counts without moving
+m, fb, ally, gk, d, bers = beast_arena(start=(2, 3))
+ok("standing on it from the start wakes 青龙", "dragon" in fb.vars.get("beasts", set()),
+   str(fb.vars.get("beasts")))
+fb.hp = 5
+turn(m, fb.id, {"destination": None, "action": {"key": "attack", "target": gk.id}}, d.id, hold)
+ok("...and it mends 1 at the start of its turn", fb.hp == 6, f"{fb.hp} hp")
+
+# 玄武 — heal 3, +3 max, and a point off everything
+m, fb, ally, gk, d, bers = beast_arena()
+fb.set_cell((5, 2)); fb.hp = 8
+mx0 = fb.max_hp
+turn(m, fb.id, {"destination": [5, 1], "action": {"key": "attack", "target": gk.id}},
+     d.id, hold)
+ok("stepping onto it wakes 玄武", "turtle" in fb.vars["beasts"])
+ok("...for +3 maximum health", fb.max_hp - mx0 == 3, f"{mx0} -> {fb.max_hp}")
+ok("...and 3 healed", fb.hp == 11, f"{fb.hp} hp")
+hp0 = fb.hp
+DMG.apply_batch(m, [DMG.DamageEvent(source=gk, target=fb, amount=5,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("...and a point off every hit", hp0 - fb.hp == 4, f"took {hp0 - fb.hp}")
+
+# 朱雀 — what it strikes burns
+m, fb, ally, gk, d, bers = beast_arena()
+fb.set_cell((5, 4))
+turn(m, fb.id, {"destination": [5, 5], "action": {"key": "attack", "target": gk.id}},
+     d.id, hold)
+ok("stepping onto it wakes 朱雀", "phoenix" in fb.vars["beasts"])
+ok("...and the ground under its target is alight",
+   m.board.has_kind(gk.cell, "burning"), str(m.board.serialise()))
+ok("...owned by its own side, so it burns the enemy",
+   m.board.burning_damage_for(gk.cell, gk) > 0)
+
+# 白虎 — +2 attack, and two enemies at a time
+m, fb, ally, gk, d, bers = beast_arena()
+fb.set_cell((8, 2))
+atk0, tgt0 = fb.atk, fb.targets
+turn(m, fb.id, {"destination": [8, 3], "action": {"key": "attack", "target": gk.id}},
+     d.id, hold)
+ok("stepping onto it wakes 白虎", "tiger" in fb.vars["beasts"])
+ok("...for +2 attack", fb.atk - atk0 == 2, f"{atk0} -> {fb.atk}")
+ok("...and it now names two", fb.targets - tgt0 == 1, f"{tgt0} -> {fb.targets}")
+close_round(m)
+m.select_hero(LEFT, fb.id)
+ok("naming only one is refused now",
+   m.commit(LEFT, {"destination": None,
+                   "action": {"key": "attack", "target": gk.id}}) is not None)
+ok("the same hero twice is refused",
+   m.commit(LEFT, {"destination": None,
+                   "action": {"key": "attack", "targets": [gk.id, gk.id]}}) is not None)
+hp0 = (gk.hp, bers.hp)
+m.deselect(LEFT)
+turn(m, fb.id, {"destination": None,
+                "action": {"key": "attack", "targets": [gk.id, bers.id]}}, d.id, hold)
+ok("both named enemies take the full attack",
+   (hp0[0] - gk.hp, hp0[1] - bers.hp) == (fb.atk, fb.atk),
+   f"{hp0[0]-gk.hp}, {hp0[1]-bers.hp} at atk {fb.atk}")
+
+# each square gives its blessing once only
+m, fb, ally, gk, d, bers = beast_arena(start=(2, 3))
+mx0 = fb.max_hp
+fb.set_cell((5, 2))
+turn(m, fb.id, {"destination": [5, 1], "action": {"key": "attack", "target": gk.id}},
+     d.id, hold)
+after = fb.max_hp
+close_round(m)
+fb.set_cell((5, 2))
+turn(m, fb.id, {"destination": [5, 1], "action": {"key": "attack", "target": gk.id}},
+     d.id, hold)
+ok("walking back onto a square gives nothing more", fb.max_hp == after,
+   f"{mx0} -> {after} -> {fb.max_hp}")
+
+# the two side-relative squares swap with the side
+m2 = arena([("gatekeeper", (1, 1))], [("four_beasts", (9, 1))])
+fb2 = unit(m2, RIGHT, "four_beasts")
+right_cells = HEROES.FourBeasts.shrines(m2, fb2)
+ok("the Right hero's 青龙 is on its own back line",
+   next(c for c, b in right_cells.items() if b == "dragon") == (8, 3),
+   str(right_cells))
+ok("...and its 白虎 is on the Left's", 
+   next(c for c, b in right_cells.items() if b == "tiger") == (2, 3), str(right_cells))
+ok("...while 玄武 and 朱雀 stay where they are",
+   {c for c, b in right_cells.items() if b in ("turtle", "phoenix")} == {(5, 1), (5, 5)},
+   str(right_cells))
+
+# 58 — regressions found hunting through the newest heroes
+
+# 蛇帝: mending either half mends the one creature
+m, hd, tl, gate, d = snake_arena()
+DMG.apply_batch(m, [DMG.DamageEvent(source=gate, target=hd, amount=10,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("both halves read the wound", (hd.hp, tl.hp) == (15, 15), f"{hd.hp}/{tl.hp}")
+got = DMG.heal(m, tl, 6, source=None)
+ok("mending the tail mends the snake", got == 6 and hd.hp == 21,
+   f"healed {got}, head {hd.hp}")
+ok("...and both halves read it", tl.hp == 21, f"tail {tl.hp}")
+got = DMG.heal(m, hd, 100, source=None)
+ok("and it can never be mended past its whole", hd.hp == hd.max_hp == 25,
+   f"{hd.hp}/{hd.max_hp}")
+
+# 占星师: two enemies falling in one instant are both measured against the reading
+m, seer, ally, d1, d2, cannon = seer_arena()
+assert m.opening_choose(LEFT, {"target": d2.id}) is None
+DMG.apply_batch(m, [
+    DMG.DamageEvent(source=ally, target=d1, amount=99, category=DMG.NORMAL_ATTACK),
+    DMG.DamageEvent(source=ally, target=d2, amount=99, category=DMG.NORMAL_ATTACK)])
+ok("both fall", not d1.alive and not d2.alive)
+ok("the named one still earns its star, whichever is swept first",
+   seer.vars.get("stars") == 1, str(seer.vars.get("stars")))
+
+# 占星师: a new reading lets the last one go
+m, seer, ally, d1, d2, cannon = seer_arena()
+seer.vars["stars"] = 1
+assert m.opening_choose(LEFT, {"target": cannon.id}) is None
+ok("the first name is held", m.rooted(cannon))
+HEROES.read_the_omen(m, seer, d2)
+ok("naming somebody else releases the first", not m.rooted(cannon))
+ok("...and holds the new one instead", m.rooted(d2))
+ok("...though the mark it already carried stays",
+   cannon.vars.get("vulnerable") == 1, str(cannon.vars.get("vulnerable")))
+
+# 白虎 awake but only one enemy left: it must still be able to attack
+m = arena([("four_beasts", (3, 3)), ("cannoneer", (1, 1))], [("gatekeeper", (7, 3))])
+fb = unit(m, LEFT, "four_beasts"); gk = unit(m, RIGHT, "gatekeeper")
+fb.vars["beasts"] = {"tiger"}
+fb.add_modifier(Modifier("targets", "add", 1))
+ok("it wants two when two could be named", fb.targets == 2, str(fb.targets))
+entry = next(a for a in m.action_menu(fb) if a["key"] == "attack")
+ok("...but asks for only one when one enemy is left",
+   entry["targeting"]["count"] == 1, str(entry["targeting"]["count"]))
+hp0 = gk.hp
+turn(m, fb.id, {"destination": None, "action": {"key": "attack", "targets": [gk.id]}},
+     gk.id, hold)
+ok("...and the last enemy can still be struck", hp0 - gk.hp == fb.atk,
+   f"took {hp0 - gk.hp}")
+
+# 妖精 mends every ally once — 蛇帝 is one creature, not two
+m = arena([("fairy", (1, 1)), ("snake_head", (2, 2)), ("snake_tail", (2, 3))],
+          [("dummy", (8, 3))])
+fay = unit(m, LEFT, "fairy"); hd2 = unit(m, LEFT, "snake_head")
+DMG.apply_batch(m, [DMG.DamageEvent(source=None, target=hd2, amount=10,
+                                    category=DMG.NORMAL_ATTACK)])
+before = hd2.hp
+m.bus.emit("turn_start", {"entity": fay})
+ok("a two-bodied hero is mended once, not once per body", hd2.hp - before == 1,
+   f"healed {hd2.hp - before}")
+ok("...and a one-bodied ally still gets its point",
+   [e for e in m.bodies(LEFT)] and fay in m.bodies(LEFT))
+ok("the tail is not counted as a body of its own", hd2 in m.bodies(LEFT)
+   and unit(m, LEFT, "snake_tail") not in m.bodies(LEFT))
+
+# a held hero says it is held, not merely pinned for a turn
+m, seer, ally, d1, d2, cannon = seer_arena()
+seer.vars["stars"] = 1
+assert m.opening_choose(LEFT, {"target": d1.id}) is None
+keys = [x["key"] for x in HEROES.status_of(m, d1)]
+ok("a bound hero wears the bound badge", "bound" in keys, str(keys))
+ok("...and not the one-turn pin", "rooted" not in keys, str(keys))
+
+# reach can never go negative, however many things shorten it
+m = arena([("werewolf", (2, 2)), ("mist_lady", (1, 1))], [("dummy", (8, 3))])
+w = unit(m, LEFT, "werewolf")
+for _ in range(6):
+    w.add_modifier(Modifier("rng", "add", -1))
+ok("reach floors at zero rather than going negative", w.rng == 0, str(w.rng))
+ok("...and a floored hero can still mark the square it stands on",
+   m.action_menu(w) and any(a["key"] == "attack" for a in m.action_menu(w)))
 
 print("\nlog tail:")
 for line in m.log[-5:]:

@@ -51,7 +51,8 @@ function loadClient(side = 'L') {
       render, heroDetailHTML, blankDraft, confirmMove, chooseAction, sealFromKeyboard,
       orderReady, curActions, curMoves, curChoices, canAct, clickableCell, onCell,
       laneShots, areaCells, areaAttack, plannedCell, changeMove, unitAt, myUnits,
-      sweepPreview, linkedOrder, linkedMoves, isLinked, confirmMove };`;
+      sweepPreview, linkedOrder, linkedMoves, isLinked, confirmMove, confirmOpening,
+      confirmStep };`;
   const tmp = path.join(here, '.client.test.js');
   fs.writeFileSync(tmp, js + api);
   const mod = require(tmp);
@@ -229,6 +230,87 @@ if (F.shape_blast) {
      JSON.stringify(lastSent().payload.action));
 }
 
+// ------------------------------- an opening that wants a square, not an ally
+
+if (F.opening_cell) {
+  C.S = F.opening_cell; C.draft = null; C.err = '';
+  const t = F.opening_cell.opening.task;
+  ok('opening: the task asks for a square', t && t.targeting.kind === 'any_cell',
+     JSON.stringify(t && t.targeting));
+  let lit = 0;
+  for (let c = 1; c <= 9; c++) for (let r = 1; r <= 5; r++) if (C.clickableCell([c, r])) lit++;
+  ok('opening: the whole board is offered to click', lit === 45, `${lit} squares`);
+  const before = C.sent.length;
+  C.onCell(6, 2);
+  ok('opening: clicking a square only aims it — nothing is spent',
+     C.sent.length === before, `${C.sent.length - before} sent`);
+  ok('opening: and the aimed square is marked', cellHas([6, 2], 'dest'),
+     cellsWith('dest').join(' '));
+  C.onCell(6, 2);
+  ok('opening: clicking it again takes the aim back', !cellHas([6, 2], 'dest'),
+     cellsWith('dest').join(' '));
+  C.onCell(4, 4);
+  C.confirmOpening();
+  ok('opening: Enter confirms the square you aimed at',
+     C.sent.length === before + 1 && lastSent().cmd === 'opening' &&
+     lastSent().cell.join(',') === '4,4', JSON.stringify(lastSent()));
+}
+
+if (F.opening_unit) {
+  C.S = F.opening_unit; C.draft = null; C.err = '';
+  const t = F.opening_unit.opening.task;
+  ok('opening: the task names an enemy', t && t.targeting.kind === 'unit',
+     JSON.stringify(t && t.targeting));
+  const foe = (F.opening_unit.units || []).find(u => u.side !== 'L' && u.alive);
+  ok('opening: only enemy heroes are clickable',
+     C.clickableCell(foe.cell) && !C.clickableCell([1, 1]), JSON.stringify(foe.cell));
+  const before = C.sent.length;
+  C.onCell(foe.cell[0], foe.cell[1]);
+  ok('opening: clicking an enemy only names it — nothing is spent',
+     C.sent.length === before, `${C.sent.length - before} sent`);
+  C.confirmOpening();
+  ok('opening: Enter confirms the hero, sent by id',
+     C.sent.length === before + 1 && lastSent().cmd === 'opening' &&
+     lastSent().target === foe.id, JSON.stringify(lastSent()));
+}
+
+if (F.opening) {
+  C.S = F.opening; C.draft = null; C.err = '';
+  ok('opening: an ally pick offers no board squares',
+     !C.clickableCell([3, 3]) && !C.clickableCell([6, 2]));
+  const before = C.sent.length;
+  C.onCell(6, 2);
+  ok('opening: and a stray board click cannot spend it', C.sent.length === before);
+}
+
+// ------------------------------- 四圣兽 with 白虎: one order naming two enemies
+
+if (F.two_named) {
+  HOLD_FIRST(F.two_named);
+  const act = C.curActions().find(a => a.key === 'attack');
+  ok('two-named: the attack asks for two', act.targeting.count === 2,
+     String(act.targeting.count));
+  C.chooseAction('attack');
+  const foes = (F.two_named.units || []).filter(u => u.side !== 'L' && u.alive);
+  const before = C.sent.length;
+  C.sealFromKeyboard();
+  ok('two-named: Enter with nobody named explains itself',
+     C.sent.length === before && !!C.err, C.err || 'sealed silently');
+  C.onCell(foes[0].cell[0], foes[0].cell[1]);
+  C.sealFromKeyboard();
+  ok('two-named: one is not enough either', C.sent.length === before && !!C.err,
+     C.err || 'sealed silently');
+  C.onCell(foes[1].cell[0], foes[1].cell[1]);
+  C.sealFromKeyboard();
+  ok('two-named: naming both seals it, as a list',
+     (lastSent().payload.action.targets || []).length === 2,
+     JSON.stringify(lastSent().payload.action));
+  ok('two-named: and it names the two that were clicked',
+     JSON.stringify((lastSent().payload.action.targets || []).slice().sort()) ===
+     JSON.stringify([foes[0].id, foes[1].id].sort()),
+     JSON.stringify(lastSent().payload.action.targets));
+}
+
 // ----------------------------------- 潜水者: a charge only one side can see
 
 if (F.mined_owner && F.mined_enemy) {
@@ -335,7 +417,14 @@ if (F.followup) {
      `${lit} of ${task.options.length}`);
   const before = C.sent.length;
   C.onCell(task.options[0][0], task.options[0][1]);
-  ok('clicking one takes the step',
+  ok('clicking a square only aims it', C.sent.length === before,
+     `${C.sent.length - before} sent`);
+  ok('...and the board marks the aim', cellHas(task.options[0], 'dest'),
+     cellsWith('dest').join(' '));
+  ok('...and the squares on offer are highlighted', cellHas(task.options[0], 'legal'),
+     boardCells().get(task.options[0].join(',')));
+  C.confirmStep();
+  ok('Enter takes the step',
      C.sent.length > before && lastSent().cmd === 'followup', JSON.stringify(lastSent()));
 }
 

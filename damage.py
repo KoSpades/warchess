@@ -55,6 +55,33 @@ class OutgoingShift:
             ev.amount = max(0, ev.amount + shift)
 
 
+def pool_holder(match, entity):
+    """The body that actually holds this unit's health, or None if it is its own.
+    蛇帝's tail names its head: one creature standing on two squares can be neither
+    wounded nor mended twice."""
+    if entity is None:
+        return None
+    hid = entity.vars.get("pool_holder")
+    if not hid:
+        return None
+    holder = match.entity(hid)
+    return holder if (holder is not None and holder.alive and holder is not entity) else None
+
+
+class SharedPool:
+    """Sends a blow aimed at one body to the body that holds its health. Sits at the
+    very front of the pipeline, so every rule after it — wards, guards, 增伤, the
+    lot — reads the real target. Heals route through the same var (see `heal`).
+
+    Generic like the rest of this file: it reads a var and names no hero."""
+
+    @EV.hook(priority=5)
+    def on_before_damage(self, match, ev):
+        holder = pool_holder(match, ev.target)
+        if holder is not None:
+            ev.target = holder
+
+
 class Vulnerability:
     """The mirror of `damage_reduction`: a unit carrying `vulnerable` stacks takes
     that much more from everything — attacks, abilities and burning ground alike
@@ -206,6 +233,9 @@ def apply_batch(match, damage_events):
 
 
 def heal(match, target, amount, source=None):
+    # Mending half a two-bodied creature mends the creature (蛇帝) — without this
+    # the health goes onto the half that does not hold the pool and is lost.
+    target = pool_holder(match, target) or target
     if not target.alive:
         return 0
     before = target.hp

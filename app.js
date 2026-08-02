@@ -2,14 +2,53 @@
  * Kept as its own file so it can be syntax-checked and driven headlessly —
  * see test_client.js. */
 const SIDE = (new URLSearchParams(location.search).get('side') || 'L').toUpperCase().startsWith('R') ? 'R' : 'L';
-const COLS = "ABCDEFGHI";
 const DIRS = {forward:'Forward — into the enemy', backward:'Backward — toward your line',
               up:'Up — toward row 1', down:'Down — toward row 5'};
 let S = null, armed = null, draft = null, err = "", lastVersion = -1, pendingMoves = [];
+// The square aimed at for a square-targeted opening, before Enter confirms it.
+let openingPick = null;
+// The square aimed at for a mid-resolution cell choice — 男枪's step after a hit,
+// 刺客 picking which side of its mark to appear on, 潜水者 burying a charge. Both
+// phases work the same way: click a highlighted square, then Enter.
+let stepPick = null;
+function stepTask(){
+  if (!S) return null;
+  if (S.phase==='resolved') return (S.followup && S.followup.task) || null;
+  if (S.phase==='move_choice') return (S.move_choice && S.move_choice.task) || null;
+  return null;
+}
+// Self-correcting: an aim left over from a task that has moved on is simply not one.
+function aimedStep(){
+  const t = stepTask();
+  return (t && stepPick && has(t.options, stepPick)) ? stepPick : null;
+}
+function confirmStep(){
+  const cell = aimedStep(); if (!cell) return;
+  const which = S.phase==='move_choice' ? 'move_choice' : 'followup';
+  stepPick = null;
+  cmd({cmd: which, cell});
+}
+function confirmOpening(){
+  if (!openingPick) return;
+  const cell = openingPick, t = S.opening && S.opening.task;
+  openingPick = null;
+  if (t && t.targeting.kind==='unit'){
+    const u = unitAt(cell);
+    if (u) cmd({cmd:'opening', target:u.id});
+    return;
+  }
+  cmd({cmd:'opening', cell});
+}
 let hoverId = null, inspected = null, revealActive = false, shownReveal = "";
 let codex = {};   // all hero cards, fetched once from /api/codex (not per poll)
 
-const cn = c => c ? COLS[c[0]-1] + c[1] : 'nowhere';
+// Squares have no names a player can read off the board, so anything that has to
+// tell them apart says where it is relative to a fixed point instead.
+const dirWord = (from, to) => {
+  const dc = to[0]-from[0], dr = to[1]-from[1];
+  if (Math.abs(dc) >= Math.abs(dr)) return dc > 0 ? 'to the right' : 'to the left';
+  return dr > 0 ? 'below' : 'above';
+};
 const eq = (a,b) => a && b && a[0]===b[0] && a[1]===b[1];
 const has = (arr,c) => (arr||[]).some(x => eq(x,c));
 
@@ -169,6 +208,29 @@ function curChoices(){
 function choicesReady(){ return curChoices().every(ch => (draft.choices||{})[ch.key] != null); }
 function pickChoice(key, id){ draft.choices = draft.choices || {}; draft.choices[key] = id; err=""; render(); }
 
+// A unit-locked attack names one hero, or several once something has widened it
+// (四圣兽 with 白虎). `draft.target` stays the single-target case so nothing else
+// had to change.
+function unitCount(){
+  const act = currentAction();
+  return Math.max(1, (act && act.targeting && act.targeting.count) || 1);
+}
+function namedUnits(){
+  if (!draft) return [];
+  if (unitCount() > 1) return draft.named || [];
+  return draft.target == null ? [] : [draft.target];
+}
+function nameUnit(id){
+  if (unitCount() === 1){
+    draft.target = (draft.target === id) ? null : id;   // click again to unpick
+    return;
+  }
+  draft.named = draft.named || [];
+  const at = draft.named.indexOf(id);
+  if (at >= 0) draft.named.splice(at, 1);
+  else if (draft.named.length < unitCount()) draft.named.push(id);
+}
+
 function unitAt(cell){ return (S.units||[]).find(u => u.alive && u.cell && eq(u.cell, cell)); }
 // Whose turn can actually be taken. The engine already excludes heroes that are
 // frozen (咒毒) from commit.unacted, so trust that list rather than re-deriving
@@ -271,19 +333,28 @@ function renderBoard(){
       // see, and a charge only your side knows about.
       const effs = (S.tiles||[]).filter(t=>eq(t.cell,cell));
       const tile = effs.find(t => t.kind==='burning');
-      // Charges pile up without limit, so the marker counts them rather than
-      // showing only the first: ◆ small (×n), ◈ big with the nearest fuse.
+      // Charges pile up without limit, so a marker has to say how many as well as
+      // what. A bare count would be ambiguous against a big bomb's countdown, so
+      // counts always carry ×, and a fuse always reads "in N".
       const smalls = effs.filter(t => t.kind==='small_bomb').length;
       const bigs = effs.filter(t => t.kind==='big_bomb');
       let mineTxt = '';
-      if (smalls) mineTxt += '◆' + (smalls>1 ? smalls : '');
-      if (bigs.length) mineTxt += (mineTxt?' ':'') + '◈' +
-        Math.min(...bigs.map(b => b.fuse_round)) + (bigs.length>1 ? '×'+bigs.length : '');
+      if (smalls) mineTxt += '◆' + (smalls>1 ? '×'+smalls : '');
+      if (bigs.length){
+        const soonest = Math.min(...bigs.map(b => b.fuse_round));
+        const left = Math.max(0, soonest - (S.round||0));
+        mineTxt += (mineTxt?' ':'') + '◈' + (left ? 'in'+left : 'now')
+                 + (bigs.length>1 ? '×'+bigs.length : '');
+      }
       if (tile) cls.push('burn');
       if (mineTxt) cls.push('mined');
       if (origin && cspec &&
           Math.abs(origin[0]-c)+Math.abs(origin[1]-r) <= cspec.range) cls.push('inrange');
-      const aimed = !draft ? []
+      const step = stepTask();
+      if (step && has(step.options, cell)) cls.push('legal');
+      const aimed = stepTask() ? [aimedStep()].filter(Boolean)
+        : S.phase==='opening' ? [openingPick].filter(Boolean)
+        : !draft ? []
         : isLinked() ? linkedOrder().map(g => placedPos()[g.entity]).filter(Boolean)
         : [draft.destination, draft.tentative].filter(Boolean);
       if (aimed.some(x => eq(x, cell))) cls.push('dest');
@@ -315,7 +386,8 @@ function renderBoard(){
         : '';
       const live = cls.includes('pick');
       html += `<button type="button" class="${cls.join(' ')}" data-mark="${mark}" data-cell="${c},${r}"`
-            + ` ${live?'':'tabindex="-1"'} aria-label="${cn(cell)}${u?' — '+u.name:''}"`
+            + ` ${live?'':'tabindex="-1"'} aria-label="${u?u.name:'empty square'}"`
+            + (effs.length?` title="${effs.map(t=>t.text).filter(Boolean).join(' · ')}"`:'')
             + ` onclick="onCell(${c},${r})"${dnd}>`
             + `<span class="tick"></span>${extra}`
             + (tile?`<span class="flame">▲${tile.stacks}</span>`:'')
@@ -367,7 +439,7 @@ function unitHTML(u, pending){
   }
   if (act && act.targeting.kind==='unit' && u.side!==SIDE) cls.push('clickable');
   if (act && act.targeting.kind==='ally' && u.side===SIDE) cls.push('clickable');
-  if (draft && draft.target===u.id) cls.push('tgt');
+  if (draft && namedUnits().includes(u.id)) cls.push('tgt');
   if (S.phase==='commit' && !S.commit.sealed && !S.commit.selected && canAct(u)) cls.push('clickable');
   const pct = Math.max(0,Math.round(100*u.hp/u.max_hp));
   const pips = u.max_ap>0 ? `<span class="pips">${Array.from({length:u.max_ap},(_,i)=>`<i class="${i<u.ap?'on':''}"></i>`).join('')}</span>` : '';
@@ -593,8 +665,28 @@ function sweepPreview(){
 
 function clickableCell(cell){
   if (S.phase==='setup') return !S.setup.ready && has(S.zone,cell);
+  if (S.phase==='opening'){
+    const t = S.opening && S.opening.task;
+    if (!t) return false;
+    if (t.targeting.kind==='unit'){        // name an enemy: click the hero itself
+      const u = unitAt(cell);
+      return !!(u && u.alive && u.side!==SIDE);
+    }
+    if (t.targeting.kind!=='any_cell') return false;
+    const only = t.targeting.cells;
+    return only ? has(only, cell) : true;
+  }
   if (S.phase==='resolved'){
     const t = S.followup && S.followup.task;
+    if (!t) return false;
+    if (t.kind==='unit'){
+      const u = unitAt(cell);
+      return !!(u && t.options.includes(u.id));
+    }
+    return has(t.options, cell);
+  }
+  if (S.phase==='move_choice'){
+    const t = S.move_choice && S.move_choice.task;
     return !!(t && has(t.options, cell));
   }
   if (S.phase!=='commit' || !draft || S.commit.sealed) return false;
@@ -638,9 +730,17 @@ function onCell(c,r){
     if (!armed) { err="Pick a hero from the roster first."; return render(); }
     return cmd({cmd:'place', hero:armed, cell}).then(()=>{ armed=null; });
   }
-  if (S.phase==='resolved'){
-    const t = S.followup && S.followup.task;
-    if (t && has(t.options, cell)) return cmd({cmd:'followup', cell});
+  if (S.phase==='resolved' || S.phase==='move_choice'){
+    const t = stepTask();
+    if (t && t.kind==='unit'){
+      const u = unitAt(cell);
+      if (u && t.options.includes(u.id)) return cmd({cmd:'followup', entity:u.id});
+      return;
+    }
+    if (t && has(t.options, cell)){
+      stepPick = eq(stepPick||[], cell) ? null : cell;   // click again to unpick
+      err=""; return render();
+    }
     return;
   }
   if (S.phase==='victim'){
@@ -648,8 +748,18 @@ function onCell(c,r){
     if (u && S.victim.needed && S.victim.options.includes(u.id)) return cmd({cmd:'victim', entity:u.id});
     return;
   }
-  if (S.phase==='opening') return;   // the opening pick is made in the panel only:
-                                     // a stray board click must not spend it
+  if (S.phase==='opening'){
+    // A square-targeted opening is aimed on the board (潜水者 burying a charge) and
+    // confirmed with Enter — nothing is spent on a single click. One that names an
+    // ally is made in the panel, and a stray board click must not spend it.
+    const t = S.opening && S.opening.task;
+    if (t && (t.targeting.kind==='any_cell' || t.targeting.kind==='unit')
+        && clickableCell(cell)){
+      openingPick = eq(openingPick||[], cell) ? null : cell;   // click again to unpick
+      err=""; return render();
+    }
+    return;
+  }
   if (S.phase!=='commit' || S.commit.sealed) return;
   if (!S.commit.selected){
     // Click your own un-acted piece to tentatively pick it (reversible).
@@ -765,7 +875,7 @@ function onCell(c,r){
   if (act.targeting.kind==='unit' || act.targeting.kind==='ally'){
     const tu = unitAt(cell); if (!tu || !tu.alive) return;
     const wantAlly = act.targeting.kind==='ally';
-    if (wantAlly ? tu.side===SIDE : tu.side!==SIDE){ draft.target=tu.id; err=""; return render(); }
+    if (wantAlly ? tu.side===SIDE : tu.side!==SIDE){ nameUnit(tu.id); err=""; return render(); }
   }
 }
 
@@ -775,7 +885,7 @@ function onUnitPick(id){
     return canAct(u) ? cmd({cmd:'select', entity:id}) : null;
   }
   const act = currentAction();
-  if (act && act.targeting.kind==='unit'){ draft.target=id; err=""; render(); }
+  if (act && act.targeting.kind==='unit'){ nameUnit(id); err=""; render(); }
 }
 
 /* ---- keyboard: arrows move the piece, Enter confirms move then registers attack ---- */
@@ -837,7 +947,7 @@ function sealFromKeyboard(){
   if (act.key==='attack' && act.targeting.kind==='unit'){
     // Same trap as the sniper's lane: silently turning an unaimed attack into a
     // hold loses the player's turn without telling them. Hold is a button.
-    if (draft.target==null){
+    if (namedUnits().length !== unitCount()){
       if ((S.commit.enemies||[]).length){ err = stillNeeded(act); return render(); }
       draft.actionKey='none';
     }
@@ -854,7 +964,10 @@ function sealFromKeyboard(){
 function stillNeeded(act){
   const t = act.targeting;
   if (t.kind==='ally')      return `Choose an ally for ${act.name} — click one on the board or in the panel.`;
-  if (t.kind==='unit')      return `Choose an enemy for ${act.name}.`;
+  if (t.kind==='unit')
+    return unitCount()>1
+      ? `Name ${unitCount()} enemies for ${act.name} — ${namedUnits().length} so far.`
+      : `Choose an enemy for ${act.name}.`;
   if (t.kind==='any_cell')  return `Choose a square for ${act.name}.`;
   if (t.kind==='direction') return `Choose a direction for ${act.name}.`;
   if (t.kind==='weapon')    return draft.weapon ? 'Finish aiming this weapon.' : 'Choose a weapon first.';
@@ -875,9 +988,17 @@ function onKey(e){
     }
     return;
   }
-  if (S && S.phase==='resolved'){
-    const t = S.followup && S.followup.task;
-    if (e.key==='Enter' && t && t.optional){ e.preventDefault(); cmd({cmd:'followup'}); }
+  if (S && (S.phase==='resolved' || S.phase==='move_choice')){
+    const t = stepTask();
+    if (e.key!=='Enter' || !t) return;
+    e.preventDefault();
+    if (aimedStep()) confirmStep();
+    else if (t.optional) cmd({cmd:'followup'});     // Enter alone declines
+    return;
+  }
+  // An opening aimed at a square is aimed first and confirmed after, like a move.
+  if (S && S.phase==='opening'){
+    if (e.key==='Enter' && openingPick){ e.preventDefault(); confirmOpening(); }
     return;
   }
   if (!commitActive()) return;
@@ -901,7 +1022,7 @@ function onKey(e){
 
 function chooseAction(key){
   const act = curActions().find(a=>a.key===key);
-  draft.actionKey=key; draft.shots=[]; draft.shotIndex=0; draft.target=null; draft.direction=null; draft.cell=null; draft.amount=null; draft.weapon=null; draft.pair=[];
+  draft.actionKey=key; draft.shots=[]; draft.shotIndex=0; draft.target=null; draft.direction=null; draft.cell=null; draft.amount=null; draft.weapon=null; draft.pair=[]; draft.named=[];
   if (act.targeting.kind==='cells') draft.shots = Array.from({length:act.targeting.shots},()=>[]);
   if (act.targeting.kind==='magnitude') draft.amount = 1;
   if (act.targeting.kind==='lane'){
@@ -942,7 +1063,7 @@ function orderReady(){
   const t = act.targeting;
   if (t.kind==='none') return true;
   if (t.kind==='cells') return S.mode==='self' || (draft.shots.length===t.shots && draft.shots.every(s=>s.length<=t.count));
-  if (t.kind==='unit') return draft.target!=null;
+  if (t.kind==='unit') return namedUnits().length === unitCount();
   if (t.kind==='ally') return draft.target!=null;
   if (t.kind==='two_units') return (draft.pair||[]).length===2;
   if (t.kind==='magnitude') return draft.amount>=1;
@@ -959,7 +1080,10 @@ function orderReady(){
 function sealOrder(){
   const act=currentAction(), t=act.targeting, action={key:draft.actionKey};
   if (t.kind==='cells') action.shots = draft.shots;
-  if (t.kind==='unit') action.target = draft.target;
+  if (t.kind==='unit'){
+    const ids = namedUnits();
+    if (unitCount() > 1) action.targets = ids; else action.target = ids[0];
+  }
   if (t.kind==='ally') action.target = draft.target;
   if (t.kind==='two_units'){ action.first = draft.pair[0]; action.second = draft.pair[1]; }
   if (t.kind==='magnitude') action.amount = draft.amount;
@@ -1019,6 +1143,7 @@ function render(){
   else if (S.phase==='opening') renderOpening();
   else if (S.phase==='commit') renderCommit();
   else if (S.phase==='resolved') renderFollowup();
+  else if (S.phase==='move_choice') renderMoveChoice();
   else if (S.phase==='victim') renderVictim();
   else renderOver();
   if (revealActive) renderReveal();   // sits on top of everything
@@ -1124,9 +1249,24 @@ function renderOpening(){
       h += `<div class="step">Choose an ally</div>`;
       for (const u of myUnits().filter(u=>u.alive)){
         h += `<button class="btn" onclick="cmd({cmd:'opening', target:${u.id}})">
-                ${u.name} <span class="cost">${cn(u.cell)} · ${u.hp}/${u.max_hp} HP</span></button>`;
+                ${u.name} <span class="cost">${u.hp}/${u.max_hp} HP</span></button>`;
       }
       h += `<p class="note">Hover a hero on the board to see its reach; the choice is made here.</p>`;
+    } else if (t.targeting.kind==='unit'){
+      h += `<div class="step">Name an enemy</div>`;
+      h += `<p class="note">Click an enemy hero on the board, then <b>Enter</b> to
+            confirm. Click it again to change your mind.</p>`;
+      h += openingPick && unitAt(openingPick)
+        ? `<button class="btn primary" onclick="confirmOpening()">Name ${unitAt(openingPick).name} — <b>Enter</b></button>`
+        : `<p class="note">Nobody named yet.</p>`;
+    } else if (t.targeting.kind==='any_cell'){
+      h += `<div class="step">Choose a square</div>`;
+      h += `<p class="note">Click a square on the board to aim, then <b>Enter</b> to
+            confirm. Click it again to change your mind — nothing is spent until you
+            confirm.</p>`;
+      h += openingPick
+        ? `<button class="btn primary" onclick="confirmOpening()">Confirm this square — <b>Enter</b></button>`
+        : `<p class="note">Nothing aimed yet.</p>`;
     }
   } else {
     h += `<div class="waiting">Waiting for the other seat</div>`;
@@ -1186,7 +1326,7 @@ function renderCommit(){
     h += `<div class="slip sealed ${SIDE} flip">
             <div class="stamp">Sealed</div>
             ${orders.length ? orders.map((o,i)=>`
-              <div class="hdr"><span>${orders.length>1?`${i+1} · `:''}${o.hero} ${o.from}</span><span>R${S.round}/E${S.exchange}</span></div>
+              <div class="hdr"><span>${orders.length>1?`${i+1} · `:''}${o.hero}</span><span>R${S.round}/E${S.exchange}</span></div>
               ${f('Move', o.move)}${f('Action', o.action)}${f('Target', o.target)}`).join('')
              : `<div class="hdr"><span>${c.kind==='dead'?'Destroyed before it could act':'No order'}</span><span>R${S.round}/E${S.exchange}</span></div>`}
           </div>`;
@@ -1197,7 +1337,7 @@ function renderCommit(){
     h += `<p class="note">Pick the hero to move.</p>`;
     for (const u of myUnits().filter(canAct)){
       h += `<div class="hero pickable" onclick="onUnitPick(${u.id})">
-        <div class="top"><span class="cn">${u.name}</span><span class="en">${u.name_en} · ${cn(u.cell)}</span></div>
+        <div class="top"><span class="cn">${u.name}</span><span class="en">${u.name_en}</span></div>
         <div class="stats">HP ${u.hp}/${u.max_hp} · AP ${u.ap}/${u.max_ap}</div></div>`;
     }
     // Anyone alive, un-acted and still not offered is being held out by an effect
@@ -1205,7 +1345,7 @@ function renderCommit(){
     for (const u of myUnits().filter(u=>u.alive && !u.acted && !canAct(u))){
       const why = (u.status||[]).map(s=>s.label).join(' · ') || 'cannot act';
       h += `<div class="hero used"><div class="top"><span class="cn">${u.name}</span>
-        <span class="en">${cn(u.cell)}</span></div><div class="stats">${why}</div></div>`;
+        <span class="en">${u.name_en||''}</span></div><div class="stats">${why}</div></div>`;
     }
     const done = myUnits().filter(u=>u.alive && u.acted).length;
     if (done) h += `<p class="note">${done} of your heroes have already acted this round.</p>`;
@@ -1230,14 +1370,14 @@ function renderCommit(){
   }
   const bodiless = !u.cell;
   const canAppear = bodiless && (curMoves()||[]).length > 0;
-  h += `<div class="step">1 · ${u.name} ${cn(u.cell)}${bodiless?(canAppear?' · take flesh':''):' · move'}</div>`;
+  h += `<div class="step">1 · ${u.name}${bodiless?(canAppear?' · take flesh':''):' · move'}</div>`;
   if (!draft.destination && !draft.held){
     h += canAppear
       ? `<p class="note">Click a highlighted square beside its host to <b>take flesh</b> there — then it acts as normal. <b>Enter</b> alone stays a ghost.</p>`
       : bodiless
       ? `<p class="note">${u.name} has no body to move — press <b>Enter</b> to go on to its action.</p>`
       : `<p class="note">Arrows or click to aim · <b>Enter</b> locks it in (Enter alone holds).</p>
-          <button class="btn primary" onclick="confirmMove()">${draft.tentative?(bodiless?'Take flesh at ':'Confirm move to ')+cn(draft.tentative):(bodiless?'Stay a ghost':'Confirm — hold position')}</button>`;
+          <button class="btn primary" onclick="confirmMove()">${draft.tentative?(bodiless?'Take flesh here':'Confirm move'):(bodiless?'Stay a ghost':'Confirm — hold position')}</button>`;
     for (const a of curActions().filter(a=>a.self_move)){
       const dis = a.affordable===false ? 'disabled' : '';
       h += `<button class="btn" ${dis} onclick="chooseSelfMove('${a.key}')">
@@ -1247,7 +1387,7 @@ function renderCommit(){
   } else {
     const staying = draft.held || (draft.destination && u.cell && eq(draft.destination, u.cell));
     h += `<button class="btn on" onclick="changeMove()">
-            ${staying?'Holding position':'Moving to '+cn(draft.destination)} <small>Click to change</small></button>`;
+            ${staying?'Holding position':'Moving'} <small>Click to change</small></button>`;
   }
   if (draft.destination || draft.held){
     for (const ch of curChoices()){
@@ -1256,7 +1396,7 @@ function renderCommit(){
       for (const id of ch.options){
         const a = (S.units||[]).find(x=>x.id===id) || {};
         h += `<button class="btn ${got===id?'on':''}" onclick="pickChoice('${ch.key}',${id})">
-               ${a.name||('#'+id)} <small>${a.cell?cn(a.cell):''} · AP ${a.ap}/${a.max_ap}</small></button>`;
+               ${a.name||('#'+id)} <small>AP ${a.ap}/${a.max_ap}</small></button>`;
       }
     }
     h += `<div class="step">2 · Action</div>`;
@@ -1286,7 +1426,7 @@ function gangActionLabel(m, action){
 function linkedHeaderHTML(){
   const ms = linkedOrder(), pos = placedPos();
   const rows = ms.map(mm => `<div class="gang-row"><b>${mm.name}</b>
-      <small>${pos[mm.entity] ? cn(pos[mm.entity]) : 'not placed yet'}</small></div>`).join('');
+      <small>${pos[mm.entity] ? 'placed' : 'not placed yet'}</small></div>`).join('');
   if (draft.stage!=='act'){
     const g = linkedAt(draft.posIdx||0);
     let h = `<div class="step">1 · Position</div>`;
@@ -1318,14 +1458,14 @@ function gangHeaderHTML(){
     h += `<div class="gang-done">` + done.map((o,i)=>{
       const m = gangMember(o.entity) || {};
       return `<div class="gang-row"><span class="n">${i+1}</span>
-        <b>${m.name||''}</b><small>${o.destination?('moves to '+cn(o.destination)):'holds'} · ${gangActionLabel(m,o.action)}</small></div>`;
+        <b>${m.name||''}</b><small>${o.destination?'moves':'holds'} · ${gangActionLabel(m,o.action)}</small></div>`;
     }).join('') + `</div>`;
     h += `<button class="btn" onclick="resetGang()">Clear the gang’s orders</button>`;
   }
   h += `<button class="btn" onclick="dropGang()">← Order a different hero instead</button>`;
   for (const m of pending){
     h += `<button class="btn ${draft.entity===m.entity?'on':''}" onclick="pickGoblin(${m.entity})">
-            ${m.name} <small>${cn(m.cell)} · AP ${m.ap}</small></button>`;
+            ${m.name} <small>AP ${m.ap}</small></button>`;
   }
   return h;
 }
@@ -1391,14 +1531,18 @@ function targetingHTML(act){
     for (let i = 0; i < 2; i++){
       const u = picked[i];
       h += `<button class="btn ${u?'on':''}" ${u?`onclick="draft.pair.splice(${i},1);render()"`:''}>
-              ${u ? `${u.name} <span class="cost">${cn(u.cell)}</span>` : `— pick unit ${i+1} —`}</button>`;
+              ${u ? u.name : `— pick unit ${i+1} —`}</button>`;
     }
     return h;
   } else if (t.kind==='unit'){
-    h += `<p class="note">Choose one enemy${draft.target==null?' — click it on the board':''}. This lands wherever it moves.</p>`;
+    const want = unitCount(), got = namedUnits();
+    h += `<p class="note">${want>1?`Name ${want} enemies`:'Choose one enemy'}${
+            got.length<want?' — click on the board':''}. ${
+            want>1?'Both take the full blow.':'This lands wherever it moves.'} ${
+            got.length}/${want} named.</p>`;
     for (const u of foeUnits().filter(u=>u.alive)){
-      h += `<button class="btn ${draft.target===u.id?'on':''}" onclick="draft.target=${u.id};err='';render()">
-              ${u.name} <span class="cost">${cn(u.cell)}</span></button>`;
+      h += `<button class="btn ${got.includes(u.id)?'on':''}" onclick="nameUnit(${u.id});err='';render()">
+              ${u.name}</button>`;
     }
   } else if (t.kind==='lane'){
     const shots = laneShots();
@@ -1410,7 +1554,7 @@ function targetingHTML(act){
     for (const l of shots){
       h += `<button class="btn ${draft.direction===l.dir?'on':''}" onclick="draft.direction='${l.dir}';err='';render()">
               ${DIRS[l.dir]||l.dir}<span class="cost">${l.damage} dmg</span>
-              <small>${l.target.name} at ${cn(l.target.cell)} · ${l.distance} squares away</small></button>`;
+              <small>${l.target.name} · ${l.distance} squares away</small></button>`;
     }
   } else if (t.kind==='shape'){
     h += `<div class="step">3 · Shape</div>`;
@@ -1428,7 +1572,7 @@ function targetingHTML(act){
       : `<p class="note">No lane worth charging from here — nothing to trample and nowhere to land.</p>`;
     for (const ch of t.choices){
       const n = ch.victims.length;
-      const where = ch.landing ? `→ ${cn(ch.landing)}` : 'holds ground';
+      const where = ch.landing ? 'charges through' : 'holds ground';
       h += `<button class="btn ${draft.direction===ch.dir?'on':''}" onclick="draft.direction='${ch.dir}';err='';render()">
               ${DIRS[ch.dir]||ch.dir}<span class="cost">${where}</span>
               <small>${n?`tramples ${n} ${n===1?'enemy':'enemies'} for ${ch.damage} each`:'nobody in the way'}${ch.landing?'':' · third square is taken'}</small></button>`;
@@ -1441,12 +1585,12 @@ function targetingHTML(act){
     }
   } else if (t.kind==='any_cell'){
     h += `<p class="note">Click any cell on the board to set it alight.</p>`;
-    if (draft.cell) h += `<button class="btn on">Igniting ${cn(draft.cell)}</button>`;
+    if (draft.cell) h += `<button class="btn on">That square is marked to burn</button>`;
   } else if (t.kind==='ally'){
     h += `<p class="note">Choose an ally to heal (yourself included). <b>Enter</b> registers.</p>`;
     for (const u of myUnits().filter(u=>u.alive)){
       h += `<button class="btn ${draft.target===u.id?'on':''}" onclick="draft.target=${u.id};err='';render()">
-              ${u.name} <span class="cost">${cn(u.cell)} · ${u.hp}/${u.max_hp} HP</span></button>`;
+              ${u.name} <span class="cost">${u.hp}/${u.max_hp} HP</span></button>`;
     }
   } else if (t.kind==='magnitude'){
     const su = selectedUnit();
@@ -1466,6 +1610,25 @@ function magUpdate(v){
   document.getElementById('magres').textContent = `+${v} atk, ${su.hp - (+v)}/${su.max_hp - (+v)} HP`;
 }
 
+function renderMoveChoice(){
+  // Everyone has stopped moving, nothing has been struck yet, and an ability wants
+  // to be told where it puts somebody (刺客 choosing which side of its mark).
+  document.getElementById('leftheading').textContent = 'Where do you appear?';
+  const t = S.move_choice && S.move_choice.task;
+  let h = '';
+  if (t){
+    h += `<div class="step">${t.name}</div><p class="note">${t.text}</p>`;
+    h += `<p class="note">Click one of the highlighted squares, then <b>Enter</b>.</p>`;
+    h += aimedStep()
+      ? `<button class="btn primary" onclick="confirmStep()">Appear here — <b>Enter</b></button>`
+      : `<p class="note">Nothing aimed yet.</p>`;
+  } else {
+    h += `<div class="waiting">Waiting for the other seat</div>`;
+  }
+  h += `<p class="err">${err}</p>`;
+  document.getElementById('leftbody').innerHTML = h;
+}
+
 function renderFollowup(){
   // The exchange is over and something wants a decision before the next pair is
   // picked (男枪 stepping after a hit).
@@ -1473,13 +1636,24 @@ function renderFollowup(){
   const f = S.followup, t = f && f.task;
   let h = '';
   if (t){
-    const u = (S.units||[]).find(x=>x.id===t.entity) || {};
     h += `<div class="step">${t.name}</div><p class="note">${t.text}</p>`;
-    for (const c of t.options){
-      h += `<button class="btn" onclick="cmd({cmd:'followup', cell:[${c[0]},${c[1]}]})">
-              ${u.name||''} → ${cn(c)}</button>`;
+    if (t.kind==='unit'){
+      // Naming a hero is a single click — there is no square to confirm.
+      h += `<p class="note">Click one of the highlighted enemies.</p>`;
+      for (const id of t.options){
+        const u = (S.units||[]).find(x=>x.id===id) || {};
+        h += `<button class="btn" onclick="cmd({cmd:'followup', entity:${id}})">
+                ${u.name||('#'+id)}</button>`;
+      }
+      h += `<p class="err">${err}</p>`;
+      document.getElementById('leftbody').innerHTML = h; return;
     }
-    if (t.optional) h += `<button class="btn primary" onclick="cmd({cmd:'followup'})">Stay put — <b>Enter</b></button>`;
+    h += `<p class="note">Click one of the highlighted squares, then <b>Enter</b>.</p>`;
+    h += aimedStep()
+      ? `<button class="btn primary" onclick="confirmStep()">Confirm — <b>Enter</b></button>`
+      : `<p class="note">Nothing aimed yet.</p>`;
+    if (t.optional)
+      h += `<button class="btn" onclick="stepPick=null;cmd({cmd:'followup'})">Stay put — <b>Enter</b> alone</button>`;
   } else {
     h += `<div class="waiting">Waiting for the other seat</div>`;
   }
@@ -1496,7 +1670,7 @@ function renderVictim(){
       const u=(S.units||[]).find(x=>x.id===id);
       h += `<button class="btn" onclick="cmd({cmd:'victim', entity:${id}})">
               ${u.name} <small>${u.name_en}</small>
-              <span class="cost">${cn(u.cell)} · ${u.hp} HP</span></button>`;
+              <span class="cost">${u.hp} HP</span></button>`;
     }
   } else {
     h += `<div class="waiting">Waiting for the other seat</div>`;

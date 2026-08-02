@@ -12,6 +12,7 @@ instance per mode is shared by both sides.
 
 import actions as ACT
 import heroes as HEROES
+from topology import other_side
 
 MODES = {}
 
@@ -88,7 +89,8 @@ class CellLocked(AttackMode):
         for i, cells in enumerate(action["shots"]):
             halve = (e.hero.halve_from_index is not None
                      and i >= e.hero.halve_from_index)
-            out.append(ACT.CellLockedAttack(e, cells, dest, halve, i))
+            out.append(ACT.CellLockedAttack(e, cells, dest, halve, i,
+                                            max_victims=e.targets))
         return out
 
 
@@ -98,17 +100,41 @@ class UnitLocked(AttackMode):
 
     key = HEROES.UNIT
 
+    @staticmethod
+    def wanted(match, e):
+        """How many heroes this order must name: as many as it can strike, but never
+        more than there are enemies to name. Without the cap, a hero that strikes two
+        could not attack the last enemy standing at all."""
+        foes = [x for x in match.living(other_side(e.side)) if x.flags["targetable"]]
+        return max(1, min(e.targets, len(foes)))
+
     def targeting(self, match, e):
-        return {"kind": "unit", "range": e.hero.attack.get("range")}
+        return {"kind": "unit", "range": e.hero.attack.get("range"),
+                "count": self.wanted(match, e)}
+
+    @staticmethod
+    def named(action):
+        """The heroes this order commits to. One target is sent on its own; several
+        travel as a list, so an older single-target order still reads correctly."""
+        if action.get("targets"):
+            return list(action["targets"])
+        return [action["target"]] if action.get("target") is not None else []
 
     def validate(self, match, e, dest, action):
-        t = match.entity(action.get("target"))
-        if t is None or not t.alive or t.side == e.side:
-            return "Choose a living enemy."
+        ids = self.named(action)
+        want = self.wanted(match, e)
+        if len(set(ids)) != len(ids):
+            return "Name a different hero for each."
+        if len(ids) != want:
+            return f"Name {want} living enem{'y' if want == 1 else 'ies'}."
+        for i in ids:
+            t = match.entity(i)
+            if t is None or not t.alive or t.side == e.side:
+                return "Choose a living enemy."
         return None
 
     def build(self, match, e, dest, action):
-        return [ACT.UnitLockedAttack(e, match.entity(action.get("target")))]
+        return [ACT.UnitLockedAttack(e, [match.entity(i) for i in self.named(action)])]
 
 
 @register

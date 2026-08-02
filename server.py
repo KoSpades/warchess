@@ -47,9 +47,11 @@ class Game:
             if cmd == "commit":
                 return m.commit(side, body.get("payload") or {})
             if cmd == "followup":
-                return m.choose_followup(side, body.get("cell"))
+                return m.choose_followup(side, body.get("entity", body.get("cell")))
             if cmd == "victim":
                 return m.choose_victim(side, body["entity"])
+            if cmd == "move_choice":
+                return m.choose_move(side, body.get("cell"))
             return "Unknown command."
 
 
