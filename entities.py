@@ -76,23 +76,39 @@ class Entity:
 
     # --- stats ---------------------------------------------------------
 
+    @property
+    def attack_spec(self):
+        """What this unit attacks with: a weapon it has been handed (军火商人's
+        arsenal) if it holds one, otherwise its own. Everything that asks about a
+        hero's attack — its mode, its reach, its net — reads this."""
+        arms = self.vars.get("arms")
+        if arms is not None:
+            return arms.get("attack") or {}
+        return self.hero.attack or {}
+
     def base_stat(self, name):
         # Attack range lives inside the `attack` dict rather than as a top-level
         # field, but it must flow through the modifier stack like any other stat
         # (马尔斯 raises his range as the enemy thins). None for unit-locked
         # attacks, which have no finite range.
+        spec = self.attack_spec
+        arms = self.vars.get("arms")
+        if name == "atk" and arms and not arms.get("spent"):
+            # A weapon carries its own number, and the hero's buffs still ride on it.
+            # A spent one carries nothing — the hero reads as its own again.
+            return arms.get("atk", 0)
         if name == "rng":
-            return self.hero.attack.get("range")
+            return spec.get("range")
         if name == "targets":
             # How many enemies one cell-locked attack may hit out of those standing
             # in its net. Same story as rng and grid: it lives in the `attack` dict
             # but must ride the modifier stack (猎人 widens it on its first kill).
-            return self.hero.attack.get("targets", 1)
+            return spec.get("targets", 1)
         if name == "grid":
             # How many cells a cell-locked attack may mark. Same story as rng:
             # it lives in the `attack` dict but must be modifiable (狼人 trades
             # grids for raw attack when it turns). None for other attack modes.
-            return self.hero.attack.get("cells")
+            return spec.get("cells")
         return getattr(self.hero, name, 0)
 
     def stat(self, name):

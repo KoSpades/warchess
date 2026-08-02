@@ -2892,6 +2892,405 @@ m.select_hero(RIGHT, cannon.id); m.commit(RIGHT, hold)
 ok("burning ground is nobody's blow to stay", not ally.alive and m.phase != "interrupt",
    f"alive={ally.alive} phase={m.phase}")
 
+# 62 — 水法师: four squares that touch, and half of what the water takes
+def wm_arena():
+    m = arena([("water_mage", (3, 3)), ("cannoneer", (3, 1))],
+              [("dummy", (7, 2)), ("dummy", (7, 3)), ("gatekeeper", (7, 4))])
+    wm = unit(m, LEFT, "water_mage"); wm.ap = wm.max_ap
+    return (m, wm, unit(m, LEFT, "cannoneer")) + tuple(m.living(RIGHT))
+
+soak = lambda cells: {"destination": None,
+                      "action": {"key": "ability:soak", "shots": [[list(c) for c in cells]]}}
+
+# an L of four squares, catching three enemies
+m, wm, ally, d1, d2, gk = wm_arena()
+wm.hp = 5
+hp0 = (d1.hp, d2.hp, gk.hp)
+turn(m, wm.id, soak([(7, 2), (7, 3), (7, 4), (6, 3)]), gk.id, hold)
+ok("every enemy in the shape is drenched",
+   (hp0[0] - d1.hp, hp0[1] - d2.hp, hp0[2] - gk.hp) == (3, 3, 3),
+   f"{hp0[0]-d1.hp}, {hp0[1]-d2.hp}, {hp0[2]-gk.hp}")
+ok("...and the mage keeps half of it", wm.hp == 5 + 9 // 2, f"{wm.hp} hp")
+
+# the four must touch
+m, wm, ally, d1, d2, gk = wm_arena()
+m.select_hero(LEFT, wm.id)
+ok("four scattered squares are refused",
+   m.commit(LEFT, soak([(7, 2), (7, 4), (5, 2), (5, 4)])) is not None)
+ok("...and so are three", m.commit(LEFT, soak([(7, 2), (7, 3), (7, 4)])) is not None)
+ok("...and the same square twice",
+   m.commit(LEFT, soak([(7, 2), (7, 2), (7, 3), (7, 4)])) is not None)
+ok("but a straight line of four is one shape",
+   m.commit(LEFT, soak([(7, 1), (7, 2), (7, 3), (7, 4)])) is None)
+
+# range is measured from where it ends up
+m, wm, ally, d1, d2, gk = wm_arena()
+m.select_hero(LEFT, wm.id)
+far = [(9, 2), (9, 3), (9, 4), (8, 3)]      # 7 away from C3, 6 from D3
+ok("a square beyond 6 is out of reach", m.commit(LEFT, soak(far)) is not None)
+m.deselect(LEFT)
+m.select_hero(LEFT, wm.id)
+ok("...but stepping one closer brings it in",
+   m.commit(LEFT, dict(soak(far), destination=[4, 3])) is None)
+
+# the mending follows what actually landed, not what was aimed
+m, wm, ally, d1, d2, gk = wm_arena()
+wm.hp = 5
+gk.vars["damage_reduction"] = 99          # this one shrugs the water off entirely
+hp0 = (d1.hp, gk.hp)
+turn(m, wm.id, soak([(7, 2), (7, 3), (7, 4), (6, 3)]), gk.id, hold)
+ok("a hero that shrugs it off takes nothing", gk.hp == hp0[1], f"took {hp0[1] - gk.hp}")
+ok("...and feeds the mage nothing either", wm.hp == 5 + 6 // 2, f"{wm.hp} hp")
+
+# nothing caught, nothing mended
+m, wm, ally, d1, d2, gk = wm_arena()
+wm.hp = 5
+turn(m, wm.id, soak([(5, 1), (5, 2), (5, 3), (5, 4)]), gk.id, hold)
+ok("an empty shape mends nothing", wm.hp == 5, f"{wm.hp} hp")
+ok("...and still costs the AP", wm.ap == 0 + 1, f"{wm.ap} AP (+1 at turn end)")
+
+# it is water, and it only touches theirs
+m, wm, ally, d1, d2, gk = wm_arena()
+ally.set_cell((6, 3))
+hp0 = ally.hp
+turn(m, wm.id, soak([(7, 2), (7, 3), (7, 4), (6, 3)]), gk.id, hold)
+ok("its own line stands in the water untouched", ally.hp == hp0, f"took {hp0 - ally.hp}")
+ok("the blow is tagged water",
+   any("water" in (l["text"] or "") for l in m.log[-12:]),
+   str([l["text"] for l in m.log[-4:]]))
+
+# 63 — 法官: marked, then answered for whatever its next turn does
+def judge_arena():
+    m = arena([("judge", (3, 3)), ("cannoneer", (3, 1))],
+              [("cannoneer", (7, 3)), ("dummy", (7, 1))])
+    jd = unit(m, LEFT, "judge"); jd.ap = jd.max_ap
+    return (m, jd, unit(m, LEFT, "cannoneer"),
+            unit(m, RIGHT, "cannoneer"), unit(m, RIGHT, "dummy"))
+
+mark = lambda key, t: {"destination": None,
+                       "action": {"key": f"ability:{key}", "target": t.id}}
+shoot = lambda c: {"destination": None, "action": {"key": "attack", "shots": [[list(c)]]}}
+
+# 罚恶: what it deals comes back on it
+m, jd, ally, foe, d = judge_arena()
+turn(m, jd.id, mark("condemn", foe), d.id, hold)
+ok("the mark is laid", foe.vars.get("judged", {}).get("kind") == "punish",
+   str(foe.vars.get("judged")))
+ok("...and it is on show", any(b["key"] == "judged" for b in HEROES.status_of(m, foe)))
+hp0, foe0 = ally.hp, foe.hp
+turn(m, ally.id, hold, foe.id, shoot(ally.cell))
+ok("it deals its damage as normal", hp0 - ally.hp == foe.atk, f"{hp0 - ally.hp}")
+ok("...and takes exactly that back at the end of its turn",
+   foe0 - foe.hp == foe.atk, f"took {foe0 - foe.hp}")
+ok("...and the verdict is spent", not foe.vars.get("judged"))
+
+# 赏善: what it deals is mended
+m, jd, ally, foe, d = judge_arena()
+ally.hp = 5
+turn(m, jd.id, mark("commend", ally), d.id, hold)
+turn(m, ally.id, shoot(foe.cell), foe.id, hold)
+ok("a rewarded hero is mended for what it dealt", ally.hp == 5 + ally.atk,
+   f"{ally.hp} hp")
+
+# a turn that deals nothing earns nothing, and spends the verdict either way
+m, jd, ally, foe, d = judge_arena()
+foe0 = foe.hp
+turn(m, jd.id, mark("condemn", foe), d.id, hold)
+turn(m, ally.id, hold, foe.id, hold)
+ok("a quiet turn is answered with nothing", foe.hp == foe0, f"took {foe0 - foe.hp}")
+ok("...but the verdict is still spent", not foe.vars.get("judged"))
+
+# it is the NEXT turn that counts, not one already under way
+m, jd, ally, foe, d = judge_arena()
+foe0, hp0 = foe.hp, ally.hp
+m.select_hero(LEFT, jd.id); m.commit(LEFT, mark("condemn", foe))
+m.select_hero(RIGHT, foe.id); m.commit(RIGHT, shoot(ally.cell))
+ok("a hero acting in the same breath is not judged on that turn",
+   foe.hp == foe0 and hp0 - ally.hp == foe.atk, f"foe took {foe0 - foe.hp}")
+ok("...and still carries the mark for its next one", foe.vars.get("judged") is not None)
+
+# one verdict at a time — a new one replaces whatever was there
+m, jd, ally, foe, d = judge_arena()
+turn(m, jd.id, mark("condemn", foe), d.id, hold)
+r0 = m.round
+while m.round == r0:
+    left = [e.id for e in m.unacted(LEFT)]
+    right = [e.id for e in m.unacted(RIGHT)]
+    turn(m, left[0] if left else None, hold, right[0] if right else None, hold)
+jd.ap = jd.max_ap
+turn(m, jd.id, mark("commend", foe), d.id, hold)
+ok("the second verdict replaces the first",
+   foe.vars["judged"]["kind"] == "reward", str(foe.vars["judged"]))
+
+# either side can be marked
+m, jd, ally, foe, d = judge_arena()
+m.select_hero(LEFT, jd.id)
+ok("one of your own can be marked", m.commit(LEFT, mark("commend", ally)) is None)
+m.deselect(LEFT)
+ok("...and so can one of theirs",
+   HEROES.Commend().targeting["kind"] == "any_unit")
+
+# 64 — 工匠: two squares built into the board before anyone stands on it
+def artisan_arena(doors=((2, 3), (8, 3))):
+    m = Match()
+    m.assign_draft(["artisan", "cannoneer"], ["gatekeeper", "dummy"])
+    assert m.phase == "build", m.phase
+    assert m.build_choose(LEFT, {"cells": [list(c) for c in doors]}) is None
+    for k, c in (("artisan", (2, 3)), ("cannoneer", (1, 1))):
+        assert m.place(LEFT, k, c) is None, (k, c)
+    for k, c in (("gatekeeper", (8, 1)), ("dummy", (8, 2))):
+        assert m.place(RIGHT, k, c) is None, (k, c)
+    assert m.lock_force(LEFT) is None
+    assert m.lock_force(RIGHT) is None
+    return (m, unit(m, LEFT, "artisan"), unit(m, LEFT, "cannoneer"),
+            unit(m, RIGHT, "gatekeeper"), unit(m, RIGHT, "dummy"))
+
+# the board is built before anybody is placed
+m2 = Match(); m2.assign_draft(["artisan", "cannoneer"], ["gatekeeper", "dummy"])
+ok("the board is made ready before deployment", m2.phase == "build", m2.phase)
+ok("...and nobody can be placed until it is",
+   m2.place(LEFT, "artisan", (2, 2)) is not None)
+ok("two of the same square is refused",
+   m2.build_choose(LEFT, {"cells": [[2, 3], [2, 3]]}) is not None)
+ok("one square is not a door", m2.build_choose(LEFT, {"cells": [[2, 3]]}) is not None)
+ok("a square off the board is refused",
+   m2.build_choose(LEFT, {"cells": [[2, 3], [99, 9]]}) is not None)
+m2.build_choose(LEFT, {"cells": [[2, 3], [8, 3]]})
+ok("once built, deployment opens", m2.phase == "setup", m2.phase)
+
+# a door is one step for its own side
+m, art, ally, gk, d = artisan_arena()
+ok("the far door is a neighbour of the near one for its builder",
+   (8, 3) in [tuple(c) for c in m.legal_moves(art)], str(m.legal_moves(art)))
+ok("...so a hero standing on it crosses the whole board in one step",
+   m.topology.distance((2, 3), (8, 3)) == 6, "the board still measures 6")
+
+# and a plain square for everyone else
+m, art, ally, gk, d = artisan_arena()
+gk.set_cell((8, 3))
+ok("the enemy is offered no such step",
+   (2, 3) not in [tuple(c) for c in m.legal_moves(gk)], str(m.legal_moves(gk)))
+
+# walking through it really moves the hero
+m, art, ally, gk, d = artisan_arena()
+turn(m, art.id, {"destination": [8, 3], "action": {"key": "none"}}, d.id, hold)
+ok("it steps through and comes out the other side", art.cell == (8, 3), str(art.cell))
+
+# the board itself is unchanged: nothing else treats them as neighbours
+m, art, ally, gk, d = artisan_arena()
+ok("the board's own neighbours are untouched",
+   sorted(m.topology.neighbours((2, 3))) == sorted([(1, 3), (3, 3), (2, 2), (2, 4)]),
+   str(m.topology.neighbours((2, 3))))
+
+# both seats are told where the doors are
+m, art, ally, gk, d = artisan_arena()
+for side, who in ((LEFT, "its builder"), (RIGHT, "the other side")):
+    doors = view.state_for(m, side)["doors"]
+    ok(f"{who} is shown the doors",
+       len(doors) == 1 and doors[0]["owner"] == LEFT
+       and sorted(map(tuple, doors[0]["cells"])) == [(2, 3), (8, 3)], str(doors))
+
+# 65 — 军火商人: opens everyone's purse, then sells them what to do with it
+def dealer_arena():
+    m = arena([("arms_dealer", (2, 2)), ("gatekeeper", (2, 3))],
+              [("cannoneer", (8, 2)), ("dummy", (8, 3))])
+    return (m, unit(m, LEFT, "arms_dealer"), unit(m, LEFT, "gatekeeper"),
+            unit(m, RIGHT, "cannoneer"), unit(m, RIGHT, "dummy"))
+
+buy = lambda what: {"destination": None, "action": {"key": "none"},
+                    "choices": {"armory": what}}
+
+# the bar is open for the whole side, and closes when it falls
+m, ad, ally, cannon, d = dealer_arena()
+ok("its own side banks without limit", ally.max_ap == 99, str(ally.max_ap))
+ok("...and so does it", ad.max_ap == 99, str(ad.max_ap))
+ok("the enemy's purse is untouched", cannon.max_ap == HEROES.BY_KEY["cannoneer"].max_ap,
+   str(cannon.max_ap))
+ally.ap = 40
+DMG.apply_batch(m, [DMG.DamageEvent(source=cannon, target=ad, amount=99,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("the bar closes when the dealer falls",
+   ally.max_ap == HEROES.BY_KEY["gatekeeper"].max_ap, str(ally.max_ap))
+ok("...and everything banked above the old ceiling is gone",
+   ally.ap == ally.max_ap, f"{ally.ap}/{ally.max_ap}")
+
+# a sale: the buyer pays, the dealer pockets it, the weapon is theirs
+m, ad, ally, cannon, d = dealer_arena()
+ally.ap = 6
+turn(m, ad.id, buy(f"cannon:{ally.id}"), d.id, hold)
+ok("the buyer is charged the listed price", ally.ap == 2, f"{ally.ap} AP")
+ok("...and the dealer pockets it", ad.ap == 4 + 1, f"{ad.ap} AP (+1 at turn end)")
+ok("the weapon replaces its attack", ally.atk == 4 and ally.grid == 3 and ally.rng == 5,
+   f"atk {ally.atk} grid {ally.grid} rng {ally.rng}")
+ok("...and it says so on the card",
+   any(b["key"] == "armed" for b in HEROES.status_of(m, ally)))
+
+# a hero's own buffs still ride on the weapon
+m, ad, ally, cannon, d = dealer_arena()
+ally.ap = 2
+ally.add_modifier(Modifier("atk", "add", 5))
+turn(m, ad.id, buy(f"rifle:{ally.id}"), d.id, hold)
+ok("the weapon sets the base and buffs still ride on it", ally.atk == 3 + 5,
+   str(ally.atk))
+
+# it does not sell to itself
+m, ad, ally, cannon, d = dealer_arena()
+ad.ap = 9
+wares = ad.passives[0].turn_choice(m, ad)["options"]
+ok("it is not on its own shelf", not any(w.endswith(f":{ad.id}") for w in wares),
+   str(wares))
+
+# fuel: every point spent is a point of damage
+m, ad, ally, cannon, d = dealer_arena()
+ad.ap = 4
+cannon.set_cell((5, 2))
+hp0 = cannon.hp
+turn(m, ad.id, {"destination": None,
+                "action": {"key": "attack", "shots": [[[5, 2]]], "spend": 3}},
+     d.id, hold)
+ok("a fed shot hits for its attack plus the fuel", hp0 - cannon.hp == 1 + 3,
+   f"took {hp0 - cannon.hp}")
+ok("...and the fuel is gone", ad.ap == 1 + 1, f"{ad.ap} AP (+1 at turn end)")
+m.select_hero(LEFT, ad.id)
+ok("it cannot spend what it does not have",
+   m.commit(LEFT, {"destination": None,
+                   "action": {"key": "attack", "shots": [[[5, 2]]], "spend": 99}}) is not None)
+m.deselect(LEFT)
+
+# an ordinary hero's shot takes no fuel
+m, ad, ally, cannon, d = dealer_arena()
+m.select_hero(LEFT, ally.id)
+ok("a hero without the trade cannot feed its shot",
+   m.commit(LEFT, {"destination": None,
+                   "action": {"key": "attack", "shots": [[[2, 2]]], "spend": 1}}) is not None)
+m.deselect(LEFT)
+
+# the nuke: everything at once, and then nothing ever again
+m, ad, ally, cannon, d = dealer_arena()
+ally.ap = 5
+turn(m, ad.id, buy(f"nuke:{ally.id}"), d.id, hold)
+ok("the warhead is fitted", ally.vars["arms"]["key"] == "nuke")
+hp0 = (cannon.hp, d.hp)
+r0 = m.round
+while m.round == r0:
+    left = [e.id for e in m.unacted(LEFT)]
+    right = [e.id for e in m.unacted(RIGHT)]
+    turn(m, left[0] if left else None, hold, right[0] if right else None, hold)
+turn(m, ally.id, {"destination": None, "action": {"key": "attack"}}, cannon.id, hold)
+ok("it catches every enemy on the board",
+   (hp0[0] - cannon.hp, hp0[1] - d.hp) == (6, 6),
+   f"{hp0[0]-cannon.hp}, {hp0[1]-d.hp}")
+ok("...and that hero never attacks again",
+   not any(a["key"] == "attack" for a in m.action_menu(ally)),
+   str([a["key"] for a in m.action_menu(ally)]))
+
+# but it can be re-armed
+m2, ad2, ally2, c2, d2 = dealer_arena()
+ally2.vars["arms"] = dict(HEROES.ARMS_BY_KEY["nuke"], attack={"mode": None}, spent=True)
+ally2.ap = 2
+turn(m2, ad2.id, buy(f"rifle:{ally2.id}"), d2.id, hold)
+ok("a spent hero can be handed something new",
+   any(a["key"] == "attack" for a in m2.action_menu(ally2)) and ally2.atk == 3,
+   f"atk {ally2.atk}")
+
+# 66 — regressions found hunting through the newest heroes
+
+# 蛇帝 is one creature on two squares: nothing that sweeps an area hits it twice
+def snake_target_arena(left):
+    m = arena(list(left), [("snake_head", (7, 2)), ("snake_tail", (7, 3))])
+    return m, unit(m, RIGHT, "snake_head"), unit(m, RIGHT, "snake_tail")
+
+m, hd3, tl3 = snake_target_arena([("thunder_dragon", (3, 2)), ("gatekeeper", (3, 3))])
+td = unit(m, LEFT, "thunder_dragon")
+ok("an ability that hits every enemy counts the snake once",
+   len(td.abilities[0].build_damage(m, td, {})) == 1,
+   str(len(td.abilities[0].build_damage(m, td, {}))))
+
+def snake_holds(m, hd, tl):
+    """The snake's own order: both halves stand where they are."""
+    return {"orders": [{"entity": hd.id, "destination": list(hd.cell),
+                        "action": {"key": "none"}},
+                       {"entity": tl.id, "destination": list(tl.cell),
+                        "action": {"key": "none"}}]}
+
+m, hd3, tl3 = snake_target_arena([("swordsman", (3, 2)), ("gatekeeper", (3, 3))])
+sw = unit(m, LEFT, "swordsman"); sw.ap = sw.max_ap
+tl3.set_cell((6, 2))                       # both halves in the same row, still joined
+hp0 = hd3.hp
+m.select_hero(LEFT, sw.id)
+assert m.commit(LEFT, {"destination": None,
+                       "action": {"key": "ability:gale_slash", "direction": "row"}}) is None
+m.select_hero(RIGHT, hd3.id)
+assert m.commit(RIGHT, snake_holds(m, hd3, tl3)) is None
+ok("a cut down a row catches the snake once, not once per half",
+   hp0 - hd3.hp == 5, f"took {hp0 - hd3.hp}")
+
+m, hd3, tl3 = snake_target_arena([("arms_dealer", (3, 2)), ("gatekeeper", (3, 3))])
+gk3 = unit(m, LEFT, "gatekeeper")
+gk3.vars["arms"] = dict(HEROES.ARMS_BY_KEY["nuke"])
+hp0 = hd3.hp
+m.select_hero(LEFT, gk3.id); m.commit(LEFT, {"destination": None, "action": {"key": "attack"}})
+m.select_hero(RIGHT, hd3.id)
+m.commit(RIGHT, {"orders": [{"entity": hd3.id, "destination": list(hd3.cell),
+                             "action": {"key": "none"}},
+                            {"entity": tl3.id, "destination": list(tl3.cell),
+                             "action": {"key": "none"}}]})
+ok("a board-wide blow catches it once", hp0 - hd3.hp == 6, f"took {hp0 - hd3.hp}")
+
+# ...and neither does the ground under both of its squares
+m = arena([("plague_doctor", (2, 2)), ("gatekeeper", (2, 3))],
+          [("snake_head", (7, 2)), ("snake_tail", (7, 3))])
+assert m.opening_choose(LEFT, {"cell": [1, 5]}) is None
+hd4, tl4 = unit(m, RIGHT, "snake_head"), unit(m, RIGHT, "snake_tail")
+m.board.add_effect(hd4.cell, BOARD.Infection(LEFT))
+m.board.add_effect(tl4.cell, BOARD.Infection(LEFT))
+hp0 = hd4.hp
+m.select_hero(LEFT, unit(m, LEFT, "gatekeeper").id); m.commit(LEFT, hold)
+m.select_hero(RIGHT, hd4.id)
+m.commit(RIGHT, {"orders": [{"entity": hd4.id, "destination": list(hd4.cell),
+                             "action": {"key": "none"}},
+                            {"entity": tl4.id, "destination": list(tl4.cell),
+                             "action": {"key": "none"}}]})
+ok("bad ground under both halves bites the creature once", hp0 - hd4.hp == 2,
+   f"took {hp0 - hd4.hp}")
+
+# a one-bodied hero is unaffected by any of that
+m = arena([("fire_mage", (2, 2)), ("gatekeeper", (2, 3))],
+          [("cannoneer", (8, 2)), ("dummy", (8, 3))])
+c5 = unit(m, RIGHT, "cannoneer")
+burn = m.board.add_burning(c5.cell, LEFT).damage
+hp0 = c5.hp
+m.select_hero(LEFT, unit(m, LEFT, "gatekeeper").id); m.commit(LEFT, hold)
+m.select_hero(RIGHT, c5.id); m.commit(RIGHT, hold)
+ok("an ordinary hero still takes its ground tick", hp0 - c5.hp == burn,
+   f"took {hp0 - c5.hp}")
+
+# 教皇: one Pope may step in front of another's end, but never its own
+m = arena([("pope", (2, 2)), ("pope", (2, 3))],
+          [("cannoneer", (8, 2)), ("dummy", (8, 3))])
+pa, pb = [e for e in m.living(LEFT) if e.key == "pope"]
+c6 = unit(m, RIGHT, "cannoneer")
+pb.set_cell((7, 2)); pb.hp = 2
+m.select_hero(LEFT, pa.id); m.commit(LEFT, hold)
+m.select_hero(RIGHT, c6.id)
+m.commit(RIGHT, {"destination": None, "action": {"key": "attack", "shots": [[[7, 2]]]}})
+ok("a second Pope's end is offered to the first", m.phase == "interrupt", m.phase)
+m.choose_interrupt(LEFT, True)
+ok("...and it can be stepped in front of", pb.alive and pb.hp == 2, f"{pb.hp} hp")
+ok("...spending the other's mercy, not its own",
+   pa.vars.get("saves_used") == 1 and not pb.vars.get("saves_used"),
+   f"{pa.vars.get('saves_used')}/{pb.vars.get('saves_used')}")
+
+# 军火商人: a spent warhead leaves the hero its own attack number back
+m = arena([("arms_dealer", (2, 2)), ("gatekeeper", (2, 3))], [("dummy", (8, 3))])
+gk7 = unit(m, LEFT, "gatekeeper")
+own = gk7.atk
+gk7.vars["arms"] = dict(HEROES.ARMS_BY_KEY["nuke"], attack={"mode": None}, spent=True)
+ok("a spent hero does not keep claiming the warhead's number", gk7.atk == own,
+   f"{gk7.atk} vs its own {own}")
+ok("...and genuinely has no attack",
+   not any(a["key"] == "attack" for a in m.action_menu(gk7)))
+
 print("\nlog tail:")
 for line in m.log[-5:]:
     print("   ", line["text"])

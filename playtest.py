@@ -62,7 +62,10 @@ def attack_options(m, e, a, origin):
         picked = [f.cell for f in sorted(reach, key=lambda f: f.hp)[:t["count"]]]
         shots = [[list(c) for c in picked] for _ in range(t["shots"])]
         best = min(reach, key=lambda f: f.hp)
-        yield {"shots": shots}, e.atk + kill_bonus(best, e.atk)
+        # A shot that takes fuel is worth everything banked (军火商人).
+        fuel = t.get("fuel") or 0
+        yield ({"shots": shots, "spend": fuel},
+               e.atk + fuel + kill_bonus(best, e.atk + fuel))
 
     elif kind == "unit":
         want = t.get("count", 1)
@@ -148,6 +151,16 @@ def ability_options(m, e, a, origin):
             dmg = got[0] if got else 0
             yield {"target": f.id}, dmg + kill_bonus(f, dmg)
 
+    elif kind == "any_unit":
+        # 法官: reward your own hardest hitter, condemn theirs.
+        reward = getattr(ab, "judges", "") == "reward"
+        pool = [x for x in m.living(e.side) if x is not e] if reward else foes
+        # Marking somebody already marked just pushes the verdict back a turn.
+        pool = [x for x in pool if not x.vars.get("judged")]
+        if pool:
+            pick = max(pool, key=lambda x: x.atk)
+            yield {"target": pick.id}, pick.atk + 2
+
     elif kind == "ally":
         hurt = [x for x in allies + [e] if x.hp < x.max_hp]
         if hurt:
@@ -155,6 +168,31 @@ def ability_options(m, e, a, origin):
             yield {"target": worst.id}, min(6, worst.max_hp - worst.hp)
         else:
             yield {"target": e.id}, 1
+
+    elif kind == "cells":
+        # Paint the shape over the enemies nearest each other, keeping it one piece:
+        # start at the frailest in reach and grow through its neighbours.
+        reach = [f for f in foes if m.topology.distance(origin, f.cell) <= t["range"]]
+        if not reach:
+            return
+        seed = min(reach, key=lambda f: f.hp).cell
+        picked, frontier = [seed], [seed]
+        while frontier and len(picked) < t["count"]:
+            cur = frontier.pop(0)
+            for n in m.topology.neighbours(cur):
+                if len(picked) >= t["count"]:
+                    break
+                if n in picked or m.topology.distance(origin, n) > t["range"]:
+                    continue
+                picked.append(n)
+                frontier.append(n)
+        if len(picked) != t["count"]:
+            return
+        hit = [f for f in reach if f.cells & set(picked)]
+        got = damage_of({"shots": [[list(c) for c in picked]]})
+        score = got[0] if got else 0
+        yield ({"shots": [[list(c) for c in picked]]},
+               score + max((kill_bonus(f, ab.DAMAGE) for f in hit), default=0))
 
     elif kind == "any_cell":
         cells = t.get("cells")
@@ -228,10 +266,18 @@ def best_order(m, e, pending=None):
 # ------------------------------------------------------------------- play
 
 def free_picks(m, e, payload):
-    """Answer any pick that rides along with the turn (杂货店爷爷's handout)."""
+    """Answer any pick that rides along with the turn (杂货店爷爷's handout,
+    军火商人's shelf). Takes the priciest thing on offer, which for a shelf means
+    the best weapon somebody can afford."""
     choices = {}
     for ch in m.turn_choices(e):
-        if ch["options"]:
+        if not ch["options"]:
+            continue
+        wares = ch.get("wares")
+        if wares:
+            best = max(wares, key=lambda w: int((w.get("note") or "0").split()[0]))
+            choices[ch["key"]] = best["value"]
+        else:
             choices[ch["key"]] = ch["options"][0]
     if choices:
         payload["choices"] = choices
@@ -277,6 +323,12 @@ def play_teams(left, right, seed=0, verbose=False):
     random.seed(seed)
     m = Match()
     m.assign_draft(list(left), list(right))
+    # Anything that reshapes the board does so before deployment (工匠's doors).
+    while m.build:
+        for side in (LEFT, RIGHT):
+            if m.build and m.build["pending"][side]:
+                home = 2 if side == LEFT else 8
+                m.build_choose(side, {"cells": [[home, 3], [5, 3]]})
     for side, col in ((LEFT, 2), (RIGHT, 8)):
         # Down one column, and spilling into the next if a squad brings extra bodies.
         free = [(c, r) for c in (col, col - 1 if side == LEFT else col + 1)
@@ -292,7 +344,15 @@ def play_teams(left, right, seed=0, verbose=False):
         guard += 1
         if guard > 4000:
             break
-        if m.phase == "opening":
+        if m.phase == "build":
+            for side in (LEFT, RIGHT):
+                if m.phase != "build" or not m.build:
+                    break
+                if m.build["pending"][side]:
+                    # A door from your own back line to the middle of the board.
+                    home = 2 if side == LEFT else 8
+                    m.build_choose(side, {"cells": [[home, 3], [5, 3]]})
+        elif m.phase == "opening":
             for side in (LEFT, RIGHT):
                 if m.opening is None or m.phase != "opening":
                     break        # the last pick ends the phase

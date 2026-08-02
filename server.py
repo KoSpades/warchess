@@ -38,6 +38,8 @@ class Game:
                 return m.unplace(side, body["cell"])
             if cmd == "lock":
                 return m.lock_force(side)
+            if cmd == "build":
+                return m.build_choose(side, body)
             if cmd == "opening":
                 return m.opening_choose(side, body)
             if cmd == "select":

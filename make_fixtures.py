@@ -197,6 +197,19 @@ def build():
     m.start_round()
     snap("frozen", m)
 
+    # --- the board being built, before anyone is placed ------------------------
+    m = Match(); m.assign_draft(["artisan", "cannoneer"], ["gatekeeper", "dummy"])
+    out["build"] = view.state_for(m, LEFT)
+    out["build_waiting"] = view.state_for(m, RIGHT)
+    m.build_choose(LEFT, {"cells": [[2, 3], [8, 3]]})
+    for k, c in (("artisan", (2, 3)), ("cannoneer", (1, 1))):
+        m.place(LEFT, k, c)
+    for k, c in (("gatekeeper", (8, 1)), ("dummy", (8, 2))):
+        m.place(RIGHT, k, c)
+    m.lock_force(LEFT); m.lock_force(RIGHT)
+    m.select_hero(LEFT, unit(m, LEFT, "artisan").id)
+    out["doors"] = view.state_for(m, LEFT)
+
     # --- the other phases -----------------------------------------------------
     out["draft"] = view.state_for(Match(), LEFT)
     m = Match(); m.assign_draft(["goblin_gang", "sniper"], ["dummy", "dummy"])

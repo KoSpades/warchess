@@ -10,7 +10,7 @@ import board as BOARD
 import damage as DMG
 import events as EV
 from entities import Modifier, UNTIL_OWNER_NEXT_TURN, UNTIL_TURN_END
-from topology import other_side
+from topology import LEFT, other_side
 
 
 # ---------------------------------------------------------------- abilities
@@ -68,16 +68,11 @@ class Sweep(Ability):
         return cells
 
     def build_damage(self, match, actor, params):
-        cells = set(self.block(match, actor, params.get("direction", "forward")))
-        out = []
-        for e in match.living():
-            if e.side != actor.side and (e.cells & cells):
-                out.append(
-                    DMG.DamageEvent(
-                        source=actor, target=e, amount=4, category=DMG.ABILITY
-                    )
-                )
-        return out
+        cells = self.block(match, actor, params.get("direction", "forward"))
+        return [
+            DMG.DamageEvent(source=actor, target=e, amount=4, category=DMG.ABILITY)
+            for e in match.enemies_in(cells, actor.side)
+        ]
 
 
 class Charge(Ability):
@@ -562,9 +557,7 @@ class ShapeAbility(Ability):
         return match.shape_cells(actor.cell, which) if actor.cells else []
 
     def victims(self, match, actor, which):
-        cells = set(self.cells_of(match, actor, which))
-        return [e for e in match.living()
-                if e.side != actor.side and (e.cells & cells)]
+        return match.enemies_in(self.cells_of(match, actor, which), actor.side)
 
     def shapes(self, match, actor):
         """Every option with the squares it covers, so the client can show one
@@ -849,6 +842,130 @@ class Garrote(Ability):
                                 category=DMG.NORMAL_ATTACK)]
 
 
+class Soak(Ability):
+    """水法师's 浸水. Paint four squares that touch — a line, an L, a block, whatever
+    the board offers — and everything of theirs standing in them is drenched. Half
+    of what the water takes, the mage keeps.
+
+    The marking is the ordinary cell-marking every attack uses; the only thing this
+    adds is that the four must be one piece."""
+
+    key = "soak"
+    name = "浸水 Soak"
+    ap_cost = 2
+    targeting = {"kind": "cells", "count": 4, "range": 6, "shots": 1}
+    blurb = ("Mark four connected squares within 6. Every enemy in them takes 3 water "
+             "damage, and the mage mends for half of everything that actually landed.")
+    DAMAGE = 3
+
+    def validate(self, match, actor, params):
+        cells = (params.get("shots") or [[]])[0]
+        if not match.topology.connected(cells):
+            return "The four squares must touch — one shape, not scattered."
+        return None
+
+    def build_damage(self, match, actor, params):
+        cells = (params.get("shots") or [[]])[0]
+        events = [
+            DMG.DamageEvent(source=actor, target=e, amount=self.DAMAGE,
+                            category=DMG.ABILITY, element=DMG.WATER)
+            for e in match.enemies_in(cells, actor.side)
+        ]
+        # Kept so the mending can read what actually landed once the pipeline has
+        # had its say — guards, marks and caps all count against it.
+        actor.vars["soak_events"] = events
+        return events
+
+    def side_effects(self, match, actor, params):
+        events = actor.vars.pop("soak_events", [])
+        took = sum(ev.dealt for ev in events)
+        if not took or not actor.alive:
+            return
+        healed = DMG.heal(match, actor, took // 2, source=actor)
+        if healed:
+            match.log_line(
+                f"{match.label(actor)} draws the water back — {took} taken, "
+                f"{healed} mended."
+            )
+
+
+def pass_judgement(match, judge, target, kind):
+    """Lay a verdict on somebody. One at a time — a new one replaces whatever was
+    there, whichever kind it was."""
+    if target is None or not target.alive:
+        return
+    target.vars["judged"] = {"kind": kind, "judge": judge.id, "exchange": match.exchange}
+    word = "rewarded" if kind == "reward" else "condemned"
+    match.log_line(
+        f"{match.label(judge)} marks {match.label(target)} — it will be {word} at the "
+        f"end of its next turn, by whatever it does with it."
+    )
+
+
+class Commend(Ability):
+    """法官's 赏善. Anyone may be marked, either side's — rewarding one of theirs is
+    a poor idea, but the bench does not check colours."""
+
+    key = "commend"
+    name = "赏善 Commend"
+    ap_cost = 2
+    targeting = {"kind": "any_unit"}
+    judges = "reward"
+    blurb = ("Mark anyone. At the end of its next turn it is mended for everything it "
+             "dealt during that turn.")
+
+    def side_effects(self, match, actor, params):
+        pass_judgement(match, actor, match.entity(params.get("target")), "reward")
+
+
+class Condemn(Ability):
+    """法官's 罚恶. The mirror of 赏善, and cheaper — cruelty usually is."""
+
+    key = "condemn"
+    name = "罚恶 Condemn"
+    ap_cost = 1
+    targeting = {"kind": "any_unit"}
+    judges = "punish"
+    blurb = ("Mark anyone. At the end of its next turn it takes everything it dealt "
+             "during that turn, back on itself.")
+
+    def side_effects(self, match, actor, params):
+        pass_judgement(match, actor, match.entity(params.get("target")), "punish")
+
+
+class RaiseDoors(Ability):
+    """工匠's doors. Chosen before anybody is placed, so both sides deploy knowing
+    where they are — that is the whole point of building first rather than after.
+
+    The two squares become neighbours for its own side and nobody else. Adjacency is
+    the topology's business, and it has always taken the unit as an argument for
+    exactly this reason, so no rule about movement had to change."""
+
+    key = "raise_doors"
+    name = "立门 Raise Doors"
+    ap_cost = 0
+    prebuild = True
+    targeting = {"kind": "two_cells"}
+    blurb = ("Before anyone deploys, pick two squares anywhere on the board. Your side "
+             "may step between them as though they touched. Both sides can see them.")
+
+    def validate_build(self, match, side, params):
+        cells = [tuple(c) for c in (params.get("cells") or [])]
+        if len(cells) != 2:
+            return "Pick two squares."
+        if cells[0] == cells[1]:
+            return "Pick two different squares."
+        for c in cells:
+            if not match.topology.in_bounds(c):
+                return "That square is not on the board."
+        return None
+
+    def build_effects(self, match, side, params):
+        a, b = (tuple(c) for c in params["cells"])
+        match.topology.link(a, b, side)
+        match.log_line(f"{'Left' if side == LEFT else 'Right'} 工匠 raises a pair of doors.")
+
+
 class Recurse(Ability):
     """诅咒娃娃's 再咒. Only available once the mark it laid has actually been
     sprung — a curse still sitting on the board cannot be moved."""
@@ -950,11 +1067,9 @@ class Ray(Ability):
     blurb = "6 damage to every enemy in the caster's row. Travels with it if bounced."
 
     def build_damage(self, match, actor, params):
-        cells = set(match.topology.row(actor.cell[1]))
         return [
             DMG.DamageEvent(source=actor, target=e, amount=6, category=DMG.ABILITY)
-            for e in match.living()
-            if e.side != actor.side and (e.cells & cells)
+            for e in match.enemies_in(match.topology.row(actor.cell[1]), actor.side)
         ]
 
 
@@ -1021,8 +1136,7 @@ class Thunderstorm(Ability):
                 category=DMG.ABILITY,
                 element=DMG.THUNDER,
             )
-            for e in match.living()
-            if e.side != actor.side
+            for e in match.enemies_in(None, actor.side)
         ]
 
 
@@ -1832,6 +1946,91 @@ class PaintStroke:
         }
 
 
+
+
+class ArmsDealer:
+    """军火商人. While it is standing, its whole side can bank AP without limit; once
+    a round it charges one of them for a weapon and pockets the fee.
+
+    Nothing here is new machinery. The open bar is a `set` modifier on the stack,
+    granted by the dealer itself — so it lapses the moment the dealer falls, and any
+    savings above a hero's own ceiling go with it. A weapon is a stat block a unit
+    carries instead of its own, which the engine already reads through one hook."""
+
+    describe = ("While it stands, every one of your heroes can bank AP without limit. "
+                "Once a round, on its own turn, it charges one of them for a weapon "
+                "and keeps the fee. Its own shot can be fed AP: every point spent is "
+                "a point of damage. It does not sell to itself.")
+    OPEN_BAR = 99
+    CHOICE = "armory"
+
+    def _open_the_bar(self, match, owner):
+        if not owner.alive:
+            return
+        for e in match.living(owner.side):
+            if not any(m.source is owner and m.stat == "max_ap" for m in e.modifiers):
+                e.add_modifier(Modifier("max_ap", "set", self.OPEN_BAR, source=owner))
+
+    def on_match_start(self, match, owner, ctx):
+        self._open_the_bar(match, owner)
+
+    def on_round_start(self, match, owner, ctx):
+        self._open_the_bar(match, owner)
+
+    def turn_choice(self, match, owner):
+        """One sale a round, riding along with its own turn — it still moves and
+        shoots. Every affordable pairing of hero and weapon is offered."""
+        opts = []
+        for e in match.living(owner.side):
+            if e is owner or not e.flags["counts_for_defeat"]:
+                continue      # it does not sell to itself
+            for w in ARMS:
+                if e.ap >= w["ap"]:
+                    opts.append({"value": f"{w['key']}:{e.id}",
+                                 "label": f"{e.name} ← {w['name']}",
+                                 "note": f"{w['ap']} AP · {w['text']}"})
+        return {
+            "key": self.CHOICE,
+            "name": "武器库 Armory",
+            "text": "Charge one of your heroes for a weapon. The fee is yours to keep.",
+            "kind": "armory",
+            "optional": True,
+            "options": [o["value"] for o in opts],
+            "wares": opts,
+        }
+
+    def apply_choice(self, match, owner, key, value):
+        if key != self.CHOICE or not value:
+            return
+        wkey, _, eid = str(value).partition(":")
+        buyer, w = match.entity(int(eid)) if eid.isdigit() else None, ARMS_BY_KEY.get(wkey)
+        if buyer is None or w is None or not buyer.alive or buyer.side != owner.side:
+            return
+        if buyer is owner or buyer.ap < w["ap"]:
+            return
+        buyer.ap -= w["ap"]
+        owner.gain_ap(w["ap"])
+        buyer.vars["arms"] = dict(w)
+        match.log_line(
+            f"{match.label(owner)} sells {match.label(buyer)} a {w['name']} for "
+            f"{w['ap']} AP."
+        )
+
+    def status(self, match, owner):
+        return {
+            "key": "open_bar", "badge": "军", "label": "军火商人 OPEN BAR",
+            "text": "Every one of your heroes can bank AP without limit while it "
+                    "stands. Its own shot takes AP as fuel, a point for a point.",
+        }
+
+
+class ArmedWith:
+    """Shown on whoever is carrying bought hardware, so both seats can read what it
+    is holding now rather than what it was built with."""
+
+    describe = "Carrying a weapon bought from 军火商人."
+
+
 class FourBeasts:
     """四圣兽. Four squares carry a blessing, each given once and kept for good. The
     squares are read off the topology rather than written down, so a board of
@@ -2084,6 +2283,22 @@ WEAPONS = [
      "cells": 5, "range": 8, "text": "5 cells @8, one target."},
 ]
 WEAPONS_BY_KEY = {w["key"]: w for w in WEAPONS}
+
+# 军火商人's stock. Each is an ordinary attack spec — a mode, a net, a reach and a
+# number — so a hero holding one attacks exactly as a hero built that way would.
+ARMS = [
+    {"key": "rifle", "name": "步枪 Rifle", "ap": 2, "atk": 3,
+     "attack": {"mode": CELL, "cells": 2, "range": 2},
+     "text": "3 damage · 2 squares at range 2."},
+    {"key": "cannon", "name": "重炮 Heavy Cannon", "ap": 4, "atk": 4,
+     "attack": {"mode": CELL, "cells": 3, "range": 5},
+     "text": "4 damage · 3 squares at range 5."},
+    {"key": "nuke", "name": "核爆 Nuke", "ap": 5, "atk": 6, "once": True,
+     "attack": {"mode": AREA, "shape": "board", "range": None},
+     "text": "6 damage to every enemy on the board. Firing it costs that hero its "
+             "attack for good."},
+]
+ARMS_BY_KEY = {w["key"]: w for w in ARMS}
 
 
 class WeaponMaster:
@@ -2565,6 +2780,54 @@ ROSTER = [
         blurb="Keeps nothing for himself — every turn, an ally leaves with an extra point.",
     ),
     HeroDef(
+        key="arms_dealer",
+        name="军火商人",
+        name_en="armsDealer",
+        max_hp=15,
+        atk=1,
+        move=1,
+        max_ap=99,
+        attack={"mode": CELL, "cells": 2, "range": 5, "fuel": True},
+        passives=[ArmsDealer],
+        blurb="Opens everyone's purse, then sells them what to do with it.",
+    ),
+    HeroDef(
+        key="artisan",
+        name="工匠",
+        name_en="artisan",
+        max_hp=17,
+        atk=3,
+        move=1,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 2, "range": 2},
+        abilities=[RaiseDoors()],
+        blurb="Builds two doors into the board before a single hero is placed.",
+    ),
+    HeroDef(
+        key="judge",
+        name="法官",
+        name_en="judge",
+        max_hp=16,
+        atk=3,
+        move=1,
+        max_ap=4,
+        attack={"mode": CELL, "cells": 2, "range": 3},
+        abilities=[Commend(), Condemn()],
+        blurb="Marks a hero and lets its own next turn decide what it has earned.",
+    ),
+    HeroDef(
+        key="water_mage",
+        name="水法师",
+        name_en="waterMage",
+        max_hp=15,
+        atk=2,
+        move=1,
+        max_ap=2,
+        attack={"mode": CELL, "cells": 3, "range": 4},
+        abilities=[Soak()],
+        blurb="Drenches four squares at a stroke, and keeps half of what the water takes.",
+    ),
+    HeroDef(
         key="pope",
         name="教皇",
         name_en="pope",
@@ -2780,7 +3043,7 @@ BY_KEY[DUMMY.key] = DUMMY
 # whenever you add heroes; --test fills the rest of your side with dummies.
 # Whoever is newest goes here — --test always deploys the hero just added, so it
 # can be played immediately. Up to two; the rest of the side is padded with dummies.
-TEST_HEROES = ["plague_doctor", "pope"]
+TEST_HEROES = ["artisan", "arms_dealer"]
 
 
 
@@ -2790,6 +3053,7 @@ TEST_HEROES = ["plague_doctor", "pope"]
 TARGETING_KINDS = {
     "none", "ally", "unit", "two_units", "any_cell", "direction",
     "magnitude", "weapon", "cells", "lane", "area", "cone", "shape",
+    "any_unit", "two_cells",
 }
 
 
@@ -2873,6 +3137,25 @@ def status_of(match, entity):
             "key": "blessed", "badge": "佑", "label": "祝福 BLESSED",
             "text": "The next attack or ability that would hurt it is turned aside. "
                     "+1 movement until then. Burning ground still bites.",
+        })
+    if entity.vars.get("arms"):
+        w = entity.vars["arms"]
+        spent = w.get("spent")
+        out.append({
+            "key": "armed", "badge": "械", "label": f"{w['name']}",
+            "text": ("Its own attack is gone — the warhead is spent." if spent
+                     else w["text"]),
+        })
+    if entity.vars.get("judged"):
+        mark = entity.vars["judged"]
+        good = mark["kind"] == "reward"
+        out.append({
+            "key": "judged", "badge": "赏" if good else "罚",
+            "label": "赏善 COMMENDED" if good else "罚恶 CONDEMNED",
+            "text": ("At the end of its next turn it is mended for everything it "
+                     "dealt during that turn." if good else
+                     "At the end of its next turn it takes everything it dealt "
+                     "during that turn, back on itself."),
         })
     if entity.vars.get("poison_rounds"):
         n = entity.vars["poison_rounds"]

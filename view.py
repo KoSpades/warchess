@@ -179,6 +179,10 @@ def state_for(m, side):
         # Per side: a hidden effect (潜水者's bombs) is only ever sent to the side
         # that laid it, the same way a curse mark is.
         "tiles": m.board.serialise(side),
+        # Doors are built into the board before anyone deploys, so both seats see
+        # them. Sent with the side that may walk through, for the client to mark.
+        "doors": [{"cells": [list(a), list(b)], "owner": owner}
+                  for a, b, owner in m.topology.links],
         "units": units,
         "log": [l for l in m.log if l.get("side") in (None, side)][-60:],
         "reveal": m.last_reveal,
@@ -211,6 +215,17 @@ def state_for(m, side):
             "placements": m.setup_state[side]["placements"],
             "ready": m.setup_state[side]["ready"],
             "opponent_ready": m.setup_state[foe]["ready"],
+        }
+        return out
+
+    if m.phase == M.BUILD:
+        hero, ab = m.build_ability(side)
+        out["build"] = {
+            "task": None if ab is None else {
+                "hero": hero.name, "hero_en": hero.name_en,
+                "ability": ab.name, "text": ab.blurb, "targeting": ab.targeting,
+            },
+            "waiting_on_opponent": ab is None and bool(m.build),
         }
         return out
 

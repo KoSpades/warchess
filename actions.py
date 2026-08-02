@@ -44,10 +44,12 @@ class CellLockedAttack(ActionInstance):
     needs_pick = True
 
     def __init__(self, attacker, cells, intended_origin, halve=False, index=0, amount=None,
-                 max_victims=1):
+                 max_victims=1, bonus=0):
         self.attacker = attacker
         # How many of the enemies standing in the net this shot may hit.
         self.max_victims = max(1, max_victims)
+        # Points of AP fed into this shot, each one a point of damage.
+        self.bonus = max(0, bonus)
         self.actor = attacker
         self.committed_cells = [tuple(c) for c in cells]
         self.intended_origin = tuple(intended_origin)
@@ -75,14 +77,7 @@ class CellLockedAttack(ActionInstance):
         return out
 
     def eligible_victims(self, match):
-        cells = set(self.resolved_cells(match))
-        return [
-            e
-            for e in match.living()
-            if e.side != self.attacker.side
-            and e.flags["targetable"]
-            and (e.cells & cells)
-        ]
+        return match.enemies_in(self.resolved_cells(match), self.attacker.side)
 
     def build_damage(self, match, victim):
         if victim is None or not victim.alive:
@@ -92,7 +87,8 @@ class CellLockedAttack(ActionInstance):
             DMG.DamageEvent(
                 source=self.attacker,
                 target=victim,
-                amount=self.attacker.atk if self.amount is None else self.amount,
+                amount=(self.attacker.atk if self.amount is None else self.amount)
+                       + self.bonus,
                 category=DMG.NORMAL_ATTACK,
                 tags=tags,
             )
@@ -185,8 +181,7 @@ class AreaAttack(ActionInstance):
             DMG.DamageEvent(
                 source=self.attacker, target=e, amount=self.amount, category=DMG.NORMAL_ATTACK
             )
-            for e in match.living()
-            if e.side != self.attacker.side and e.flags["targetable"] and (e.cells & self.cells)
+            for e in match.enemies_in(self.cells, self.attacker.side)
         ]
 
 
@@ -218,12 +213,10 @@ class ConeAttack(ActionInstance):
         return None
 
     def build_damage(self, match, victim):
-        spread = set(self.resolved_cells(match))
         return [
             DMG.DamageEvent(source=self.attacker, target=e, amount=self.attacker.atk,
                             category=DMG.NORMAL_ATTACK)
-            for e in match.living()
-            if e.side != self.attacker.side and e.flags["targetable"] and (e.cells & spread)
+            for e in match.enemies_in(self.resolved_cells(match), self.attacker.side)
         ]
 
 

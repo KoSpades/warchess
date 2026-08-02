@@ -20,6 +20,9 @@ class Topology:
         self.cols = cols
         self.rows = rows
         self.removed = set()
+        # Pairs of squares one side may step between as though they touched
+        # (工匠's doors): (a, b, owner_side).
+        self.links = []
 
     # --- basic queries -------------------------------------------------
 
@@ -35,12 +38,37 @@ class Topology:
             if (c, r) not in self.removed
         ]
 
+    def link(self, a, b, side):
+        """Join two squares for one side. They are neighbours for that side and
+        nobody else, and the board is otherwise unchanged."""
+        self.links.append((tuple(a), tuple(b), side))
+
+    def linked_from(self, cell, entity):
+        """The far side of any door this unit may walk through from here."""
+        if entity is None:
+            return []
+        out = []
+        for a, b, side in self.links:
+            if entity.side != side:
+                continue
+            if cell == a:
+                out.append(b)
+            elif cell == b:
+                out.append(a)
+        return out
+
     def neighbours(self, cell, entity=None):
-        """Orthogonal only. Diagonal adjacency is a per-entity property that no
-        currently implemented hero has, hence the unused `entity` hook."""
+        """Orthogonal, plus any square linked to this one for that particular unit.
+        The `entity` hook is what makes adjacency a per-unit question: a door is a
+        neighbour for the side that built it and a plain square for everyone else.
+        Callers that mean "the board's own neighbours" simply pass nothing."""
         c, r = cell
         cands = [(c + 1, r), (c - 1, r), (c, r + 1), (c, r - 1)]
-        return [x for x in cands if self.in_bounds(x)]
+        out = [x for x in cands if self.in_bounds(x)]
+        for x in self.linked_from(cell, entity):
+            if self.in_bounds(x) and x not in out:
+                out.append(x)
+        return out
 
     def distance(self, a, b, entity=None):
         return abs(a[0] - b[0]) + abs(a[1] - b[1])
@@ -59,6 +87,23 @@ class Topology:
 
     def row(self, row):
         return [(c, row) for c in range(1, self.cols + 1) if self.in_bounds((c, row))]
+
+    def connected(self, cells):
+        """True if the group is one piece — every square touching at least one other
+        through the rest of the set. Used by squad placement (哥布林团伙 must go down
+        as one blob) and by any ability that asks for a contiguous shape (水法师)."""
+        pool = {tuple(c) for c in cells}
+        if len(pool) < 2:
+            return True
+        start = next(iter(pool))
+        seen, frontier = {start}, [start]
+        while frontier:
+            cur = frontier.pop()
+            for n in self.neighbours(cur):
+                if n in pool and n not in seen:
+                    seen.add(n)
+                    frontier.append(n)
+        return len(seen) == len(pool)
 
     # --- sides ---------------------------------------------------------
 

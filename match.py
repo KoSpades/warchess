@@ -20,6 +20,10 @@ from topology import LEFT, RIGHT, Topology, other_side
 
 
 DRAFT = "draft"
+# Before anybody is placed: abilities flagged `prebuild=True` reshape the board
+# itself (工匠's doors), so both sides deploy knowing what it looks like. There are
+# no entities yet, so a build ability is handed its side rather than a hero.
+BUILD = "build"
 SETUP = "setup"
 OPENING = "opening"
 COMMIT = "commit"
@@ -61,7 +65,8 @@ class Match:
         self.global_rules = [DMG.SharedPool(), DMG.AbilityImmunity(), DMG.Blessing(),
                              DMG.OutgoingShift(),
                              DMG.Vulnerability(), DMG.FlatReduction(), DMG.CurseTrap(),
-                             DMG.Poison(), DMG.HalvingRule(), Minefield()]
+                             DMG.Poison(), DMG.HalvingRule(), DMG.Ledger(),
+                             DMG.Verdict(), Minefield()]
         # Damage from the board itself, banked as it is triggered so a whole
         # exchange's worth lands in one instant (mines under two movers).
         self.pending_hazards = []
@@ -96,6 +101,7 @@ class Match:
         # Heroes each side owns after the draft; placement is restricted to these.
         self.drafted = {LEFT: [], RIGHT: []}
         self.draft = None
+        self.build = None
         self.opening = None
 
         self.phase = SETUP
@@ -149,6 +155,24 @@ class Match:
             if e.id == eid:
                 return e
         return None
+
+    def enemies_in(self, cells, side):
+        """Every enemy standing in these squares, counted once per creature. A hero
+        on two squares (蛇帝) is one target, not two — otherwise anything that sweeps
+        an area hits it twice for one blow. `cells=None` means the whole board."""
+        cells = None if cells is None else {tuple(c) for c in cells}
+        seen, out = set(), []
+        for e in self.living():
+            if e.side == side or not e.flags["targetable"]:
+                continue
+            if cells is not None and not (e.cells & cells):
+                continue
+            holder = DMG.pool_holder(self, e) or e
+            if holder.id in seen:
+                continue
+            seen.add(holder.id)
+            out.append(e)
+        return out
 
     def occupant(self, cell):
         for e in self.entities:
@@ -241,6 +265,14 @@ class Match:
         left += ["dummy"] * (2 - len(left))
         right = ["dummy", "dummy"]   # always dummies: no passives to muddy a test
         self.drafted = {LEFT: left, RIGHT: right}
+        self.begin_build()
+        if self.phase == BUILD:
+            # --test is a playground, not a game: give any builder a sensible pair
+            # rather than making the player answer before anything is on the board.
+            for s in (LEFT, RIGHT):
+                while self.build and self.build["pending"][s]:
+                    home = 2 if s == LEFT else 8
+                    self.build_choose(s, {"cells": [[home, 3], [5, 3]]})
         for s in (LEFT, RIGHT):
             # Down a column, so a squad's bodies land adjacent to each other.
             col = 2 if s == LEFT else 8
@@ -307,16 +339,68 @@ class Match:
     def _finish_draft(self):
         self.draft = None
         self.force_size = len(self.drafted[LEFT])
+        self.log_line("Draft complete.")
+        self.begin_build()
+
+    # ------------------------------------------------------------- build
+    # Between the draft and deployment. A hero whose ability is flagged `prebuild`
+    # gets to change the board before anyone stands on it.
+
+    def begin_build(self):
+        pending = {LEFT: [], RIGHT: []}
+        for side in (LEFT, RIGHT):
+            for key in self.drafted[side]:
+                card = HEROES.BY_KEY[key]
+                for body in (card.squad or [key]):
+                    for ab in HEROES.BY_KEY[body].abilities:
+                        if getattr(ab, "prebuild", False):
+                            pending[side].append({"hero": body, "ability_key": ab.key})
+        self.build = {"pending": pending}
+        if not pending[LEFT] and not pending[RIGHT]:
+            self.build = None
+            self.open_setup()
+            return
+        self.phase = BUILD
+        self.log_line("The board is being made ready.")
+        self.bump()
+
+    def build_ability(self, side):
+        """The build task this side owes, as (hero key, ability), or (None, None)."""
+        pend = self.build["pending"][side] if self.build else []
+        if not pend:
+            return None, None
+        hero = HEROES.BY_KEY[pend[0]["hero"]]
+        return hero, next(a for a in hero.abilities if a.key == pend[0]["ability_key"])
+
+    def build_choose(self, side, params):
+        if self.phase != BUILD or not self.build:
+            return "Not the building phase."
+        hero, ab = self.build_ability(side)
+        if ab is None:
+            return "Nothing for you to build."
+        err = ab.validate_build(self, side, params)
+        if err:
+            return err
+        ab.build_effects(self, side, params)
+        self.build["pending"][side].pop(0)
+        if not self.build["pending"][LEFT] and not self.build["pending"][RIGHT]:
+            self.build = None
+            self.open_setup()
+        self.bump()
+        return None
+
+    def open_setup(self):
         self.phase = SETUP
-        self.log_line("Draft complete — deploy your forces.")
+        self.log_line("Deploy your forces.")
 
     def assign_draft(self, left_keys, right_keys):
-        """Skip the interactive draft and hand each side its heroes directly,
-        then enter deployment. Used by headless tests and scripted setups."""
+        """Skip the interactive draft and hand each side its heroes directly. Goes to
+        deployment, or to the building phase first if anybody drafted reshapes the
+        board. Used by headless tests and scripted setups."""
         self.drafted = {LEFT: list(left_keys), RIGHT: list(right_keys)}
         self.force_size = len(left_keys)
         self.draft = None
-        self.phase = SETUP
+        self.begin_build()
 
     # -------------------------------------------------------------- setup
 
@@ -376,18 +460,7 @@ class Match:
             if not hero.squad:
                 continue
             cells = [tuple(p["cell"]) for p in st["placements"] if p["key"] in hero.squad]
-            if len(cells) < 2:
-                continue
-            seen = {cells[0]}
-            frontier = [cells[0]]
-            pool = set(cells)
-            while frontier:
-                cur = frontier.pop()
-                for n in self.topology.neighbours(cur):
-                    if n in pool and n not in seen:
-                        seen.add(n)
-                        frontier.append(n)
-            if len(seen) != len(cells):
+            if not self.topology.connected(cells):
                 return f"{hero.name} must deploy on adjacent cells — keep the group connected."
         return None
 
@@ -464,7 +537,7 @@ class Match:
             self.start_round()
         return None
 
-    def validate_targeting(self, e, ab, params):
+    def validate_targeting(self, e, ab, params, dest=None):
         """Every targeting kind checked in one place — turn actions and opening
         picks both come through here, so the two can never drift apart. Anything
         beyond targeting belongs in the ability's own `validate`."""
@@ -495,6 +568,11 @@ class Match:
             if a not in live or b not in live or a == b:
                 return "Choose two different units, both on the board."
 
+        elif kind == "any_unit":
+            tt = self.entity(params.get("target"))
+            if tt is None or not tt.alive or not tt.flags["targetable"]:
+                return "Choose anyone still standing."
+
         elif kind in ("ally", "unit"):
             want_ally = kind == "ally"
             tt = self.entity(params.get("target"))
@@ -504,6 +582,27 @@ class Match:
             allowed = t.get("options")
             if allowed is not None and tt.id not in allowed:
                 return "That one is out of reach."
+
+        elif kind == "cells":
+            # The same marking an ordinary attack uses, borrowed by an ability that
+            # paints a shape (水法师's 浸水). Range is measured from where the hero
+            # will be standing, not where it is now.
+            shots = params.get("shots") or []
+            want = t.get("shots", 1)
+            if len(shots) != want:
+                return f"Mark cells for all {want} shot(s)."
+            origin = tuple(dest) if dest else e.cell
+            for cells in shots:
+                cells = [tuple(c) for c in cells]
+                if len(cells) != t["count"]:
+                    return f"Mark exactly {t['count']} squares."
+                if len(set(cells)) != len(cells):
+                    return "Squares must be distinct."
+                for c in cells:
+                    if not self.topology.in_bounds(c):
+                        return "Square off the board."
+                    if origin and self.topology.distance(origin, c) > t["range"]:
+                        return "Out of range of where you will be standing."
 
         elif kind == "magnitude":
             cap = ab.magnitude_cap(e)
@@ -688,7 +787,13 @@ class Match:
                 self.ability_lock[side] = None
                 self.log_line(f"{self.label(e)}'s ward fades.", quiet=True)
         self.bus.emit(EV.TURN_START, {"entity": e})
-        ground = self.board.turn_start_events(e.cell, e) if e.cells else []
+        # One creature, one bite: 蛇帝's two halves take the same turn, and ground
+        # under both of them is still one patch of ground under one hero.
+        body = DMG.pool_holder(self, e) or e
+        stamp = (self.round, self.exchange)
+        already = body.vars.get("ground_bite") == stamp
+        body.vars["ground_bite"] = stamp
+        ground = self.board.turn_start_events(e.cell, e) if (e.cells and not already) else []
         if ground:
             DMG.apply_batch(self, ground)
             for ev in ground:
@@ -860,8 +965,11 @@ class Match:
     def validate_choices(self, e, payload):
         picks = payload.get("choices") or {}
         for ch in self.turn_choices(e):
-            if picks.get(ch["key"]) not in ch["options"]:
-                return f"{ch['name']}: pick one of your allies."
+            got = picks.get(ch["key"])
+            if ch.get("optional") and got in (None, ""):
+                continue          # a sale nobody wanted to make
+            if got not in ch["options"]:
+                return f"{ch['name']}: pick one."
         return None
 
     def apply_choices(self, e, order):
@@ -1003,7 +1111,8 @@ class Match:
                 return f"{e.name} cannot move this turn."
             if ab.self_move and e.cells and dest != e.cell:
                 return f"{ab.name} does the moving — leave your movement as hold."
-            return self.validate_targeting(e, ab, action) or ab.validate(self, e, action)
+            return (self.validate_targeting(e, ab, action, dest)
+                    or ab.validate(self, e, action))
         return "Unknown action."
 
     # ---- 武器大师 weapon stances -------------------------------------------
@@ -1041,6 +1150,8 @@ class Match:
         area attack and an ability offering a choice of shapes can never disagree
         about what "your row" means."""
         origin = tuple(origin)
+        if shape == "board":
+            return self.topology.all_cells()
         if shape == "surround8":
             return self._surround8(origin)
         if shape == "row":
@@ -1056,7 +1167,7 @@ class Match:
         origin = tuple(origin) if origin else e.cell
         if origin is None:
             return []
-        shape = e.hero.attack.get("shape", "surround8")
+        shape = e.attack_spec.get("shape", "surround8")
         return [c for c in self.shape_cells(origin, shape) if c != origin]
 
     def _apply_stance(self, e, w):
@@ -1280,7 +1391,18 @@ class Match:
             return [ACT.NullAction()]     # no weapon drawn, so no stance either
         if key == "attack":
             mode = ATK.mode_for(e)
-            return mode.build(self, e, intended, action) if mode else [ACT.NullAction()]
+            spend = int(action.get("spend") or 0)
+            if spend and e.attack_spec.get("fuel"):
+                e.ap = max(0, e.ap - spend)      # fed into the shot, point for point
+                self.log_line(f"{self.label(e)} feeds {spend} into the shot.", quiet=True)
+            built = mode.build(self, e, intended, action) if mode else [ACT.NullAction()]
+            arms = e.vars.get("arms")
+            if arms and arms.get("once") and mode is not None:
+                # Spent by being fired, hit or miss — but only once the shot itself
+                # has been worked out, since the weapon is what shapes it.
+                e.vars["arms"] = dict(arms, attack={"mode": None}, spent=True)
+                self.log_line(f"{self.label(e)} has nothing left to fire with.")
+            return built
         if key.startswith("ability:"):
             abkey = key.split(":", 1)[1]
             ab = next(a for a in e.abilities if a.key == abkey)
@@ -1506,15 +1628,18 @@ class Match:
             if ev.category not in (DMG.NORMAL_ATTACK, DMG.ABILITY):
                 continue
             t = ev.target
-            if not t.alive or t.hp > 0 or t in popes:
-                continue      # a Pope cannot step in front of its own end
+            if not t.alive or t.hp > 0:
+                continue
             slot = doomed.setdefault(t.id, {"target": t.id, "restore": 0, "source": ev.source.id})
             slot["restore"] += dealt
         for spec in doomed.values():
             t = self.entity(spec["target"])
-            # Its own side's Pope answers for it where there is one, otherwise
-            # whoever else can — mercy is open to both seats.
-            pope = next((p for p in popes if p.side == t.side), popes[0])
+            # Nobody steps in front of their own end, but another can step in front
+            # of theirs. Its own side answers where it can, otherwise the other.
+            others = [p for p in popes if p is not t]
+            if not others:
+                continue
+            pope = next((p for p in others if p.side == t.side), others[0])
             self.interrupts.append({
                 "kind": "confirm", "key": "death_save", "side": pope.side,
                 "pope": pope.id, "target": spec["target"], "source": spec["source"],
@@ -1582,6 +1707,14 @@ class Match:
                 e.alive = False
                 e.cells = set()
                 self.recent_deaths.append(e)
+                # Anything this hero was granting others lapses with it, and a bar
+                # it was propping up shrinks back — losing whatever sat above it.
+                for other in self.entities:
+                    if other is e:
+                        continue
+                    if any(m.source is e for m in other.modifiers):
+                        other.modifiers = [m for m in other.modifiers if m.source is not e]
+                        other.ap = min(other.ap, other.max_ap)
                 self.bus.emit(EV.DEATH, {"entity": e})
                 self.log_line(f"{self.label(e)} is destroyed.")
 

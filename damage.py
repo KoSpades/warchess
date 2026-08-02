@@ -39,6 +39,10 @@ class DamageEvent:
     tags: set = field(default_factory=set)
     cancelled: bool = False
     cancel_reason: str = None
+    # Health this actually removed, filled in once it lands. Not the same as
+    # `amount`: a hero on 2 struck for 7 loses 2. Anything that pays out on damage
+    # done (水法师 mending itself) reads this.
+    dealt: int = 0
 
     def cancel(self, reason=None):
         self.cancelled = True
@@ -198,6 +202,55 @@ class Poison:
             apply_batch(match, batch)
 
 
+class Ledger:
+    """Every unit's running tally of what it has dealt in the turn it is taking.
+    Zeroed when its turn begins, added to as its blows land. Anything that pays out
+    on "what it dealt this turn" (法官's verdicts) reads it.
+
+    Generic: it names no hero and every unit keeps one."""
+
+    def on_turn_start(self, match, ctx):
+        e = ctx.get("entity")
+        if e is not None:
+            e.vars["dealt_this_turn"] = 0
+
+    @EV.hook(priority=99)          # last, so it counts what really got through
+    def on_after_damage(self, match, ev):
+        if ev.source is not None and ev.dealt > 0:
+            ev.source.vars["dealt_this_turn"] = (
+                ev.source.vars.get("dealt_this_turn", 0) + ev.dealt)
+
+
+class Verdict:
+    """A judgement laid on somebody comes due at the end of their *next* turn, and is
+    measured by what they did with it (法官). Reads a var and names no hero.
+
+    The exchange it was laid in is remembered, so a hero acting in the same breath as
+    the judge is not judged on that turn — it is the turn after that counts."""
+
+    @EV.hook(priority=50)
+    def on_turn_end(self, match, ctx):
+        e = ctx.get("entity")
+        mark = e.vars.get("judged") if e is not None else None
+        if not mark or match.exchange <= mark["exchange"]:
+            return
+        e.vars["judged"] = None          # it comes due once, dealt or not
+        total = e.vars.get("dealt_this_turn", 0)
+        judge = match.entity(mark.get("judge"))
+        if total <= 0 or not e.alive:
+            return
+        if mark["kind"] == "reward":
+            got = heal(match, e, total, source=judge)
+            if got:
+                match.log_line(
+                    f"{match.label(e)} is answered for what it did — {got} mended.")
+        else:
+            match.log_line(
+                f"{match.label(e)} is answered for what it did — {total} back on it.")
+            apply_batch(match, [DamageEvent(source=judge, target=e, amount=total,
+                                            category=ABILITY)])
+
+
 class HalvingRule:
     """The gunslinger's second shot halves *after* every other modifier, so it
     sits at the very end of the pipeline rather than being folded into the
@@ -229,7 +282,7 @@ def deal(match, ev):
     # The health actually taken, which is not the same as the size of the blow: a
     # hero on 2 struck for 7 loses 2. Callers that undo a hit (教皇 stepping in
     # front of it) must put back exactly what was removed and no more.
-    removed = before - ev.target.hp
+    removed = ev.dealt = before - ev.target.hp
     match.bus.emit(EV.AFTER_DAMAGE, ev)
     return removed
 

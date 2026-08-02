@@ -25,7 +25,7 @@ def register(cls):
 def mode_for(e):
     """The mode a unit attacks with, or None if it cannot attack at all — which
     is also the answer for a unit with no square to attack from."""
-    return MODES.get((e.hero.attack or {}).get("mode"))
+    return MODES.get(e.attack_spec.get("mode"))
 
 
 class AttackMode:
@@ -62,10 +62,19 @@ class CellLocked(AttackMode):
     key = HEROES.CELL
 
     def targeting(self, match, e):
-        return {"kind": "cells", "count": e.grid, "range": e.rng,
-                "shots": e.hero.attacks_per_turn}
+        t = {"kind": "cells", "count": e.grid, "range": e.rng,
+             "shots": e.hero.attacks_per_turn}
+        if e.attack_spec.get("fuel"):
+            # 军火商人 feeds its own shot: every point spent is a point of damage.
+            t["fuel"] = e.ap
+        return t
 
     def validate(self, match, e, dest, action):
+        spend = int(action.get("spend") or 0)
+        if spend and not e.attack_spec.get("fuel"):
+            return "This attack takes no fuel."
+        if spend < 0 or spend > e.ap:
+            return f"You have {e.ap} to spend."
         shots = action.get("shots") or []
         if len(shots) != e.hero.attacks_per_turn:
             return f"Mark cells for all {e.hero.attacks_per_turn} shot(s)."
@@ -90,7 +99,8 @@ class CellLocked(AttackMode):
             halve = (e.hero.halve_from_index is not None
                      and i >= e.hero.halve_from_index)
             out.append(ACT.CellLockedAttack(e, cells, dest, halve, i,
-                                            max_victims=e.targets))
+                                            max_victims=e.targets,
+                                            bonus=int(action.get("spend") or 0) if i == 0 else 0))
         return out
 
 

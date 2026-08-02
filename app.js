@@ -205,8 +205,15 @@ function curChoices(){
   }
   return (S.commit && S.commit.choices) || [];
 }
-function choicesReady(){ return curChoices().every(ch => (draft.choices||{})[ch.key] != null); }
-function pickChoice(key, id){ draft.choices = draft.choices || {}; draft.choices[key] = id; err=""; render(); }
+function choicesReady(){
+  return curChoices().every(ch => ch.optional || (draft.choices||{})[ch.key] != null);
+}
+function pickChoice(key, id){
+  draft.choices = draft.choices || {};
+  // Clicking the same one again takes it back, which is how an optional pick is declined.
+  draft.choices[key] = (draft.choices[key] === id) ? null : id;
+  err=""; render();
+}
 
 // A unit-locked attack names one hero, or several once something has widened it
 // (四圣兽 with 白虎). `draft.target` stays the single-target case so nothing else
@@ -334,6 +341,7 @@ function renderBoard(){
       const effs = (S.tiles||[]).filter(t=>eq(t.cell,cell));
       const tile = effs.find(t => t.kind==='burning');
       const plague = effs.find(t => t.kind==='infection');
+      const door = (S.doors||[]).find(dr => dr.cells.some(x => eq(x, cell)));
       // Charges pile up without limit, so a marker has to say how many as well as
       // what. A bare count would be ambiguous against a big bomb's countdown, so
       // counts always carry ×, and a fuse always reads "in N".
@@ -349,12 +357,14 @@ function renderBoard(){
       }
       if (tile) cls.push('burn');
       if (plague) cls.push('infected');
+      if (door) cls.push(door.owner==='L' ? 'doorL' : 'doorR');
       if (mineTxt) cls.push('mined');
       if (origin && cspec &&
           Math.abs(origin[0]-c)+Math.abs(origin[1]-r) <= cspec.range) cls.push('inrange');
       const step = stepTask();
       if (step && has(step.options, cell)) cls.push('legal');
-      const aimed = stepTask() ? [aimedStep()].filter(Boolean)
+      const aimed = S.phase==='build' ? buildPick
+        : stepTask() ? [aimedStep()].filter(Boolean)
         : S.phase==='opening' ? [openingPick].filter(Boolean)
         : !draft ? []
         : isLinked() ? linkedOrder().map(g => placedPos()[g.entity]).filter(Boolean)
@@ -393,6 +403,7 @@ function renderBoard(){
             + ` onclick="onCell(${c},${r})"${dnd}>`
             + `<span class="tick"></span>${extra}`
             + (tile?`<span class="flame">▲${tile.stacks}</span>`:'')
+            + (door?`<span class="door ${door.owner}">门</span>`:'')
             + (plague?`<span class="plague">疫</span>`:'')
             + (mineTxt?`<span class="bomb">${mineTxt}</span>`:'')
             + `</button>`;
@@ -668,6 +679,9 @@ function sweepPreview(){
 
 function clickableCell(cell){
   if (S.phase==='setup') return !S.setup.ready && has(S.zone,cell);
+  if (S.phase==='build'){
+    return !!(S.build && S.build.task);
+  }
   if (S.phase==='opening'){
     const t = S.opening && S.opening.task;
     if (!t) return false;
@@ -751,6 +765,13 @@ function onCell(c,r){
     const u = unitAt(cell);
     if (u && S.victim.needed && S.victim.options.includes(u.id)) return cmd({cmd:'victim', entity:u.id});
     return;
+  }
+  if (S.phase==='build'){
+    if (!(S.build && S.build.task)) return;
+    const at = buildPick.findIndex(x => eq(x, cell));
+    if (at >= 0) buildPick.splice(at, 1);
+    else if (buildPick.length < 2) buildPick.push(cell);
+    err=""; return render();
   }
   if (S.phase==='opening'){
     // A square-targeted opening is aimed on the board (潜水者 burying a charge) and
@@ -876,10 +897,12 @@ function onCell(c,r){
     else { err = "Two is all it can move."; return render(); }
     err=""; return render();
   }
-  if (act.targeting.kind==='unit' || act.targeting.kind==='ally'){
+  if (act.targeting.kind==='unit' || act.targeting.kind==='ally'
+      || act.targeting.kind==='any_unit'){
     const tu = unitAt(cell); if (!tu || !tu.alive) return;
-    const wantAlly = act.targeting.kind==='ally';
-    if (wantAlly ? tu.side===SIDE : tu.side!==SIDE){ nameUnit(tu.id); err=""; return render(); }
+    const k = act.targeting.kind;
+    const okSide = k==='any_unit' ? true : (k==='ally' ? tu.side===SIDE : tu.side!==SIDE);
+    if (okSide){ nameUnit(tu.id); err=""; return render(); }
   }
 }
 
@@ -968,6 +991,7 @@ function sealFromKeyboard(){
 function stillNeeded(act){
   const t = act.targeting;
   if (t.kind==='ally')      return `Choose an ally for ${act.name} — click one on the board or in the panel.`;
+  if (t.kind==='any_unit')  return `Choose any hero for ${act.name} — either side's.`;
   if (t.kind==='unit')
     return unitCount()>1
       ? `Name ${unitCount()} enemies for ${act.name} — ${namedUnits().length} so far.`
@@ -1006,6 +1030,10 @@ function onKey(e){
     if (t.kind==='confirm') cmd({cmd:'followup', confirm:true});   // Enter says yes
     else if (aimedStep()) confirmStep();
     else if (t.optional) cmd({cmd:'followup'});     // Enter alone declines
+    return;
+  }
+  if (S && S.phase==='build'){
+    if (e.key==='Enter' && buildReady()){ e.preventDefault(); confirmBuild(); }
     return;
   }
   // An opening aimed at a square is aimed first and confirmed after, like a move.
@@ -1076,6 +1104,7 @@ function orderReady(){
   if (t.kind==='none') return true;
   if (t.kind==='cells') return S.mode==='self' || (draft.shots.length===t.shots && draft.shots.every(s=>s.length<=t.count));
   if (t.kind==='unit') return namedUnits().length === unitCount();
+  if (t.kind==='any_unit') return draft.target!=null;
   if (t.kind==='ally') return draft.target!=null;
   if (t.kind==='two_units') return (draft.pair||[]).length===2;
   if (t.kind==='magnitude') return draft.amount>=1;
@@ -1096,7 +1125,7 @@ function sealOrder(){
     const ids = namedUnits();
     if (unitCount() > 1) action.targets = ids; else action.target = ids[0];
   }
-  if (t.kind==='ally') action.target = draft.target;
+  if (t.kind==='ally' || t.kind==='any_unit') action.target = draft.target;
   if (t.kind==='two_units'){ action.first = draft.pair[0]; action.second = draft.pair[1]; }
   if (t.kind==='magnitude') action.amount = draft.amount;
   if (t.kind==='direction' || t.kind==='lane' || t.kind==='cone' || t.kind==='shape') action.direction = draft.direction;
@@ -1145,6 +1174,7 @@ function render(){
   document.getElementById('clock').innerHTML =
       S.phase==='draft' ? 'Draft'
     : S.phase==='setup' ? 'Deployment'
+    : S.phase==='build' ? 'Building'
     : S.phase==='opening' ? 'Opening'
     : `Round <b>${S.round}</b> · exchange <b>${S.exchange}</b> · <b>${S.phase}</b>`;
   document.getElementById('modal').innerHTML = '';
@@ -1152,6 +1182,7 @@ function render(){
   renderRHS();
   if (S.phase==='draft') renderDraft();
   else if (S.phase==='setup') renderSetup();
+  else if (S.phase==='build') renderBuild();
   else if (S.phase==='opening') renderOpening();
   else if (S.phase==='commit') renderCommit();
   else if (S.phase==='resolved') renderFollowup();
@@ -1249,6 +1280,35 @@ function renderDraft(){
     </div>`;
 }
 function draftPick(k){ cmd({cmd:'draft', hero:k}); }
+
+// Before anybody is placed: 工匠 marks two squares that become one step apart for
+// its own side. Aim both, then Enter.
+let buildPick = [];
+function buildReady(){ return buildPick.length === 2; }
+function confirmBuild(){
+  if (!buildReady()) return;
+  const cells = buildPick; buildPick = [];
+  cmd({cmd:'build', cells});
+}
+function renderBuild(){
+  document.getElementById('leftheading').textContent = 'Building';
+  const t = S.build && S.build.task;
+  let h = '';
+  if (t){
+    h += `<p class="note"><b>${t.hero}</b> · ${t.ability}</p>`;
+    if (t.text) h += `<p class="note">${t.text}</p>`;
+    h += `<div class="step">Two squares</div>`;
+    h += `<p class="note">Click two squares anywhere on the board, then <b>Enter</b>.
+          Click one again to take it back. ${buildPick.length}/2 chosen.</p>`;
+    h += buildReady()
+      ? `<button class="btn primary" onclick="confirmBuild()">Raise them — <b>Enter</b></button>`
+      : '';
+  } else {
+    h += `<div class="waiting">Waiting for the other seat</div>`;
+  }
+  h += `<p class="err">${err}</p>`;
+  document.getElementById('leftbody').innerHTML = h;
+}
 
 function renderOpening(){
   document.getElementById('leftheading').textContent = 'Opening';
@@ -1405,11 +1465,21 @@ function renderCommit(){
   if (draft.destination || draft.held){
     for (const ch of curChoices()){
       const got = (draft.choices||{})[ch.key];
-      h += `<div class="step">Free · ${ch.name}</div><p class="note">${ch.text}</p>`;
-      for (const id of ch.options){
-        const a = (S.units||[]).find(x=>x.id===id) || {};
-        h += `<button class="btn ${got===id?'on':''}" onclick="pickChoice('${ch.key}',${id})">
-               ${a.name||('#'+id)} <small>AP ${a.ap}/${a.max_ap}</small></button>`;
+      h += `<div class="step">Free · ${ch.name}</div><p class="note">${ch.text}${
+              ch.optional ? ' Click a choice again to take it back.' : ''}</p>`;
+      if (ch.wares){
+        // A shelf of goods rather than a list of allies: the option is a string.
+        for (const w of ch.wares){
+          h += `<button class="btn ${got===w.value?'on':''}"
+                  onclick="pickChoice('${ch.key}','${w.value}')">
+                 ${w.label} <small>${w.note||''}</small></button>`;
+        }
+      } else {
+        for (const id of ch.options){
+          const a = (S.units||[]).find(x=>x.id===id) || {};
+          h += `<button class="btn ${got===id?'on':''}" onclick="pickChoice('${ch.key}',${id})">
+                 ${a.name||('#'+id)} <small>AP ${a.ap}/${a.max_ap}</small></button>`;
+        }
       }
     }
     h += `<div class="step">2 · Action</div>`;
@@ -1599,6 +1669,12 @@ function targetingHTML(act){
   } else if (t.kind==='any_cell'){
     h += `<p class="note">Click any cell on the board to set it alight.</p>`;
     if (draft.cell) h += `<button class="btn on">That square is marked to burn</button>`;
+  } else if (t.kind==='any_unit'){
+    h += `<p class="note">Choose any hero on the board — yours or theirs. <b>Enter</b> registers.</p>`;
+    for (const u of (S.units||[]).filter(u=>u.alive && u.cell)){
+      h += `<button class="btn ${draft.target===u.id?'on':''}" onclick="nameUnit(${u.id});err='';render()">
+              ${u.name} <span class="cost">${u.side===SIDE?'yours':'theirs'} · ${u.hp}/${u.max_hp} HP</span></button>`;
+    }
   } else if (t.kind==='ally'){
     h += `<p class="note">Choose an ally to heal (yourself included). <b>Enter</b> registers.</p>`;
     for (const u of myUnits().filter(u=>u.alive)){

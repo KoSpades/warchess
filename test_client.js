@@ -311,6 +311,39 @@ if (F.two_named) {
      JSON.stringify(lastSent().payload.action.targets));
 }
 
+// ------------------------------- 工匠: two squares built in before deployment
+
+if (F.build && F.doors) {
+  C.S = F.build; C.draft = null; C.err = '';
+  ok('artisan: the builder is asked for two squares',
+     !!(F.build.build && F.build.build.task), JSON.stringify(F.build.build));
+  let broke = null;
+  try { C.render(); } catch (e) { broke = e.message; }
+  ok('artisan: the building panel renders', !broke, broke || '');
+  const before = C.sent.length;
+  C.onKey({ key: 'Enter', preventDefault(){} });
+  ok('artisan: Enter with nothing chosen sends nothing', C.sent.length === before);
+  C.onCell(2, 3);
+  ok('artisan: the first square is marked', cellHas([2, 3], 'dest'),
+     cellsWith('dest').join(' '));
+  C.onCell(8, 3);
+  C.onKey({ key: 'Enter', preventDefault(){} });
+  ok('artisan: Enter with both chosen raises them',
+     C.sent.length === before + 1 && lastSent().cmd === 'build' &&
+     JSON.stringify(lastSent().cells) === '[[2,3],[8,3]]', JSON.stringify(lastSent()));
+
+  C.S = F.build_waiting; C.draft = null; C.err = '';
+  ok('artisan: the other seat is told it is waiting',
+     !F.build_waiting.build.task && F.build_waiting.build.waiting_on_opponent,
+     JSON.stringify(F.build_waiting.build));
+
+  C.S = F.doors; C.draft = null; C.err = '';
+  ok('artisan: both doors are marked on the board once built',
+     cellHas([2, 3], 'doorL') && cellHas([8, 3], 'doorL'),
+     cellsWith('doorL').join(' '));
+  ok('artisan: and a plain square stays plain', !cellHas([5, 5], 'doorL'));
+}
+
 // ------------------------------- 教皇: a killing blow held up for a decision
 
 if (F.interrupt_save && F.interrupt_waiting) {
