@@ -125,26 +125,42 @@ class Entity:
 
     # --- convenience ---------------------------------------------------
 
+    def worn_down(self, name):
+        """A stat after everything stacked on it, but never worn below its floor.
+
+        Effects may blunt a hero; they may not take it off the board. Reach and
+        attack are pushed down by several things at once (大雾 then 野兽化, 画师's
+        brush, 鬼魂's haunt) and a hero left at 0 could never threaten anything
+        again — a worse outcome than any one debuff intended.
+
+        The floor is 1, or the hero's own base where that is deliberately lower:
+        狙击手 attacks at 0 by design, its shot being measured by distance instead,
+        and nothing here should quietly hand it a point it was never given.
+
+        `None` is not a small number — it means the stat does not apply at all, as
+        for a unit-locked attack with no finite reach — so it passes straight
+        through."""
+        value = self.stat(name)
+        if value is None:
+            return None
+        base = self.base_stat(name)
+        return max(min(1, 1 if base is None else base), value)
+
     @property
     def atk(self):
-        return self.stat("atk")
+        return self.worn_down("atk")
 
     @property
     def rng(self):
-        # Floored like `grid`: reach is stacked into by several effects at once
-        # (大雾 down to 1, then 野兽化's −2) and a negative reach makes every square
-        # fail its range check, leaving the hero unable to attack at all.
-        n = self.stat("rng")
-        return None if n is None else max(0, n)
+        return self.worn_down("rng")
 
     @property
     def grid(self):
-        n = self.stat("grid")
-        return None if n is None else max(0, n)
+        return self.worn_down("grid")
 
     @property
     def targets(self):
-        return max(1, self.stat("targets") or 1)
+        return self.worn_down("targets") or 1
 
     @property
     def move_allowance(self):

@@ -1524,9 +1524,13 @@ class Match:
                 self.bus.emit(EV.TURN_RESOLVED, ctx)
             for p in e.passives:
                 fn = getattr(p, "followup", None)
-                task = fn(self, e, ctx) if fn else None
-                if task and task.get("options"):
-                    self.followups[side].append(dict(task, entity=e.id))
+                got = fn(self, e, ctx) if fn else None
+                # A passive may raise several at once (画师 both blunting and
+                # sharpening off one exchange), so a list is as good as one task.
+                for task in (got if isinstance(got, list) else [got]):
+                    # A `confirm` asks a plain yes/no and so carries no options.
+                    if task and (task.get("options") or task.get("kind") == "confirm"):
+                        self.followups[side].append(dict(task, entity=e.id))
 
         for side in (LEFT, RIGHT):
             c = self.commits.get(side)
@@ -1553,7 +1557,7 @@ class Match:
             return "Nothing pending for you."
         task = pend[0]
         e = self.entity(task["entity"])
-        if choice is not None:
+        if choice is not None and task.get("kind") != "confirm":
             # A follow-up asks for a square or for a hero; the options list says which.
             legal = (choice in task["options"] if task.get("kind") == "unit"
                      else list(choice) in task["options"])

@@ -678,7 +678,7 @@ function clickableCell(cell){
   }
   if (S.phase==='resolved'){
     const t = S.followup && S.followup.task;
-    if (!t) return false;
+    if (!t || t.kind==='confirm') return false;
     if (t.kind==='unit'){
       const u = unitAt(cell);
       return !!(u && t.options.includes(u.id));
@@ -732,6 +732,7 @@ function onCell(c,r){
   }
   if (S.phase==='resolved' || S.phase==='move_choice'){
     const t = stepTask();
+    if (t && t.kind==='confirm') return;
     if (t && t.kind==='unit'){
       const u = unitAt(cell);
       if (u && t.options.includes(u.id)) return cmd({cmd:'followup', entity:u.id});
@@ -992,7 +993,8 @@ function onKey(e){
     const t = stepTask();
     if (e.key!=='Enter' || !t) return;
     e.preventDefault();
-    if (aimedStep()) confirmStep();
+    if (t.kind==='confirm') cmd({cmd:'followup', confirm:true});   // Enter says yes
+    else if (aimedStep()) confirmStep();
     else if (t.optional) cmd({cmd:'followup'});     // Enter alone declines
     return;
   }
@@ -1637,6 +1639,12 @@ function renderFollowup(){
   let h = '';
   if (t){
     h += `<div class="step">${t.name}</div><p class="note">${t.text}</p>`;
+    if (t.kind==='confirm'){
+      h += `<button class="btn primary" onclick="cmd({cmd:'followup', confirm:true})">Yes — <b>Enter</b></button>`;
+      h += `<button class="btn" onclick="cmd({cmd:'followup'})">No, save it</button>`;
+      h += `<p class="err">${err}</p>`;
+      document.getElementById('leftbody').innerHTML = h; return;
+    }
     if (t.kind==='unit'){
       // Naming a hero is a single click — there is no square to confirm.
       h += `<p class="note">Click one of the highlighted enemies.</p>`;

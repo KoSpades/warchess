@@ -319,15 +319,19 @@ def play_teams(left, right, seed=0, verbose=False):
                 # answering one side can finish the whole exchange
                 if m.res is None or m.phase != "victim":
                     break
-                opts = m.res["options"][side]
-                # A shot may want several victims (猎人 once blooded), so keep
-                # naming until it is satisfied rather than stopping after one.
-                while opts and not m.victims_complete(side) and m.phase == "victim":
+                # A shot may want several victims (猎人 once blooded), so keep naming
+                # until it is satisfied. Options are re-read every time: answering
+                # can carry resolution on to the next shot, whose targets differ,
+                # and naming a target from the previous one is simply refused.
+                while m.res is not None and m.phase == "victim" \
+                        and not m.victims_complete(side):
+                    opts = m.res["options"][side]
                     picked = m.res["picks"][side] or []
                     rest = [i for i in opts if i not in picked]
                     if not rest:
                         break
-                    m.choose_victim(side, min(rest, key=lambda i: m.entity(i).hp))
+                    if m.choose_victim(side, min(rest, key=lambda i: m.entity(i).hp)):
+                        break        # refused for any reason — never spin on it
         elif m.phase == "move_choice":
             for side in (LEFT, RIGHT):
                 if m.phase != "move_choice":
@@ -354,7 +358,9 @@ def play_teams(left, right, seed=0, verbose=False):
                     # Keyed off the enemy rather than the acting unit, because a
                     # parting shot comes from a hero that no longer has a square.
                     pick = None
-                    if task.get("kind") == "unit":
+                    if task.get("kind") == "confirm":
+                        pick = True          # both of 画师's offers are strictly good
+                    elif task.get("kind") == "unit":
                         opts = [m.entity(i) for i in task["options"]]
                         opts = [o for o in opts if o is not None and o.alive]
                         if opts:

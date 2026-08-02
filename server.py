@@ -47,7 +47,11 @@ class Game:
             if cmd == "commit":
                 return m.commit(side, body.get("payload") or {})
             if cmd == "followup":
-                return m.choose_followup(side, body.get("entity", body.get("cell")))
+                # A follow-up names a square, names a hero, or answers yes/no.
+                for key in ("confirm", "entity", "cell"):
+                    if key in body:
+                        return m.choose_followup(side, body[key])
+                return m.choose_followup(side, None)
             if cmd == "victim":
                 return m.choose_victim(side, body["entity"])
             if cmd == "move_choice":

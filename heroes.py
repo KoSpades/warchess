@@ -1651,6 +1651,92 @@ class StarSign:
         }
 
 
+class PaintStroke:
+    """画师. Every blow it takes is a chance to blunt the hand that struck it, and
+    every blow it lands is one more stroke of its own. Both are offered once the
+    exchange has settled — taking one is a choice, because a charge spent on a
+    training dummy is one you cannot spend on the hero that matters.
+
+    Three of each, tracked apart. Both are ordinary modifiers on the stack, so
+    nothing in the damage code knows this hero exists."""
+
+    describe = ("When it is damaged, it may take 1 attack off whoever struck it. When "
+                "it deals damage, it may add 1 to its own. Three of each per match, "
+                "and it is asked each time.")
+    LIMIT = 3
+    BLUNT = "paint_blunt"
+    SHARPEN = "paint_sharpen"
+
+    # Late, so only a blow that really landed counts either way.
+    @EV.hook(priority=65)
+    def on_after_damage(self, match, owner, ev):
+        if ev.amount <= 0:
+            return
+        if ev.target is owner and ev.source is not None and ev.source.side != owner.side:
+            if owner.vars.get("blunts_used", 0) < self.LIMIT:
+                owner.vars["blunt_who"] = ev.source.id
+        if ev.source is owner and ev.target.side != owner.side:
+            if owner.vars.get("sharpens_used", 0) < self.LIMIT:
+                owner.vars["sharpen_due"] = True
+
+    def followup(self, match, owner, ctx):
+        if ctx.get("entity") is not owner or not owner.alive:
+            return None
+        out = []
+        who = match.entity(owner.vars.get("blunt_who")) if owner.vars.get("blunt_who") else None
+        if who is not None and who.alive and owner.vars.get("blunts_used", 0) < self.LIMIT:
+            left = self.LIMIT - owner.vars.get("blunts_used", 0)
+            out.append({
+                "key": self.BLUNT,
+                "name": "褪色 Fade",
+                "text": f"{who.name} drew your blood. Take 1 off its attack? "
+                        f"({left} left, and it is now {who.atk}.)",
+                "kind": "confirm",
+                "optional": True,
+            })
+        if owner.vars.get("sharpen_due") and owner.vars.get("sharpens_used", 0) < self.LIMIT:
+            left = self.LIMIT - owner.vars.get("sharpens_used", 0)
+            out.append({
+                "key": self.SHARPEN,
+                "name": "落笔 Stroke",
+                "text": f"Your blow landed. Add 1 to your own attack? "
+                        f"({left} left, and it is now {owner.atk}.)",
+                "kind": "confirm",
+                "optional": True,
+            })
+        return out
+
+    def apply_followup(self, match, owner, key, choice):
+        if key == self.BLUNT:
+            who = match.entity(owner.vars.get("blunt_who")) if owner.vars.get("blunt_who") else None
+            owner.vars["blunt_who"] = None          # the moment passes either way
+            if choice and who is not None and who.alive:
+                owner.vars["blunts_used"] = owner.vars.get("blunts_used", 0) + 1
+                who.add_modifier(Modifier("atk", "add", -1, source=self))
+                match.log_line(
+                    f"{match.label(owner)} paints {match.label(who)} thinner — "
+                    f"Atk now {who.atk}."
+                )
+        elif key == self.SHARPEN:
+            owner.vars["sharpen_due"] = False
+            if choice:
+                owner.vars["sharpens_used"] = owner.vars.get("sharpens_used", 0) + 1
+                owner.add_modifier(Modifier("atk", "add", 1, source=self))
+                match.log_line(
+                    f"{match.label(owner)} lays down another stroke — Atk now {owner.atk}."
+                )
+
+    def status(self, match, owner):
+        used = (owner.vars.get("blunts_used", 0), owner.vars.get("sharpens_used", 0))
+        if not any(used):
+            return None
+        return {
+            "key": "brush", "badge": f"画{used[0]}/{used[1]}", "label": "画师 BRUSHWORK",
+            "text": f"{used[0]} of {self.LIMIT} enemies painted thinner · "
+                    f"{used[1]} of {self.LIMIT} strokes on itself.",
+        }
+
+
 class FourBeasts:
     """四圣兽. Four squares carry a blessing, each given once and kept for good. The
     squares are read off the topology rather than written down, so a board of
@@ -2384,12 +2470,24 @@ ROSTER = [
         blurb="Keeps nothing for himself — every turn, an ally leaves with an extra point.",
     ),
     HeroDef(
+        key="painter",
+        name="画师",
+        name_en="painter",
+        max_hp=18,
+        atk=1,
+        move=1,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 2, "range": 2},
+        passives=[PaintStroke],
+        blurb="Starts as the weakest thing on the board and paints the difference away.",
+    ),
+    HeroDef(
         key="four_beasts",
         name="四圣兽",
         name_en="fourBeasts",
         max_hp=12,
         atk=2,
-        move=1,
+        move=2,
         max_ap=0,
         attack={"mode": UNIT, "range": None},
         passives=[FourBeasts],
@@ -2436,7 +2534,7 @@ ROSTER = [
         key="diver",
         name="潜水者",
         name_en="diver",
-        max_hp=10,
+        max_hp=12,
         atk=2,
         move=2,
         max_ap=0,
@@ -2562,7 +2660,7 @@ BY_KEY[DUMMY.key] = DUMMY
 # whenever you add heroes; --test fills the rest of your side with dummies.
 # Whoever is newest goes here — --test always deploys the hero just added, so it
 # can be played immediately. Up to two; the rest of the side is padded with dummies.
-TEST_HEROES = ["astrologer", "four_beasts"]
+TEST_HEROES = ["four_beasts", "painter"]
 
 
 

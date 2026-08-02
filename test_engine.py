@@ -2611,9 +2611,95 @@ m = arena([("werewolf", (2, 2)), ("mist_lady", (1, 1))], [("dummy", (8, 3))])
 w = unit(m, LEFT, "werewolf")
 for _ in range(6):
     w.add_modifier(Modifier("rng", "add", -1))
-ok("reach floors at zero rather than going negative", w.rng == 0, str(w.rng))
-ok("...and a floored hero can still mark the square it stands on",
+ok("reach is worn down to 1 and no further", w.rng == 1, str(w.rng))
+ok("...and a worn-down hero can still swing", 
    m.action_menu(w) and any(a["key"] == "attack" for a in m.action_menu(w)))
+for _ in range(6):
+    w.add_modifier(Modifier("grid", "add", -1))
+ok("...and so is the net it throws", w.grid == 1, str(w.grid))
+
+# 59 — 画师: blunts the hand that strikes it, sharpens itself on what it strikes
+def painter_arena():
+    m = arena([("painter", (3, 3)), ("gatekeeper", (3, 1))],
+              [("cannoneer", (7, 3)), ("dummy", (7, 1))])
+    return (m, unit(m, LEFT, "painter"), unit(m, LEFT, "gatekeeper"),
+            unit(m, RIGHT, "cannoneer"), unit(m, RIGHT, "dummy"))
+
+def only_task(m, side, key):
+    return next((t for t in m.followups[side] if t["key"] == key), None)
+
+# being hit offers a blunt; it is a yes/no, not a square
+m, pt, ally, cannon, d = painter_arena()
+cannon.set_cell((4, 3))
+atk0 = cannon.atk
+turn(m, pt.id, hold,
+     cannon.id, {"destination": None, "action": {"key": "attack", "shots": [[[3, 3]]]}})
+task = only_task(m, LEFT, "paint_blunt")
+ok("taking a blow offers a blunt", task is not None and task["kind"] == "confirm", str(task))
+ok("...and it asks nothing of the board", not task.get("options"))
+ok("saying no leaves the attacker alone",
+   m.choose_followup(LEFT, None) is None and cannon.atk == atk0, f"{atk0} -> {cannon.atk}")
+ok("...and spends no charge", pt.vars.get("blunts_used", 0) == 0)
+
+# saying yes takes a point off whoever struck
+m, pt, ally, cannon, d = painter_arena()
+cannon.set_cell((4, 3))
+atk0 = cannon.atk
+turn(m, pt.id, hold,
+     cannon.id, {"destination": None, "action": {"key": "attack", "shots": [[[3, 3]]]}})
+m.choose_followup(LEFT, True)
+ok("saying yes paints the attacker thinner", atk0 - cannon.atk == 1, f"{atk0} -> {cannon.atk}")
+ok("...and spends a charge", pt.vars.get("blunts_used") == 1)
+
+# landing a blow offers a stroke of its own
+m, pt, ally, cannon, d = painter_arena()
+cannon.set_cell((4, 3))
+mine0 = pt.atk
+turn(m, pt.id, {"destination": None, "action": {"key": "attack", "shots": [[[4, 3]]]}},
+     d.id, hold)
+task = only_task(m, LEFT, "paint_sharpen")
+ok("landing a blow offers a stroke", task is not None and task["kind"] == "confirm", str(task))
+m.choose_followup(LEFT, True)
+ok("...and taking it sharpens the brush", pt.atk - mine0 == 1, f"{mine0} -> {pt.atk}")
+
+# both counters run out at three, and run out apart
+m, pt, ally, cannon, d = painter_arena()
+pt.vars["blunts_used"] = 3
+pt.vars["blunt_who"] = cannon.id
+pt.vars["sharpen_due"] = True
+tasks = pt.passives[0].followup(m, pt, {"entity": pt})
+ok("a spent blunt is not offered again",
+   not any(t["key"] == "paint_blunt" for t in tasks), str([t["key"] for t in tasks]))
+ok("...while the other counter is untouched",
+   any(t["key"] == "paint_sharpen" for t in tasks), str([t["key"] for t in tasks]))
+
+# the same enemy can be worn down repeatedly, and attack never goes below zero
+m, pt, ally, cannon, d = painter_arena()
+atk0 = cannon.atk
+for _ in range(3):
+    pt.vars["blunt_who"] = cannon.id
+    pt.passives[0].apply_followup(m, pt, "paint_blunt", True)
+ok("the same hero can be painted thinner three times",
+   atk0 - cannon.atk == 3, f"{atk0} -> {cannon.atk}")
+ok("...and that is all the charges it has", pt.vars["blunts_used"] == 3)
+for _ in range(9):
+    cannon.add_modifier(Modifier("atk", "add", -1))
+ok("attack is worn down to 1 and no further", cannon.atk == 1, str(cannon.atk))
+# 狙击手 swings at 0 by design — its shot is measured by distance — and nothing
+# should quietly hand it a point it was never given.
+sniper = unit(arena([("sniper", (3, 3))], [("dummy", (7, 3))]), LEFT, "sniper")
+ok("a hero built to swing at nothing keeps its zero", sniper.atk == 0, str(sniper.atk))
+for _ in range(4):
+    sniper.add_modifier(Modifier("atk", "add", -1))
+ok("...and cannot be pushed below it either", sniper.atk == 0, str(sniper.atk))
+
+# nothing to blunt when the board itself does the damage
+m, pt, ally, cannon, d = painter_arena()
+burn = m.board.add_burning(pt.cell, RIGHT).damage
+m.select_hero(LEFT, pt.id); m.commit(LEFT, hold)
+m.select_hero(RIGHT, d.id); m.commit(RIGHT, hold)
+ok("burning ground offers no hand to blunt", not only_task(m, LEFT, "paint_blunt"),
+   str(m.followups[LEFT]))
 
 print("\nlog tail:")
 for line in m.log[-5:]:
