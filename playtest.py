@@ -332,6 +332,16 @@ def play_teams(left, right, seed=0, verbose=False):
                         break
                     if m.choose_victim(side, min(rest, key=lambda i: m.entity(i).hp)):
                         break        # refused for any reason — never spin on it
+        elif m.phase == "interrupt":
+            task = m.interrupts[0] if m.interrupts else None
+            if task is None:
+                break
+            if task["kind"] == "confirm":
+                # Save your own; let theirs fall rather than sharpen your enemy.
+                tgt = m.entity(task["target"])
+                m.choose_interrupt(task["side"], bool(tgt) and tgt.side == task["side"])
+            else:
+                m.choose_interrupt(task["side"], task["options"][0])
         elif m.phase == "move_choice":
             for side in (LEFT, RIGHT):
                 if m.phase != "move_choice":

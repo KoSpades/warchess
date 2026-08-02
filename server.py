@@ -54,6 +54,8 @@ class Game:
                 return m.choose_followup(side, None)
             if cmd == "victim":
                 return m.choose_victim(side, body["entity"])
+            if cmd == "interrupt":
+                return m.choose_interrupt(side, body.get("answer"))
             if cmd == "move_choice":
                 return m.choose_move(side, body.get("cell"))
             return "Unknown command."

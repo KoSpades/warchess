@@ -2701,6 +2701,197 @@ m.select_hero(RIGHT, d.id); m.commit(RIGHT, hold)
 ok("burning ground offers no hand to blunt", not only_task(m, LEFT, "paint_blunt"),
    str(m.followups[LEFT]))
 
+# 60 — 鸟嘴医生: walks in last, and the board rots outward from where it stands
+def doctor_arena():
+    m = arena([("plague_doctor", (2, 2)), ("gatekeeper", (2, 3))],
+              [("cannoneer", (8, 2)), ("dummy", (8, 3))])
+    return (m, unit(m, LEFT, "plague_doctor"), unit(m, LEFT, "gatekeeper"),
+            unit(m, RIGHT, "cannoneer"), unit(m, RIGHT, "dummy"))
+
+m, doc, ally, cannon, d = doctor_arena()
+ok("it is not on the board when the forces lock", not doc.cells, str(doc.cells))
+ok("...and nothing can touch it there", not doc.flags["targetable"])
+ok("the board waits on it before the first exchange", m.phase == "opening", m.phase)
+task = m.opening["pending"][LEFT][0]
+ok("it is asked for a square, not an ally",
+   doc.abilities[0].targeting["kind"] == "any_cell", str(task))
+free = doc.abilities[0].cells(m, doc)
+ok("every empty square is on offer, the enemy's own back line included",
+   (9, 1) in free and ally.cell not in free, f"{len(free)} squares")
+
+assert m.opening_choose(LEFT, {"cell": [5, 3]}) is None
+ok("it stands where it chose", doc.cell == (5, 3), str(doc.cell))
+ok("...and that square is infected", m.board.has_kind((5, 3), "infection"))
+ok("...and it blocks and can be hit like anything else",
+   doc.flags["targetable"] and doc.flags["blocks_movement"])
+
+# the ground bites whoever starts a turn on it — either side
+m, doc, ally, cannon, d = doctor_arena()
+assert m.opening_choose(LEFT, {"cell": [5, 3]}) is None
+cannon.set_cell((5, 1)); ally.set_cell((5, 5))
+m.board.add_effect((5, 1), BOARD.Infection(LEFT))
+m.board.add_effect((5, 5), BOARD.Infection(LEFT))
+hp0 = (cannon.hp, ally.hp, doc.hp)
+turn(m, ally.id, hold, cannon.id, hold)
+ok("an enemy starting on infected ground loses 2", hp0[0] - cannon.hp == 2,
+   f"took {hp0[0] - cannon.hp}")
+ok("...and so does one of your own", hp0[1] - ally.hp == 2, f"took {hp0[1] - ally.hp}")
+
+# the doctor alone walks it safely
+m, doc, ally, cannon, d = doctor_arena()
+assert m.opening_choose(LEFT, {"cell": [5, 3]}) is None
+hp0 = doc.hp
+turn(m, doc.id, hold, cannon.id, hold)
+ok("the doctor takes nothing from its own plague", doc.hp == hp0, f"took {hp0 - doc.hp}")
+
+# nothing softens it
+m, doc, ally, cannon, d = doctor_arena()
+assert m.opening_choose(LEFT, {"cell": [5, 3]}) is None
+cannon.set_cell((5, 1))
+m.board.add_effect((5, 1), BOARD.Infection(LEFT))
+cannon.vars["damage_reduction"] = 99
+cannon.vars["blessed"] = doc.id
+hp0 = cannon.hp
+turn(m, ally.id, hold, cannon.id, hold)
+ok("no guard blunts infected ground", hp0 - cannon.hp == 2, f"took {hp0 - cannon.hp}")
+ok("...and no blessing is spent turning it aside", cannon.vars.get("blessed") == doc.id)
+
+# it creeps one square a round, and all at once rather than cascading
+m, doc, ally, cannon, d = doctor_arena()
+assert m.opening_choose(LEFT, {"cell": [5, 3]}) is None
+def infected(m):
+    return len([t for t in m.board.serialise() if t["kind"] == "infection"])
+ok("for the whole first round it is just the one square", infected(m) == 1
+   and m.round == 1, f"{infected(m)} at round {m.round}")
+def next_round(m):
+    r0 = m.round
+    while m.round == r0:
+        left = [e.id for e in m.unacted(LEFT)]
+        right = [e.id for e in m.unacted(RIGHT)]
+        turn(m, left[0] if left else None, hold, right[0] if right else None, hold)
+next_round(m)
+ok("round 2 is when it first creeps — the square and its four neighbours",
+   infected(m) == 5, f"{infected(m)} at round {m.round}")
+next_round(m)
+ok("...then one ring further every round after", infected(m) == 13,
+   f"{infected(m)} at round {m.round}")
+ok("...one ring at a time, never a cascade to the board's edge", infected(m) < 25,
+   str(infected(m)))
+
+# 61 — 教皇: nothing dies while it stands, and every mercy sharpens the hand
+def pope_arena():
+    m = arena([("pope", (2, 2)), ("cannoneer", (2, 3))],
+              [("cannoneer", (8, 2)), ("dummy", (8, 3))])
+    return (m, unit(m, LEFT, "pope"), unit(m, LEFT, "cannoneer"),
+            unit(m, RIGHT, "cannoneer"), unit(m, RIGHT, "dummy"))
+
+def strike(target_cell):
+    return {"destination": None, "action": {"key": "attack", "shots": [[list(target_cell)]]}}
+
+# a lethal blow stops the board and asks
+m, pope, ally, cannon, d = pope_arena()
+ally.set_cell((7, 2)); ally.hp = 2
+m.select_hero(LEFT, pope.id); m.commit(LEFT, hold)
+m.select_hero(RIGHT, cannon.id); m.commit(RIGHT, strike((7, 2)))
+ok("a killing blow holds the board up", m.phase == "interrupt", m.phase)
+task = m.interrupts[0]
+ok("...and it is the Pope's side that is asked",
+   task["side"] == LEFT and task["kind"] == "confirm", str(task["side"]))
+ok("...and the hero is still standing while it is asked", ally.alive and ally.hp <= 0,
+   f"alive={ally.alive} hp={ally.hp}")
+ok("the other seat cannot answer for it", m.choose_interrupt(RIGHT, True) is not None)
+
+# stepping in front: the blow does nothing at all
+ok("saying yes is accepted", m.choose_interrupt(LEFT, True) is None)
+ok("the hero takes nothing from it", ally.alive and ally.hp == 2, f"{ally.hp} hp")
+ok("...and now the attacker's own seat is owed a choice",
+   m.phase == "interrupt" and m.interrupts[0]["side"] == RIGHT
+   and m.interrupts[0]["kind"] == "pick", str(m.interrupts[:1]))
+atk0, rng0 = cannon.atk, cannon.rng
+ok("something not on offer is refused", m.choose_interrupt(RIGHT, "hp") is not None)
+m.choose_interrupt(RIGHT, "rng")
+ok("the denied attacker keeps its reward", cannon.rng - rng0 == 1, f"{rng0} -> {cannon.rng}")
+ok("...and the board carries on", m.phase != "interrupt", m.phase)
+
+# declining lets the hero fall
+m, pope, ally, cannon, d = pope_arena()
+ally.set_cell((7, 2)); ally.hp = 2
+atk0 = cannon.atk
+m.select_hero(LEFT, pope.id); m.commit(LEFT, hold)
+m.select_hero(RIGHT, cannon.id); m.commit(RIGHT, strike((7, 2)))
+m.choose_interrupt(LEFT, None)
+ok("saying no lets it fall", not ally.alive, f"alive={ally.alive}")
+ok("...and nobody is sharpened for a mercy not given", cannon.atk == atk0,
+   f"{atk0} -> {cannon.atk}")
+
+# it cannot step in front of its own end
+m, pope, ally, cannon, d = pope_arena()
+pope.set_cell((7, 2)); pope.hp = 2
+m.select_hero(LEFT, ally.id); m.commit(LEFT, hold)
+m.select_hero(RIGHT, cannon.id); m.commit(RIGHT, strike((7, 2)))
+ok("the Pope cannot save itself", not pope.alive and m.phase != "interrupt",
+   f"alive={pope.alive} phase={m.phase}")
+
+# mercy reaches across the board — sparing an enemy feeds your own hero
+m, pope, ally, cannon, d = pope_arena()
+d.set_cell((3, 2)); d.hp = 1
+mine0 = ally.atk
+m.select_hero(LEFT, ally.id); m.commit(LEFT, strike((3, 2)))
+m.select_hero(RIGHT, cannon.id); m.commit(RIGHT, hold)
+ok("an enemy about to fall is offered too", m.phase == "interrupt", m.phase)
+ok("...and the Pope's own seat answers", m.interrupts[0]["side"] == LEFT)
+m.choose_interrupt(LEFT, True)
+ok("the enemy is spared", d.alive and d.hp == 1, f"alive={d.alive} hp={d.hp}")
+ok("...and your own hero is the one owed a reward",
+   m.interrupts[0]["side"] == LEFT and m.interrupts[0]["key"] == "reward", str(m.interrupts[:1]))
+m.choose_interrupt(LEFT, "atk")
+ok("...which it duly collects", ally.atk - mine0 == 1, f"{mine0} -> {ally.atk}")
+
+# seven mercies and no more
+m, pope, ally, cannon, d = pope_arena()
+ok("it starts with seven to give",
+   next(b for b in HEROES.status_of(m, pope) if b["key"] == "absolution")["badge"] == "赦7",
+   str([b["badge"] for b in HEROES.status_of(m, pope)]))
+pope.vars["saves_used"] = 6
+ally.set_cell((7, 2)); ally.hp = 2
+m.select_hero(LEFT, pope.id); m.commit(LEFT, hold)
+m.select_hero(RIGHT, cannon.id); m.commit(RIGHT, strike((7, 2)))
+ok("the seventh is still offered", m.phase == "interrupt", m.phase)
+m.choose_interrupt(LEFT, True)
+m.choose_interrupt(RIGHT, "atk")
+ok("...and spends the last of them", pope.vars["saves_used"] == 7,
+   str(pope.vars["saves_used"]))
+ok("...which the card says plainly",
+   next(b for b in HEROES.status_of(m, pope) if b["key"] == "absolution")["badge"] == "赦0")
+ok("a spent Pope is no longer counted among those who can step in", not m.savers())
+
+# the eighth killing blow simply lands
+m, pope, ally, cannon, d = pope_arena()
+pope.vars["saves_used"] = 7
+ally.set_cell((7, 2)); ally.hp = 2
+m.select_hero(LEFT, pope.id); m.commit(LEFT, hold)
+m.select_hero(RIGHT, cannon.id); m.commit(RIGHT, strike((7, 2)))
+ok("with none left the board does not even pause", m.phase != "interrupt", m.phase)
+ok("...and the hero falls", not ally.alive)
+
+# declining does not spend one
+m, pope, ally, cannon, d = pope_arena()
+ally.set_cell((7, 2)); ally.hp = 2
+m.select_hero(LEFT, pope.id); m.commit(LEFT, hold)
+m.select_hero(RIGHT, cannon.id); m.commit(RIGHT, strike((7, 2)))
+m.choose_interrupt(LEFT, None)
+ok("a mercy refused is a mercy kept", pope.vars.get("saves_used", 0) == 0,
+   str(pope.vars.get("saves_used", 0)))
+
+# ground and poison are not blows: nobody steps in front of them
+m, pope, ally, cannon, d = pope_arena()
+ally.set_cell((7, 2)); ally.hp = 1
+m.board.add_burning((7, 2), RIGHT)
+m.select_hero(LEFT, ally.id); m.commit(LEFT, hold)
+m.select_hero(RIGHT, cannon.id); m.commit(RIGHT, hold)
+ok("burning ground is nobody's blow to stay", not ally.alive and m.phase != "interrupt",
+   f"alive={ally.alive} phase={m.phase}")
+
 print("\nlog tail:")
 for line in m.log[-5:]:
     print("   ", line["text"])

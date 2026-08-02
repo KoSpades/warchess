@@ -135,6 +135,31 @@ def build():
     fb.add_modifier(Modifier("targets", "add", 1))
     snap("two_named", m, select=fb.id)
 
+    # --- a killing blow held up while somebody decides -------------------------
+    m = Match(); m.assign_draft(["pope", "cannoneer"], ["cannoneer", "dummy"])
+    m.place(LEFT, "pope", (2, 2)); m.place(LEFT, "cannoneer", (2, 3))
+    m.place(RIGHT, "cannoneer", (8, 2)); m.place(RIGHT, "dummy", (8, 3))
+    m.lock_force(LEFT); m.lock_force(RIGHT)
+    doomed = unit(m, LEFT, "cannoneer"); doomed.set_cell((7, 2)); doomed.hp = 2
+    m.select_hero(LEFT, unit(m, LEFT, "pope").id); m.commit(LEFT, HOLD)
+    m.select_hero(RIGHT, unit(m, RIGHT, "cannoneer").id)
+    m.commit(RIGHT, {"destination": None, "action": {"key": "attack", "shots": [[[7, 2]]]}})
+    assert m.phase == "interrupt", m.phase
+    out["interrupt_save"] = view.state_for(m, LEFT)
+    out["interrupt_waiting"] = view.state_for(m, RIGHT)
+
+    # --- infected ground: plain to both seats, unlike a buried charge ---------
+    # Built directly: `arena` answers openings for you, and this one needs to land
+    # on a square of its own choosing.
+    m = Match(); m.assign_draft(["plague_doctor", "gatekeeper"], ["dummy", "dummy"])
+    m.place(LEFT, "plague_doctor", (2, 2)); m.place(LEFT, "gatekeeper", (2, 3))
+    m.place(RIGHT, "dummy", (8, 3)); m.place(RIGHT, "dummy", (8, 1))
+    m.lock_force(LEFT); m.lock_force(RIGHT)
+    assert m.opening_choose(LEFT, {"cell": [5, 3]}) is None
+    m.board.add_effect((5, 2), board.Infection(LEFT))
+    out["infected_owner"] = view.state_for(m, LEFT)
+    out["infected_enemy"] = view.state_for(m, RIGHT)
+
     # --- buried charges: the same board seen from both sides ------------------
     m = arena([("diver", (3, 3))], [("gatekeeper", (7, 3))])
     dv = unit(m, LEFT, "diver")

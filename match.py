@@ -15,7 +15,7 @@ import damage as DMG
 import events as EV
 import heroes as HEROES
 from board import Board, Minefield
-from entities import Entity, UNTIL_OWNER_NEXT_TURN, UNTIL_TURN_END
+from entities import Entity, Modifier, UNTIL_OWNER_NEXT_TURN, UNTIL_TURN_END
 from topology import LEFT, RIGHT, Topology, other_side
 
 
@@ -29,6 +29,10 @@ VICTIM = "victim"
 # which square beside its mark to appear on). The choice cannot be made when the
 # order is sealed, because it depends on where the mark ended up.
 MOVE_CHOICE = "move_choice"
+# A killing blow has landed but nobody has been swept off the board yet, and
+# somebody may step in front of it (教皇). Resolution holds here until the Pope's
+# side says yes or no, and — if yes — whoever swung has picked what it gains.
+INTERRUPT = "interrupt"
 # A turn has fully resolved and something wants to act on the outcome before the
 # next pair is picked (男枪 stepping after a hit). Only entered if a follow-up
 # actually needs a decision.
@@ -66,6 +70,9 @@ class Match:
         self.recent_deaths = []
         self.move_choices = {LEFT: [], RIGHT: []}
         self.move_picks = {}
+        # Decisions owed mid-damage, and the half-applied instant waiting on them.
+        self.interrupts = []
+        self.instant = None
 
         self.entities = []
         self._ids = itertools.count(1)
@@ -516,6 +523,10 @@ class Match:
             e.has_acted = False
         self.bus.emit(EV.ROUND_START, {})
         self.log_line(f"— Round {self.round} —")
+        spread = self.board.spread_effects(self)
+        if spread:
+            self.log_line(f"The infection creeps outward — {spread} more square"
+                          f"{'' if spread == 1 else 's'}.")
         self.detonate_due()
         if self.check_victory():
             return
@@ -560,6 +571,8 @@ class Match:
         # Squares an ability is waiting on, and the ones already chosen.
         self.move_choices = {LEFT: [], RIGHT: []}
         self.move_picks = {}
+        self.interrupts = []
+        self.instant = None
         self.take_snapshot()
 
         # A side with nobody left to act sits the exchange out; the other side
@@ -675,17 +688,14 @@ class Match:
                 self.ability_lock[side] = None
                 self.log_line(f"{self.label(e)}'s ward fades.", quiet=True)
         self.bus.emit(EV.TURN_START, {"entity": e})
-        burn = self.board.burning_damage_for(e.cell, e)
-        if burn:
-            ev = DMG.DamageEvent(
-                source=None,
-                target=e,
-                amount=burn,
-                category=DMG.TILE,
-                element=DMG.FIRE,
-            )
-            DMG.apply_batch(self, [ev])
-            self.log_line(f"{self.label(e)} starts its turn burning: {burn} fire.")
+        ground = self.board.turn_start_events(e.cell, e) if e.cells else []
+        if ground:
+            DMG.apply_batch(self, ground)
+            for ev in ground:
+                self.log_line(
+                    f"{self.label(e)} starts its turn on bad ground: "
+                    f"{ev.amount}{' ' + ev.element if ev.element else ''}."
+                )
         # Anything that can kill at turn start forfeits the turn — a burning tile,
         # or a passive that expires lethally (蛮王's 背水 burnout).
         if not e.alive:
@@ -1341,8 +1351,31 @@ class Match:
             # Apply every hit of this instant, but do NOT resolve deaths yet: an
             # ally healing the same target in the same instant has to land first,
             # or a hero saved on the exact turn it drops would die anyway.
+            applied = []
             for _s, _i, ev in batch:
-                DMG.deal(self, ev)
+                applied.append((ev, DMG.deal(self, ev)))
+            self.instant = {"batch": batch, "insts": insts, "applied": applied}
+            if self.offer_saves():
+                # Somebody can be stepped in front of. Everything after this point
+                # waits until that is settled.
+                self.phase = INTERRUPT
+                self.bump()
+                return
+            if self.finish_instant():
+                return
+            continue
+
+    def finish_instant(self):
+        """Everything after the blows have landed — logging, side effects, the board's
+        own answer, then settling who died. Split out of the loop so a decision taken
+        mid-damage (教皇 stepping in front of a killing blow) resumes exactly here.
+        Returns True if the match ended."""
+        st, self.instant = self.instant, None
+        if st is None:
+            return False
+        batch, insts = st["batch"], st["insts"]
+        res = self.res
+        if True:
             for side, inst, ev in batch:
                 if not ev.cancelled and ev.amount > 0 and inst.actor is not None:
                     self.landed.add(inst.actor.id)
@@ -1382,8 +1415,7 @@ class Match:
             res["index"] += 1
             res["picks"] = {LEFT: None, RIGHT: None}
             res["options"] = {LEFT: [], RIGHT: []}
-            if self.check_victory():
-                return
+            return self.check_victory()
 
     def note_on_reveal(self, side, inst, mark):
         """Put an ability's name — and whatever it announced while resolving — on the
@@ -1440,6 +1472,104 @@ class Match:
             self.phase = COMMIT  # transient; advance_resolution moves it on
             self.advance_resolution()
         self.bump()
+        return None
+
+    REWARDS = ("atk", "grid", "rng")
+
+    def savers(self):
+        """Heroes able to step in front of a killing blow, either side's — and that
+        have mercies left to spend."""
+        out = []
+        for e in self.living():
+            for p in e.passives:
+                if not getattr(p, "saves_deaths", False):
+                    continue
+                cap = getattr(p, "SAVE_LIMIT", None)
+                if cap is not None and e.vars.get("saves_used", 0) >= cap:
+                    continue
+                out.append(e)
+                break
+        return out
+
+    def offer_saves(self):
+        """Queue a decision for every hero about to fall to an attack or an active
+        ability while somebody able to stop it is still standing. Returns True if
+        anything is owed."""
+        st = self.instant
+        popes = self.savers()
+        if st is None or not popes:
+            return False
+        doomed = {}
+        for ev, dealt in st["applied"]:
+            if dealt <= 0 or ev.source is None:
+                continue
+            if ev.category not in (DMG.NORMAL_ATTACK, DMG.ABILITY):
+                continue
+            t = ev.target
+            if not t.alive or t.hp > 0 or t in popes:
+                continue      # a Pope cannot step in front of its own end
+            slot = doomed.setdefault(t.id, {"target": t.id, "restore": 0, "source": ev.source.id})
+            slot["restore"] += dealt
+        for spec in doomed.values():
+            t = self.entity(spec["target"])
+            # Its own side's Pope answers for it where there is one, otherwise
+            # whoever else can — mercy is open to both seats.
+            pope = next((p for p in popes if p.side == t.side), popes[0])
+            self.interrupts.append({
+                "kind": "confirm", "key": "death_save", "side": pope.side,
+                "pope": pope.id, "target": spec["target"], "source": spec["source"],
+                "restore": spec["restore"],
+                "name": "赦免 Absolution",
+                "text": f"{self.label(t)} is about to fall to "
+                        f"{self.label(self.entity(spec['source']))}. Step in front of it? "
+                        f"It takes nothing — and whoever swung is sharpened for good.",
+            })
+        return bool(self.interrupts)
+
+    def choose_interrupt(self, side, answer):
+        """Answer the decision holding resolution up. `answer` is truthy/None for a
+        confirm, or one of the reward names for a pick."""
+        if self.phase != INTERRUPT or not self.interrupts:
+            return "Nothing to decide."
+        task = self.interrupts[0]
+        if task["side"] != side:
+            return "Not yours to answer."
+        if task["kind"] == "pick" and answer not in task["options"]:
+            return "Not one of the things on offer."
+        self.interrupts.pop(0)
+
+        if task["key"] == "death_save" and answer:
+            t, src = self.entity(task["target"]), self.entity(task["source"])
+            pope = self.entity(task["pope"])
+            if pope is not None:
+                pope.vars["saves_used"] = pope.vars.get("saves_used", 0) + 1
+            if t is not None and t.alive:
+                t.hp = min(t.max_hp, t.hp + task["restore"])
+                self.log_line(
+                    f"{self.label(task and self.entity(task['pope']))} steps in front of "
+                    f"{self.label(t)} — the blow does nothing."
+                )
+            if src is not None and src.alive:
+                # Whoever swung is owed something for being denied.
+                self.interrupts.insert(0, {
+                    "kind": "pick", "key": "reward", "side": src.side, "source": src.id,
+                    "options": list(self.REWARDS),
+                    "name": "补偿 Recompense",
+                    "text": f"{self.label(src)} was denied a kill. Choose what it gains, "
+                            f"for the rest of the match.",
+                })
+        elif task["key"] == "reward":
+            src = self.entity(task["source"])
+            if src is not None:
+                src.add_modifier(Modifier(answer, "add", 1))
+                self.log_line(f"{self.label(src)} is sharpened — +1 {answer}.")
+
+        self.bump()
+        if self.interrupts:
+            return None
+        self.phase = COMMIT              # transient; the instant moves it on
+        if not self.finish_instant():
+            self.advance_resolution()
         return None
 
     def sweep_deaths(self):

@@ -1651,6 +1651,101 @@ class StarSign:
         }
 
 
+class TakeThePlague(Ability):
+    """鸟嘴医生 puts itself on the board once everyone else is down and in view. The
+    opening phase is exactly that moment — after both forces are locked and visible,
+    before a single exchange — so this needs no timing of its own."""
+
+    key = "take_the_plague"
+    name = "瘟疫 Plague"
+    ap_cost = 0
+    use_limit = 1
+    opening = True
+    targeting = {"kind": "any_cell"}
+    blurb = ("Once both forces are down and in view, step onto any empty square on "
+             "the board. It is infected the moment you arrive.")
+
+    def cells(self, match, actor):
+        """Any empty square — it may open inside the enemy formation."""
+        return [c for c in match.topology.all_cells() if match.occupant(c) is None]
+
+    def side_effects(self, match, actor, params):
+        cell = tuple(params["cell"])
+        if match.occupant(cell) is not None:
+            cell = next((c for c in self.cells(match, actor)), None)
+            if cell is None:
+                return
+        actor.set_cell(cell)
+        actor.flags.update(blocks_movement=True, targetable=True)
+        match.board.add_effect(cell, BOARD.Infection(actor.side, match.round))
+        match.bus.emit(EV.AFTER_MOVE, {"entity": actor, "from": None, "to": cell})
+        match.log_line(
+            f"{match.label(actor)} walks in where it likes, and the ground it stands "
+            f"on turns bad."
+        )
+
+
+class Absolution:
+    """教皇. Nothing dies to a blow or a spell while it stands, if it does not want
+    that death — but mercy is never free: whoever was denied the kill is sharpened
+    for the rest of the match, and picks its own reward.
+
+    Either side's heroes can be spared. Sparing one of theirs feeds *your* attacker,
+    so the mercy is also a way to grow your own force.
+
+    The engine owns the whole thing — a killing blow pauses resolution and asks. All
+    this passive does is say that its owner is the kind of hero who can be asked."""
+
+    describe = ("When any hero is about to fall to a normal attack or an active "
+                "ability, it may step in front: that hero takes nothing at all, and "
+                "whoever swung permanently gains one of +1 attack, +1 grid or +1 "
+                "range, chosen by whoever controls it. Seven times a match, and it "
+                "cannot save itself.")
+    saves_deaths = True
+    SAVE_LIMIT = 7
+
+    def status(self, match, owner):
+        left = self.SAVE_LIMIT - owner.vars.get("saves_used", 0)
+        return {
+            "key": "absolution", "badge": f"赦{left}", "label": "赦免 ABSOLUTION",
+            "text": (f"{left} of {self.SAVE_LIMIT} mercies left — it can still step in "
+                     f"front of that many killing blows."
+                     if left else "Every mercy spent. Nothing is safe now."),
+        }
+
+
+class PlagueBearer:
+    """鸟嘴医生. It is not deployed with the rest of the force — it waits until both
+    sides are set out in the open, then puts itself wherever it pleases and leaves
+    the plague under its own feet.
+
+    The plague is ground, not an attack: everything the board owns lives in
+    board.py, and nothing here knows how it spreads."""
+
+    describe = ("Deploys after both forces are down and visible, on any empty square. "
+                "The square it lands on is infected: anyone starting a turn on infected "
+                "ground loses 2, either side's, and nothing softens it. Infected ground "
+                "creeps to the four squares beside it at the start of every round. It "
+                "alone is immune.")
+
+    def on_match_start(self, match, owner, ctx):
+        # Off the board until it chooses its square, like a hero with no body yet.
+        owner.vars["plague_immune"] = True
+        owner.cells = set()
+        owner.flags.update(blocks_movement=False, targetable=False)
+
+    def status(self, match, owner):
+        # No badge once it is down: its own immunity is permanent and never in
+        # question, so saying so every turn is noise. The only thing worth a note is
+        # the moment before it has picked its square, when it is nowhere at all.
+        if owner.cells:
+            return None
+        return {
+            "key": "waiting", "badge": "疫", "label": "瘟疫 UNPLACED",
+            "text": "Not on the board yet — it walks in once both forces are set.",
+        }
+
+
 class PaintStroke:
     """画师. Every blow it takes is a chance to blunt the hand that struck it, and
     every blow it lands is one more stroke of its own. Both are offered once the
@@ -2470,6 +2565,31 @@ ROSTER = [
         blurb="Keeps nothing for himself — every turn, an ally leaves with an extra point.",
     ),
     HeroDef(
+        key="pope",
+        name="教皇",
+        name_en="pope",
+        max_hp=13,
+        atk=2,
+        move=1,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 2, "range": 4},
+        passives=[Absolution],
+        blurb="Nothing dies while it stands — but every mercy sharpens the hand it stayed.",
+    ),
+    HeroDef(
+        key="plague_doctor",
+        name="鸟嘴医生",
+        name_en="plagueDoctor",
+        max_hp=14,
+        atk=2,
+        move=1,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 2, "range": 2},
+        abilities=[TakeThePlague()],
+        passives=[PlagueBearer],
+        blurb="Arrives last, stands where it likes, and the board rots outward from there.",
+    ),
+    HeroDef(
         key="painter",
         name="画师",
         name_en="painter",
@@ -2660,7 +2780,7 @@ BY_KEY[DUMMY.key] = DUMMY
 # whenever you add heroes; --test fills the rest of your side with dummies.
 # Whoever is newest goes here — --test always deploys the hero just added, so it
 # can be played immediately. Up to two; the rest of the side is padded with dummies.
-TEST_HEROES = ["four_beasts", "painter"]
+TEST_HEROES = ["plague_doctor", "pope"]
 
 
 

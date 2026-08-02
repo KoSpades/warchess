@@ -16,6 +16,11 @@ ABILITY = "ability"
 TILE = "tile"
 STATUS = "status"
 
+# A blow tagged with this is not softened by anything: no ward turns it aside, no
+# guard blunts it, no mark sharpens it. Handlers still run — they may redirect it
+# (a shared body) — but whatever they decide about the size of it is discarded.
+UNBLOCKABLE = "unblockable"
+
 # --- elements (inert on their own; tags for later designs to key off) ---
 NONE = None
 FIRE = "fire"
@@ -207,16 +212,26 @@ class HalvingRule:
 def deal(match, ev):
     """Apply a single already-built DamageEvent. Deaths are NOT resolved here;
     the caller sweeps for them so that a batch can be applied simultaneously."""
+    fixed = ev.amount if UNBLOCKABLE in ev.tags else None
     match.bus.emit(EV.BEFORE_DAMAGE, ev)
+    if fixed is not None:
+        # Let the pipeline have its say — redirection still matters — then put the
+        # number back. Cheaper and far safer than teaching every rule to opt out.
+        ev.cancelled, ev.cancel_reason, ev.amount = False, None, fixed
     if ev.cancelled or ev.amount <= 0:
         if ev.cancelled and ev.cancel_reason:
             match.log_line(
                 f"{match.label(ev.target)} takes no damage ({ev.cancel_reason}).", quiet=True
             )
         return 0
+    before = ev.target.hp
     ev.target.hp = max(0, ev.target.hp - ev.amount)
+    # The health actually taken, which is not the same as the size of the blow: a
+    # hero on 2 struck for 7 loses 2. Callers that undo a hit (教皇 stepping in
+    # front of it) must put back exactly what was removed and no more.
+    removed = before - ev.target.hp
     match.bus.emit(EV.AFTER_DAMAGE, ev)
-    return ev.amount
+    return removed
 
 
 def apply_batch(match, damage_events):

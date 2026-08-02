@@ -27,6 +27,9 @@ class CellEffect:
     hidden = False          # True = only its owner's side is told it is there
     fuse_round = None       # set to a round number to go off at its start
     stacks = 1
+    element = None
+    category = DMG.TILE
+    tags = ()
 
     def __init__(self, owner_side):
         self.owner_side = owner_side
@@ -39,6 +42,11 @@ class CellEffect:
 
     @property
     def damage(self):
+        return 0
+
+    def turn_damage(self, entity):
+        """What this deals to a unit that *starts* its turn here. 0 for anything that
+        only goes off on entry or on a timer."""
         return 0
 
     def describe(self):
@@ -55,6 +63,10 @@ class BurningTile(CellEffect):
     is free, standing there is not."""
 
     kind = "burning"
+    element = DMG.FIRE
+
+    def turn_damage(self, entity):
+        return self.damage if self.hostile_to(entity) else 0
 
     def __init__(self, owner_side, damage_per_stack=2):
         super().__init__(owner_side)
@@ -66,6 +78,45 @@ class BurningTile(CellEffect):
 
     def describe(self):
         return f"Burning x{self.stacks} ({self.damage} fire)"
+
+
+class Infection(CellEffect):
+    """鸟嘴医生's plague. Ground that bites whoever stands on it at the start of their
+    turn — either side's, since a plague does not check colours — and creeps one
+    square further every round. Only a unit that carries `plague_immune` walks it
+    safely. Unblockable: no ward, guard or shelter softens it.
+
+    Permanent, and never stacked: one square is either infected or it is not."""
+
+    kind = "infection"
+    DAMAGE = 2
+    tags = (DMG.UNBLOCKABLE,)
+
+    def __init__(self, owner_side, laid_round=1):
+        super().__init__(owner_side)
+        # The round this ground appeared in. It sits still for the rest of that
+        # round and only creeps from the start of the next one — so the square the
+        # doctor lands on is the whole plague for the first round of play.
+        self.laid_round = max(1, laid_round)
+
+    @property
+    def damage(self):
+        return self.DAMAGE
+
+    def turn_damage(self, entity):
+        if entity is None or entity.vars.get("plague_immune"):
+            return 0
+        return self.DAMAGE
+
+    def spread_to(self, match, cell):
+        """Where it creeps next: the four squares beside it."""
+        return match.topology.neighbours(cell)
+
+    def clone(self, laid_round):
+        return Infection(self.owner_side, laid_round)
+
+    def describe(self):
+        return f"Infected ({self.DAMAGE} to anyone starting a turn here)"
 
 
 class SmallBomb(CellEffect):
@@ -163,6 +214,40 @@ class Board:
         A tile never burns its owner's own side."""
         return sum(eff.damage for eff in self.effects_at(cell)
                    if eff.kind == "burning" and eff.hostile_to(entity))
+
+    def turn_start_events(self, cell, entity):
+        """Everything the ground does to a unit that starts its turn on it. One
+        event per effect, so each keeps its own element, category and tags."""
+        out = []
+        for eff in self.effects_at(cell):
+            n = eff.turn_damage(entity)
+            if n:
+                out.append(DMG.DamageEvent(source=None, target=entity, amount=n,
+                                           category=eff.category, element=eff.element,
+                                           tags=set(eff.tags)))
+        return out
+
+    def spread_effects(self, match):
+        """Ground that creeps does so once a round, and all at the same instant —
+        so a square infected this round does not immediately infect further."""
+        fresh = []
+        for cell, effs in list(self.effects.items()):
+            for eff in list(effs):
+                fn = getattr(eff, "spread_to", None)
+                if fn is None:
+                    continue
+                # Ground creeps from the round *after* the one it appeared in.
+                if match.round <= getattr(eff, "laid_round", 0):
+                    continue
+                for c in fn(match, cell):
+                    if not self.has_kind(c, eff.kind):
+                        fresh.append((c, eff))
+        added = 0
+        for c, eff in fresh:
+            if not self.has_kind(c, eff.kind):     # another source may have got there
+                self.add_effect(c, eff.clone(match.round))
+                added += 1
+        return added
 
     def due(self, round_number):
         """(cell, effect) for every timer whose round has come."""

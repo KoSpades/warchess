@@ -333,6 +333,7 @@ function renderBoard(){
       // see, and a charge only your side knows about.
       const effs = (S.tiles||[]).filter(t=>eq(t.cell,cell));
       const tile = effs.find(t => t.kind==='burning');
+      const plague = effs.find(t => t.kind==='infection');
       // Charges pile up without limit, so a marker has to say how many as well as
       // what. A bare count would be ambiguous against a big bomb's countdown, so
       // counts always carry ×, and a fuse always reads "in N".
@@ -347,6 +348,7 @@ function renderBoard(){
                  + (bigs.length>1 ? '×'+bigs.length : '');
       }
       if (tile) cls.push('burn');
+      if (plague) cls.push('infected');
       if (mineTxt) cls.push('mined');
       if (origin && cspec &&
           Math.abs(origin[0]-c)+Math.abs(origin[1]-r) <= cspec.range) cls.push('inrange');
@@ -391,6 +393,7 @@ function renderBoard(){
             + ` onclick="onCell(${c},${r})"${dnd}>`
             + `<span class="tick"></span>${extra}`
             + (tile?`<span class="flame">▲${tile.stacks}</span>`:'')
+            + (plague?`<span class="plague">疫</span>`:'')
             + (mineTxt?`<span class="bomb">${mineTxt}</span>`:'')
             + `</button>`;
     }
@@ -989,6 +992,13 @@ function onKey(e){
     }
     return;
   }
+  if (S && S.phase==='interrupt'){
+    const t = S.interrupt && S.interrupt.task;
+    if (e.key==='Enter' && t && t.kind==='confirm'){
+      e.preventDefault(); cmd({cmd:'interrupt', answer:true});
+    }
+    return;
+  }
   if (S && (S.phase==='resolved' || S.phase==='move_choice')){
     const t = stepTask();
     if (e.key!=='Enter' || !t) return;
@@ -1146,6 +1156,7 @@ function render(){
   else if (S.phase==='commit') renderCommit();
   else if (S.phase==='resolved') renderFollowup();
   else if (S.phase==='move_choice') renderMoveChoice();
+  else if (S.phase==='interrupt') renderInterrupt();
   else if (S.phase==='victim') renderVictim();
   else renderOver();
   if (revealActive) renderReveal();   // sits on top of everything
@@ -1610,6 +1621,29 @@ function magUpdate(v){
   const su = selectedUnit();
   document.getElementById('magv').textContent = v;
   document.getElementById('magres').textContent = `+${v} atk, ${su.hp - (+v)}/${su.max_hp - (+v)} HP`;
+}
+
+function renderInterrupt(){
+  // A killing blow has landed and nobody has been swept off the board yet: 教皇 may
+  // step in front of it, and whoever swung then picks what it gains instead.
+  document.getElementById('leftheading').textContent = 'Before it falls';
+  const t = S.interrupt && S.interrupt.task;
+  let h = '';
+  if (t){
+    h += `<div class="step">${t.name}</div><p class="note">${t.text}</p>`;
+    if (t.kind==='confirm'){
+      h += `<button class="btn primary" onclick="cmd({cmd:'interrupt', answer:true})">Step in front of it — <b>Enter</b></button>`;
+      h += `<button class="btn" onclick="cmd({cmd:'interrupt', answer:null})">Let it fall</button>`;
+    } else {
+      for (const o of t.options){
+        h += `<button class="btn" onclick="cmd({cmd:'interrupt', answer:'${o}'})">+1 ${o}</button>`;
+      }
+    }
+  } else {
+    h += `<div class="waiting">Waiting for the other seat</div>`;
+  }
+  h += `<p class="err">${err}</p>`;
+  document.getElementById('leftbody').innerHTML = h;
 }
 
 function renderMoveChoice(){

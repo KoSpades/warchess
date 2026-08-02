@@ -279,6 +279,14 @@ def state_for(m, side):
         }
         return out
 
+    if m.phase == M.INTERRUPT:
+        task = m.interrupts[0] if m.interrupts else None
+        out["interrupt"] = {
+            "task": task if task and task["side"] == side else None,
+            "waiting_on_opponent": bool(task) and task["side"] != side,
+        }
+        return out
+
     if m.phase == M.MOVE_CHOICE:
         pend = m.move_choices[side]
         out["move_choice"] = {

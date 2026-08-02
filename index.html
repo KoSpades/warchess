@@ -87,6 +87,11 @@ main{display:grid;grid-template-columns:minmax(0,1fr) var(--rpanel);
 .cell.dest{box-shadow:inset 0 0 0 2px var(--verdigris)}
 .cell.burn{background:#3B2A22;border-color:#5A3829}
 .flame{position:absolute;bottom:3px;right:4px;font-family:var(--mono);font-size:9px;color:var(--ember);letter-spacing:-.02em}
+/* Infected ground — plain for both seats to see, and it tints the square rather
+   than sitting in a corner, since standing there at all is the danger. */
+.cell.infected{background:#26301F;border-color:#41552F}
+.cell.infected.burn{background:#33301F}
+.plague{position:absolute;bottom:3px;left:4px;font-family:var(--mono);font-size:9px;color:#8FBF6A;letter-spacing:-.02em}
 /* Buried charges — only ever drawn on the board of the side that laid them, so
    the dashed outline is a private note to that player, not a shared marker. */
 .cell.mined{border-color:#6E5A2A;border-style:dashed}

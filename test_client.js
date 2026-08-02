@@ -51,7 +51,7 @@ function loadClient(side = 'L') {
       render, heroDetailHTML, blankDraft, confirmMove, chooseAction, sealFromKeyboard,
       orderReady, curActions, curMoves, curChoices, canAct, clickableCell, onCell,
       laneShots, areaCells, areaAttack, plannedCell, changeMove, unitAt, myUnits,
-      sweepPreview, linkedOrder, linkedMoves, isLinked, confirmMove, confirmOpening,
+      sweepPreview, linkedOrder, linkedMoves, isLinked, confirmMove, confirmOpening, onKey,
       confirmStep };`;
   const tmp = path.join(here, '.client.test.js');
   fs.writeFileSync(tmp, js + api);
@@ -309,6 +309,49 @@ if (F.two_named) {
      JSON.stringify((lastSent().payload.action.targets || []).slice().sort()) ===
      JSON.stringify([foes[0].id, foes[1].id].sort()),
      JSON.stringify(lastSent().payload.action.targets));
+}
+
+// ------------------------------- 教皇: a killing blow held up for a decision
+
+if (F.interrupt_save && F.interrupt_waiting) {
+  C.S = F.interrupt_save; C.draft = null; C.err = '';
+  const t = F.interrupt_save.interrupt.task;
+  ok('pope: the side that can step in is asked', !!t && t.kind === 'confirm',
+     JSON.stringify(t && t.kind));
+  let broke = null;
+  try { C.render(); } catch (e) { broke = e.message; }
+  ok('pope: the panel renders', !broke, broke || '');
+  const before = C.sent.length;
+  C.onKey({ key: 'Enter', preventDefault(){} });
+  ok('pope: Enter steps in front of it',
+     C.sent.length === before + 1 && lastSent().cmd === 'interrupt' &&
+     lastSent().answer === true, JSON.stringify(lastSent()));
+
+  C.S = F.interrupt_waiting; C.draft = null; C.err = '';
+  ok('pope: the other seat is told it is waiting, not asked',
+     !F.interrupt_waiting.interrupt.task &&
+     F.interrupt_waiting.interrupt.waiting_on_opponent,
+     JSON.stringify(F.interrupt_waiting.interrupt));
+  const before2 = C.sent.length;
+  C.onKey({ key: 'Enter', preventDefault(){} });
+  ok('pope: and it cannot answer for the other side', C.sent.length === before2);
+}
+
+// --------------------------- 鸟嘴医生: infected ground, plain to both seats
+
+if (F.infected_owner && F.infected_enemy) {
+  for (const [name, who] of [['infected_owner', 'the side that spread it'],
+                             ['infected_enemy', 'the side it was spread against']]) {
+    C.S = F[name]; C.draft = null; C.err = '';
+    ok(`plague: ${who} is told which squares are infected`,
+       (F[name].tiles || []).filter(t => t.kind === 'infection').length === 2,
+       JSON.stringify((F[name].tiles || []).map(t => t.kind)));
+    ok(`plague: ${who} sees them marked on the board`,
+       cellHas([5, 3], 'infected') && cellHas([5, 2], 'infected'),
+       cellsWith('infected').join(' '));
+    ok(`plague: ${who} sees clean ground stay clean`, !cellHas([1, 1], 'infected'),
+       cellsWith('infected').join(' '));
+  }
 }
 
 // ----------------------------------- 潜水者: a charge only one side can see
