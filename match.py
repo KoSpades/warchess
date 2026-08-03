@@ -437,6 +437,21 @@ class Match:
 
     # -------------------------------------------------------------- setup
 
+    def middle(self):
+        return ((self.topology.cols + 1) // 2, (self.topology.rows + 1) // 2)
+
+    def free_near(self, cell):
+        """`cell` if nothing holds it, else the closest empty square to it. Both
+        sides may draft the same board-placed hero (two 世界树), and they cannot
+        both have the middle — the second one stands as near it as it can."""
+        cell = tuple(cell)
+        if self.occupant(cell) is None and self.topology.region(cell) is None:
+            return cell
+        free = [c for c in self.topology.all_cells() if self.occupant(c) is None]
+        if not free:
+            return cell
+        return min(free, key=lambda c: (self.topology.distance(cell, c), c))
+
     def board_places(self, how):
         """True if anybody drafted a card the board itself puts down this way
         (世界树 at the middle). Lets a build-time choice know what ground is
@@ -538,8 +553,7 @@ class Match:
             for k in self.drafted[side]:
                 hero = HEROES.BY_KEY[k]
                 if hero.deploys == "centre":
-                    mid = ((self.topology.cols + 1) // 2, (self.topology.rows + 1) // 2)
-                    self.spawn(hero, side, mid)
+                    self.spawn(hero, side, self.free_near(self.middle()))
                 elif hero.deploys == "island":
                     isl = self.islands.get(side)
                     if isl:
@@ -1289,6 +1303,12 @@ class Match:
         if w["mode"] == "cells":
             cells = (action.get("shots") or [[]])[0] or []
             return [ACT.CellLockedAttack(e, cells, intended, amount=w["atk"])]
+        if e.cell is None:
+            # Nothing on the board to swing from: the master was killed on its way
+            # (a mine under the square it moved to), or has no body yet. The marked
+            # form above is fine without one — it fires at squares it named — but a
+            # pattern measured from the hero itself has no centre.
+            return [ACT.NullAction()]
         if w["mode"] == "row":
             return [ACT.AreaAttack(e, self.topology.row(e.cell[1]), w["atk"])]
         if w["mode"] == "surround8":

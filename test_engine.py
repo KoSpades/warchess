@@ -1514,7 +1514,8 @@ m, st, gk, d = strong_arena()
 gk.set_cell((4, 3))                                  # east of the strongman at C3
 before = gk.hp
 turn(m, st.id, slam(gk), d.id, hold)
-ok("the victim takes the slam", before - gk.hp == 3, f"took {before - gk.hp}")
+SLAM = HEROES.Slam.DAMAGE       # read, not repeated: this number gets rebalanced
+ok("the victim takes the slam", before - gk.hp == SLAM, f"took {before - gk.hp}")
 ok("and lands on the square opposite, through the thrower", gk.cell == (2, 3), str(gk.cell))
 
 # on the diagonal: reflected through the thrower just the same
@@ -1556,7 +1557,8 @@ turn(m, st.id, slam(gk),
 ok("the victim's own attack still lands, from where it stood",
    before_st - st.hp == gk.atk, f"大力士 took {before_st - st.hp}")
 ok("...and it is thrown all the same",
-   before_gk - gk.hp == 3 and gk.cell == (2, 3), f"took {before_gk - gk.hp}, at {gk.cell}")
+   before_gk - gk.hp == HEROES.Slam.DAMAGE and gk.cell == (2, 3),
+   f"took {before_gk - gk.hp}, at {gk.cell}")
 
 # 49 — 长老: one blow turned aside, and swifter until it is
 def elder_arena():
@@ -2068,8 +2070,9 @@ m.board.add_effect((2, 3), BOARD.SmallBomb(LEFT))
 hp0 = gk.hp
 turn(m, st.id, {"destination": None, "action": {"key": "ability:slam", "target": gk.id}},
      gk.id, hold)
-ok("a hero hurled onto a mine sets it off", hp0 - gk.hp == 3 + 3,
-   f"took {hp0 - gk.hp} (3 slam + 3 mine)")
+slam, mine = HEROES.Slam.DAMAGE, BOARD.SmallBomb.DAMAGE
+ok("a hero hurled onto a mine sets it off", hp0 - gk.hp == slam + mine,
+   f"took {hp0 - gk.hp} ({slam} slam + {mine} mine)")
 
 # the parting charge: it dies, and its side still gets to place one
 m, dv, ally, cannon, d = diver_arena()
@@ -4066,6 +4069,39 @@ ok("two islands never leave a zone too small to deploy into",
    _tightest >= _biggest, f"{_tightest} squares vs {_biggest} bodies")
 ok("...and never leave 哥布林团伙 without a blob to stand in", _blobless == 0,
    str(_blobless))
+
+# 74 — 武器大师 killed on its way in, holding a weapon measured from itself
+m74 = Match()
+m74.assign_draft(["weapon_master", "cannoneer"], ["diver", "berserker"])
+for k, c in (("weapon_master", (3, 3)), ("cannoneer", (3, 1))):
+    assert m74.place(LEFT, k, c) is None, (k, c)
+for k, c in (("diver", (7, 3)), ("berserker", (7, 4))):
+    assert m74.place(RIGHT, k, c) is None
+assert m74.lock_force(LEFT) is None
+assert m74.lock_force(RIGHT) is None
+while m74.phase == "opening":
+    for side in (LEFT, RIGHT):
+        if m74.opening is None or m74.phase != "opening":
+            break
+        pend = m74.opening["pending"][side]
+        if pend:
+            e = m74.entity(pend[0]["entity"])
+            ab = next(a for a in e.abilities if a.key == pend[0]["ability_key"])
+            cells = m74.ability_targeting(e, ab).get("cells") or [[9, 5]]
+            m74.opening_choose(side, {"cell": list(cells[0]), "target": e.id})
+wm74 = unit(m74, LEFT, "weapon_master")
+wm74.hp = 1
+surround = next(w for w in HEROES.WEAPONS if w["mode"] == "surround8")
+m74.board.add_effect((4, 3), BOARD.SmallBomb(RIGHT))   # enough to finish it off
+m74.board.add_effect((4, 3), BOARD.SmallBomb(RIGHT))
+m74.select_hero(LEFT, wm74.id)
+err74 = m74.commit(LEFT, {"destination": [4, 3],
+                          "action": {"key": "attack", "weapon": surround["key"]}})
+ok("a weapon aimed from the hero itself is a legal order", err74 is None, repr(err74))
+for e in m74.unacted(RIGHT)[:1]:
+    m74.select_hero(RIGHT, e.id); m74.commit(RIGHT, hold)
+ok("...and dying on the way in costs the swing rather than the match",
+   not wm74.alive and m74.phase != "gameover", f"{wm74.alive}/{m74.phase}")
 
 print("\nlog tail:")
 for line in m.log[-5:]:

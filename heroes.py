@@ -492,8 +492,8 @@ class Slam(Ability):
     ap_cost = 1
     targeting = {"kind": "unit"}
     blurb = ("Seize an enemy in any of the 8 squares around you and hurl it to the "
-             "square directly opposite, dealing 3. The landing square must be empty.")
-    DAMAGE = 3
+             "square directly opposite, dealing 4. The landing square must be empty.")
+    DAMAGE = 4
 
     @staticmethod
     def landing(match, actor, target):
@@ -2918,7 +2918,7 @@ ROSTER = [
         key="robot",
         name="机器人",
         name_en="robot",
-        max_hp=22,
+        max_hp=21,
         atk=2,
         move=1,
         max_ap=0,
@@ -3027,7 +3027,7 @@ ROSTER = [
         key="forest_child",
         name="森林之子",
         name_en="forestChild",
-        max_hp=18,
+        max_hp=17,
         atk=4,
         move=1,
         max_ap=0,
@@ -3124,7 +3124,7 @@ ROSTER = [
         key="gatekeeper",
         name="门神",
         name_en="gatekeeper",
-        max_hp=30,
+        max_hp=29,
         atk=3,
         move=1,
         max_ap=0,
@@ -3533,7 +3533,7 @@ ROSTER = [
         key="diver",
         name="潜水者",
         name_en="diver",
-        max_hp=12,
+        max_hp=13,
         atk=2,
         move=2,
         max_ap=0,

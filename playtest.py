@@ -582,8 +582,11 @@ def random_tournament(n=3000, team_size=2, seed=0):
     rec = {k: {"games": 0, "score": 0.0, "survived": 0} for k in pool}
     draws = 0
     for i in range(n):
-        left = rng.sample(pool, team_size)
-        right = rng.sample(pool, team_size)
+        # One draw for both forces. The real draft is a shared pool — a hero taken
+        # is off the board for the other side too — so a match is 2×team_size
+        # *distinct* heroes and nobody ever faces themselves.
+        picked = rng.sample(pool, team_size * 2)
+        left, right = picked[:team_size], picked[team_size:]
         res = play_teams(left, right, seed=i)
         if res == "draw":
             draws += 1
