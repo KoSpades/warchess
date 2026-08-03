@@ -119,8 +119,11 @@ class UnitLocked(AttackMode):
         return max(1, min(e.targets, len(foes)))
 
     def targeting(self, match, e):
-        return {"kind": "unit", "range": e.hero.attack.get("range"),
-                "count": self.wanted(match, e)}
+        return {"kind": "unit", "range": e.attack_spec.get("range"),
+                "count": self.wanted(match, e),
+                # Friends that may be named on purpose (世界树 offering itself).
+                "strikeable": [a.id for a in match.strikeable_allies(
+                    match.topology.all_cells(), e.side)]}
 
     @staticmethod
     def named(action):
@@ -137,9 +140,15 @@ class UnitLocked(AttackMode):
             return "Name a different hero for each."
         if len(ids) != want:
             return f"Name {want} living enem{'y' if want == 1 else 'ies'}."
+        strikeable = {a.id for a in match.strikeable_allies(
+            match.topology.all_cells(), e.side)}
         for i in ids:
             t = match.entity(i)
-            if t is None or not t.alive or t.side == e.side:
+            if t is None or not t.alive:
+                return "Choose a living enemy."
+            if t.side == e.side and i not in strikeable:
+                return "Choose a living enemy."
+            if t.side != e.side and not t.flags["targetable"]:
                 return "Choose a living enemy."
         return None
 

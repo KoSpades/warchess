@@ -178,6 +178,57 @@ class BigBomb(CellEffect):
         return {"fuse_round": self.fuse_round}
 
 
+class GrapeVine(CellEffect):
+    """探险家's 葡萄树. Never harms anybody: the first friendly hero to step onto it
+    mends 4, once, and after that the vine simply stands there — which is the point,
+    because 大葡萄园 turns every vine already planted into ground that mends 2 at the
+    end of every round."""
+
+    kind = "vineyard"
+    FIRST = 4
+    HARVEST = 2
+
+    def __init__(self, owner_side):
+        super().__init__(owner_side)
+        self.spent = False
+        self.great = False      # raised by 大葡萄园
+
+    def hostile_to(self, entity):
+        return False            # a vine is not a hazard to anyone
+
+    def on_entered(self, match, entity):
+        """Side effects of arriving here that are not damage."""
+        if self.spent or entity is None or entity.side != self.owner_side:
+            return
+        self.spent = True
+        got = DMG.heal(match, entity, self.FIRST, source=None)
+        if got:
+            match.log_line(f"{match.label(entity)} finds the vine in fruit — mends {got}.")
+
+    def describe(self):
+        if self.great:
+            return f"Vineyard (mends {self.HARVEST} at the end of each round)"
+        return "Vine (spent)" if self.spent else f"Vine (first friend here mends {self.FIRST})"
+
+    def payload(self):
+        return {"spent": self.spent, "great": self.great}
+
+
+class Vineyard:
+    """Global rule: ground raised to a 大葡萄园 mends whoever of its own side is
+    standing on it when the round turns over. Names no hero and reads one flag on
+    the effect, so it keeps working long after the explorer that planted it is gone."""
+
+    def on_round_end(self, match, ctx):
+        for cell, effs in list(match.board.effects.items()):
+            for eff in effs:
+                if eff.kind != GrapeVine.kind or not getattr(eff, "great", False):
+                    continue
+                occ = match.occupant(cell)
+                if occ is not None and occ.alive and occ.side == eff.owner_side:
+                    DMG.heal(match, occ, eff.HARVEST, source=None)
+
+
 class Board:
     def __init__(self, topology):
         self.topology = topology
@@ -293,6 +344,10 @@ class Minefield:
             return
         cell = e.cell
         for eff in list(match.board.effects_at(cell)):
+            # Ground that does something other than damage on arrival (a vine).
+            entered = getattr(eff, "on_entered", None)
+            if entered is not None:
+                entered(match, e)
             fn = getattr(eff, "on_enter", None)
             if fn is None:
                 continue

@@ -128,6 +128,125 @@ def build():
     snap("gang", m, select=m.living(LEFT)[0].id,
          full_ap=[unit(m, LEFT, "goblin_commander")])
 
+    # --- a lane that moves somebody other than the thrower (渔夫's hook) -------
+    m = arena([("fisherman", (3, 3)), ("gatekeeper", (3, 1))],
+              [("cannoneer", (7, 3)), ("dummy", (7, 1))])
+    fm = unit(m, LEFT, "fisherman")
+    snap("hook", m, select=fm.id, full_ap=[fm])
+
+    # --- 世界树's beasts: a mid-resolution prompt that names a hero -----------
+    m = Match(); m.assign_draft(["world_tree", "cannoneer"], ["dummy", "gatekeeper"])
+    m.place(LEFT, "cannoneer", (3, 3))
+    m.place(RIGHT, "dummy", (7, 3)); m.place(RIGHT, "gatekeeper", (7, 1))
+    m.lock_force(LEFT); m.lock_force(RIGHT)
+    tree = next(e for e in m.entities if e.key == "world_tree")
+    tree.vars["struck"] = 2
+    can = unit(m, LEFT, "cannoneer")
+    m.select_hero(LEFT, can.id)
+    m.commit(LEFT, {"destination": None, "action": {"key": "attack", "shots": [[[5, 3]]]}})
+    m.select_hero(RIGHT, unit(m, RIGHT, "dummy").id); m.commit(RIGHT, HOLD)
+    assert m.phase == "interrupt", m.phase
+    out["beasts"] = view.state_for(m, LEFT)
+
+    # --- the enemy seat looking at the tree: it may not aim anything at it ----
+    m = Match(); m.assign_draft(["world_tree", "cannoneer"], ["thunder_dragon", "dummy"])
+    m.place(LEFT, "cannoneer", (3, 3))
+    m.place(RIGHT, "thunder_dragon", (7, 3)); m.place(RIGHT, "dummy", (7, 1))
+    m.lock_force(LEFT); m.lock_force(RIGHT)
+    td = unit(m, RIGHT, "thunder_dragon")
+    m.select_hero(RIGHT, td.id)
+    out["tree_foe"] = view.state_for(m, RIGHT)
+
+    # --- the tree's own side, with an order that commits to a hero -----------
+    m = Match(); m.assign_draft(["world_tree", "thunder_dragon"], ["dummy", "gatekeeper"])
+    m.place(LEFT, "thunder_dragon", (3, 3))
+    m.place(RIGHT, "dummy", (7, 3)); m.place(RIGHT, "gatekeeper", (7, 1))
+    m.lock_force(LEFT); m.lock_force(RIGHT)
+    td = unit(m, LEFT, "thunder_dragon")
+    m.select_hero(LEFT, td.id)
+    out["tree_ally"] = view.state_for(m, LEFT)
+
+    # --- a vine on the ground, and an enemy side nothing may be named on --------
+    m = Match()
+    m.assign_draft(["assassin", "elder", "magician"], ["world_tree", "explorer", "gatekeeper"])
+    m.build_choose(RIGHT, {"cells": [[8, 1], [8, 2], [8, 3], [7, 2]]})
+    m.build_choose(RIGHT, {"cell": [8, 2]})
+    for k, c in (("assassin", (3, 3)), ("elder", (3, 4)), ("magician", (3, 5))):
+        assert m.place(LEFT, k, c) is None, (k, c)
+    assert m.place(RIGHT, "gatekeeper", (9, 3)) is None
+    assert m.lock_force(LEFT) is None
+    assert m.lock_force(RIGHT) is None
+    # Everything the left seat could name is gone: what is left of the right side
+    # is a 世界树 and an 探险家 still out on its island, neither of them touchable.
+    gk = unit(m, RIGHT, "gatekeeper")
+    gk.alive = False
+    gk.cells = set()
+    m.snapshot = {}          # the loss is public by the time this is drawn
+    m.board.add_effect((4, 3), board.GrapeVine(LEFT))
+    spent = board.GrapeVine(LEFT); spent.spent = True
+    m.board.add_effect((4, 4), spent)
+    great = board.GrapeVine(LEFT); great.great = True
+    m.board.add_effect((4, 5), great)
+    asn = unit(m, LEFT, "assassin")
+    asn.ap = asn.max_ap
+    m.select_hero(LEFT, asn.id)
+    out["untouchable_foes"] = view.state_for(m, LEFT)
+
+    # --- an opening pick with a restricted square list (鸟嘴医生's plague) -------
+    m = Match()
+    m.assign_draft(["plague_doctor", "cannoneer", "gatekeeper"],
+                   ["dummy", "dummy", "berserker"])
+    for k, c in (("plague_doctor", (3, 3)), ("cannoneer", (3, 1)), ("gatekeeper", (3, 2))):
+        m.place(LEFT, k, c)
+    for k, c in (("dummy", (7, 2)), ("dummy", (7, 3)), ("berserker", (7, 4))):
+        m.place(RIGHT, k, c)
+    m.lock_force(LEFT); m.lock_force(RIGHT)
+    out["opening_cells"] = view.state_for(m, LEFT)
+
+    # --- 探险家: a build task that wants four squares, then one of those four ---
+    def island_match():
+        m = Match()
+        m.assign_draft(["explorer", "cannoneer", "gatekeeper"],
+                       ["cannoneer", "dummy", "berserker"])
+        return m
+
+    m = island_match()
+    out["island_chart"] = view.state_for(m, LEFT)              # 4 squares, anywhere
+    m.build_choose(LEFT, {"cells": [[4, 1], [4, 2], [4, 3], [5, 2]]})
+    out["island_landfall"] = view.state_for(m, LEFT)           # 1 square, of those 4
+
+    m.build_choose(LEFT, {"cell": [4, 2]})
+    for k, c in (("cannoneer", (3, 3)), ("gatekeeper", (3, 1))):
+        m.place(LEFT, k, c)
+    for k, c in (("cannoneer", (7, 2)), ("dummy", (7, 3)), ("berserker", (7, 4))):
+        m.place(RIGHT, k, c)
+    m.lock_force(LEFT); m.lock_force(RIGHT)
+    ex = next(e for e in m.entities if e.key == "explorer")
+    m.select_hero(LEFT, ex.id)
+    out["island_dig"] = view.state_for(m, LEFT)                # digging, and nothing else
+    out["island_foe"] = view.state_for(m, RIGHT)               # what the other seat sees
+
+    # --- a shot that wants two victims out of three (猎人 once blooded) --------
+    m = arena([("hunter", (2, 3)), ("cannoneer", (1, 1))],
+              [("dummy", (7, 2)), ("dummy", (7, 3)), ("dummy", (7, 4))])
+    hn = unit(m, LEFT, "hunter")
+    hn.vars["first_blood"] = True
+    hn.add_modifier(Modifier("targets", "add", 1))
+    hn.add_modifier(Modifier("rng", "add", 4))
+    foes = m.living(RIGHT)
+    m.select_hero(LEFT, hn.id)
+    m.commit(LEFT, {"destination": None,
+                    "action": {"key": "attack",
+                               "shots": [[list(f.cell) for f in foes]]}})
+    m.select_hero(RIGHT, foes[0].id); m.commit(RIGHT, HOLD)
+    assert m.phase == "victim", m.phase
+    out["victim_two"] = view.state_for(m, LEFT)
+
+    # --- a shot that can be fed AP (军火商人) ---------------------------------
+    m = arena([("arms_dealer", (3, 3))], [("dummy", (7, 3))])
+    ad = unit(m, LEFT, "arms_dealer"); ad.ap = 6
+    snap("fuelled", m, select=ad.id)
+
     # --- a unit attack that names two heroes rather than one ------------------
     m = arena([("four_beasts", (3, 3))], [("dummy", (7, 3)), ("gatekeeper", (7, 1))])
     fb = unit(m, LEFT, "four_beasts")

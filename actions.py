@@ -77,10 +77,20 @@ class CellLockedAttack(ActionInstance):
         return out
 
     def eligible_victims(self, match):
-        return match.enemies_in(self.resolved_cells(match), self.attacker.side)
+        cells = self.resolved_cells(match)
+        return (match.enemies_in(cells, self.attacker.side)
+                + match.strikeable_allies(cells, self.attacker.side))
 
     def build_damage(self, match, victim):
         if victim is None or not victim.alive:
+            return []
+        if victim.side == self.attacker.side:
+            # An ally that offers itself as a target (世界树). No blow lands: what
+            # matters is that it was struck.
+            for p in victim.passives:
+                fn = getattr(p, "on_struck", None)
+                if fn:
+                    fn(match, victim, self.attacker)
             return []
         tags = {"halve"} if self.halve else set()
         return [
@@ -118,6 +128,8 @@ class LineShot(ActionInstance):
         if step is None or not origin:
             return None
         for dist, cell in enumerate(match.topology.ray(origin, step), start=1):
+            if not match.topology.same_region(cell, origin):
+                continue             # the shot passes clean over a sub-map
             occ = match.occupant(cell)
             # Its own body doesn't block it: when the lane is scanned from a square
             # it is moving to, the sniper is still standing in the old one, and that
@@ -242,16 +254,21 @@ class UnitLockedAttack(ActionInstance):
         return None
 
     def build_damage(self, match, victim):
-        return [
-            DMG.DamageEvent(
-                source=self.attacker,
-                target=t,
-                amount=self.attacker.atk,
-                category=DMG.NORMAL_ATTACK,
-            )
-            for t in self.targets
-            if t is not None and t.alive
-        ]
+        out = []
+        for t in self.targets:
+            if t is None or not t.alive:
+                continue
+            if t.side == self.attacker.side:
+                # A friend that offers itself as a target (世界树): no blow lands.
+                for p in t.passives:
+                    fn = getattr(p, "on_struck", None)
+                    if fn:
+                        fn(match, t, self.attacker)
+                continue
+            out.append(DMG.DamageEvent(
+                source=self.attacker, target=t, amount=self.attacker.atk,
+                category=DMG.NORMAL_ATTACK))
+        return out
 
 
 class AbilityAction(ActionInstance):

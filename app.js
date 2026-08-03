@@ -3,7 +3,9 @@
  * see test_client.js. */
 const SIDE = (new URLSearchParams(location.search).get('side') || 'L').toUpperCase().startsWith('R') ? 'R' : 'L';
 const DIRS = {forward:'Forward — into the enemy', backward:'Backward — toward your line',
-              up:'Up — toward row 1', down:'Down — toward row 5'};
+              up:'Up — toward row 1', down:'Down — toward row 5',
+              fwd_up:'Forward and up', fwd_down:'Forward and down',
+              back_up:'Back and up', back_down:'Back and down'};
 let S = null, armed = null, draft = null, err = "", lastVersion = -1, pendingMoves = [];
 // The square aimed at for a square-targeted opening, before Enter confirms it.
 let openingPick = null;
@@ -239,11 +241,24 @@ function nameUnit(id){
 }
 
 function unitAt(cell){ return (S.units||[]).find(u => u.alive && u.cell && eq(u.cell, cell)); }
+
+// Something the other side may not aim at (世界树, a 鬼魂 with no body yet). Older
+// states have no such field, so anything unmarked is fair game.
+function targetable(u){ return !u || u.targetable !== false; }
+
+// May this order name this unit? Normally the living enemy. A friend only when it
+// offers itself on purpose (世界树), which the engine sends as `strikeable`.
+function nameable(act, u){
+  if (!act || !u || !u.alive) return false;
+  if ((act.targeting.strikeable||[]).includes(u.id)) return true;
+  return u.side !== SIDE && targetable(u);
+}
 // Whose turn can actually be taken. The engine already excludes heroes that are
 // frozen (咒毒) from commit.unacted, so trust that list rather than re-deriving
 // it from alive/acted — otherwise we offer picks the server will refuse.
 function canAct(u){
   if (!u || !u.alive || u.acted || u.side !== SIDE) return false;
+  if (u.acts === false) return false;   // scenery, or something not on the board yet
   const un = S.commit && S.commit.unacted;
   return un ? un.includes(u.id) : true;
 }
@@ -319,9 +334,13 @@ function renderBoard(){
     if (su) ghostFor(su.id, draft.destination || draft.tentative);
     // Goblins already ordered keep their ghost while the rest of the gang is aimed.
     for (const o of gangOrders()) ghostFor(o.entity, o.destination);
-    // A picked charge lane shows where the hero will pull up.
+    // A picked lane shows where somebody will end up — the charger for 冲撞, the
+    // catch for 渔夫's hook. The lane says which, so neither is guessed at.
     const lane = chargeLane();
-    if (lane && lane.landing && su) ghostFor(su.id, lane.landing);
+    if (lane && lane.landing){
+      const moverId = lane.mover != null ? lane.mover : (su && su.id);
+      if (moverId != null) ghostFor(moverId, lane.landing);
+    }
   } else if (pendingMoves.length && S.phase==='commit' && S.commit && S.commit.sealed){
     // Only during the exact sealed-and-waiting window of the order that set them —
     // once the exchange resolves the seal clears, so ghosts never linger.
@@ -341,6 +360,10 @@ function renderBoard(){
       const effs = (S.tiles||[]).filter(t=>eq(t.cell,cell));
       const tile = effs.find(t => t.kind==='burning');
       const plague = effs.find(t => t.kind==='infection');
+      // 探险家's vines. A vine that still has its fruit is worth walking onto; one
+      // that is spent only matters if it has been raised to a 大葡萄园, so the two
+      // read differently rather than both being a green square.
+      const vine = effs.find(t => t.kind==='vineyard');
       const door = (S.doors||[]).find(dr => dr.cells.some(x => eq(x, cell)));
       // Charges pile up without limit, so a marker has to say how many as well as
       // what. A bare count would be ambiguous against a big bomb's countdown, so
@@ -357,12 +380,15 @@ function renderBoard(){
       }
       if (tile) cls.push('burn');
       if (plague) cls.push('infected');
+      if (vine) cls.push(vine.great ? 'vineyard' : vine.spent ? 'vinespent' : 'vine');
       if (door) cls.push(door.owner==='L' ? 'doorL' : 'doorR');
       if (mineTxt) cls.push('mined');
       if (origin && cspec &&
           Math.abs(origin[0]-c)+Math.abs(origin[1]-r) <= cspec.range) cls.push('inrange');
       const step = stepTask();
       if (step && has(step.options, cell)) cls.push('legal');
+      // Cut out of the board entirely until it is joined back on.
+      if (has(S.offboard||[], cell)) cls.push('offboard');
       const aimed = S.phase==='build' ? buildPick
         : stepTask() ? [aimedStep()].filter(Boolean)
         : S.phase==='opening' ? [openingPick].filter(Boolean)
@@ -405,6 +431,7 @@ function renderBoard(){
             + (tile?`<span class="flame">▲${tile.stacks}</span>`:'')
             + (door?`<span class="door ${door.owner}">门</span>`:'')
             + (plague?`<span class="plague">疫</span>`:'')
+            + (vine?`<span class="vine ${vine.owner}">${vine.great?'葡':vine.spent?'枝':'萄'}</span>`:'')
             + (mineTxt?`<span class="bomb">${mineTxt}</span>`:'')
             + `</button>`;
     }
@@ -451,12 +478,17 @@ function unitHTML(u, pending){
     cls.push('clickable');
     if ((draft.pair||[]).includes(u.id)) cls.push('tgt');
   }
-  if (act && act.targeting.kind==='unit' && u.side!==SIDE) cls.push('clickable');
+  if (act && act.targeting.kind==='unit' && nameable(act, u)) cls.push('clickable');
   if (act && act.targeting.kind==='ally' && u.side===SIDE) cls.push('clickable');
   if (draft && namedUnits().includes(u.id)) cls.push('tgt');
   if (S.phase==='commit' && !S.commit.sealed && !S.commit.selected && canAct(u)) cls.push('clickable');
   const pct = Math.max(0,Math.round(100*u.hp/u.max_hp));
-  const pips = u.max_ap>0 ? `<span class="pips">${Array.from({length:u.max_ap},(_,i)=>`<i class="${i<u.ap?'on':''}"></i>`).join('')}</span>` : '';
+  // A short bar reads at a glance; ninety-nine dots do not. Past six, show the
+  // number instead — a hero with a bar that long is banking, not counting to three.
+  const pips = u.max_ap <= 0 ? ''
+    : u.max_ap <= 6
+      ? `<span class="pips">${Array.from({length:u.max_ap},(_,i)=>`<i class="${i<u.ap?'on':''}"></i>`).join('')}</span>`
+      : `<span class="apn">${u.ap}<b>AP</b></span>`;
   const st = u.status || [];
   for (const s of st) cls.push('st-'+s.key);
   const badges = st.map(s => `<span class="st" title="${s.label} — ${s.text}">${s.badge}</span>`).join('');
@@ -680,14 +712,16 @@ function sweepPreview(){
 function clickableCell(cell){
   if (S.phase==='setup') return !S.setup.ready && has(S.zone,cell);
   if (S.phase==='build'){
-    return !!(S.build && S.build.task);
+    if (!buildTask()) return false;
+    const only = buildAllowed();
+    return only ? has(only, cell) : true;
   }
   if (S.phase==='opening'){
     const t = S.opening && S.opening.task;
     if (!t) return false;
     if (t.targeting.kind==='unit'){        // name an enemy: click the hero itself
       const u = unitAt(cell);
-      return !!(u && u.alive && u.side!==SIDE);
+      return !!(u && u.alive && u.side!==SIDE && targetable(u));
     }
     if (t.targeting.kind!=='any_cell') return false;
     const only = t.targeting.cells;
@@ -705,6 +739,16 @@ function clickableCell(cell){
   if (S.phase==='move_choice'){
     const t = S.move_choice && S.move_choice.task;
     return !!(t && has(t.options, cell));
+  }
+  if (S.phase==='interrupt'){
+    const t = S.interrupt && S.interrupt.task;
+    if (!t) return false;
+    if (t.option_kind === 'cell') return has(t.options, cell);
+    if (t.option_kind === 'unit'){
+      const u = unitAt(cell);
+      return !!(u && t.options.includes(u.id));
+    }
+    return false;
   }
   if (S.phase!=='commit' || !draft || S.commit.sealed) return false;
   if (isLinked() && draft.stage!=='act'){
@@ -747,6 +791,17 @@ function onCell(c,r){
     if (!armed) { err="Pick a hero from the roster first."; return render(); }
     return cmd({cmd:'place', hero:armed, cell}).then(()=>{ armed=null; });
   }
+  if (S.phase==='interrupt'){
+    const t = S.interrupt && S.interrupt.task;
+    if (!t) return;
+    if (t.option_kind === 'cell' && has(t.options, cell))
+      return cmd({cmd:'interrupt', answer:cell});
+    if (t.option_kind === 'unit'){
+      const u = unitAt(cell);
+      if (u && t.options.includes(u.id)) return cmd({cmd:'interrupt', answer:u.id});
+    }
+    return;
+  }
   if (S.phase==='resolved' || S.phase==='move_choice'){
     const t = stepTask();
     if (t && t.kind==='confirm') return;
@@ -767,10 +822,10 @@ function onCell(c,r){
     return;
   }
   if (S.phase==='build'){
-    if (!(S.build && S.build.task)) return;
+    if (!buildTask()) return;
     const at = buildPick.findIndex(x => eq(x, cell));
     if (at >= 0) buildPick.splice(at, 1);
-    else if (buildPick.length < 2) buildPick.push(cell);
+    else if (buildPick.length < buildWants()) buildPick.push(cell);
     err=""; return render();
   }
   if (S.phase==='opening'){
@@ -888,21 +943,35 @@ function onCell(c,r){
     if (only && !has(only, cell)){ err="Not a square this can be used on."; return render(); }
     draft.cell=cell; err=""; return render();
   }
+  if (nameForAction(act, unitAt(cell))) return render();
+}
+
+/* Naming a hero for the order in hand. There are two ways to do it — click the
+ * hero on the board, or click it in the roster panel — and both come through
+ * here, so an ability can never be aimable one way and not the other. Returns
+ * true if the click was taken (including a refusal that set `err`). */
+function nameForAction(act, tu){
+  if (!nameableFor(act, tu)) return false;
   if (act.targeting.kind==='two_units'){
-    const tu = unitAt(cell);
-    if (!tu || !(act.targeting.options||[]).includes(tu.id)) return;
     const at = (draft.pair||[]).indexOf(tu.id);
     if (at >= 0) draft.pair.splice(at, 1);
     else if (draft.pair.length < 2) draft.pair.push(tu.id);
-    else { err = "Two is all it can move."; return render(); }
-    err=""; return render();
+    else { err = "Two is all it can move."; return true; }
+    err=""; return true;
   }
-  if (act.targeting.kind==='unit' || act.targeting.kind==='ally'
-      || act.targeting.kind==='any_unit'){
-    const tu = unitAt(cell); if (!tu || !tu.alive) return;
-    const k = act.targeting.kind;
-    const okSide = k==='any_unit' ? true : (k==='ally' ? tu.side===SIDE : tu.side!==SIDE);
-    if (okSide){ nameUnit(tu.id); err=""; return render(); }
+  nameUnit(tu.id); err=""; return true;
+}
+
+/* May this hero be named for this order? Pure — it is asked during rendering to
+ * decide whether an action is usable at all, so it must not touch the draft. */
+function nameableFor(act, tu){
+  if (!act || !act.targeting || !tu || !tu.alive) return false;
+  switch (act.targeting.kind){
+    case 'two_units': return (act.targeting.options||[]).includes(tu.id);
+    case 'unit':      return nameable(act, tu);
+    case 'ally':      return tu.side === SIDE;
+    case 'any_unit':  return tu.targetable !== false;
+    default:          return false;
   }
 }
 
@@ -912,7 +981,7 @@ function onUnitPick(id){
     return canAct(u) ? cmd({cmd:'select', entity:id}) : null;
   }
   const act = currentAction();
-  if (act && act.targeting.kind==='unit'){ nameUnit(id); err=""; render(); }
+  if (nameForAction(act, (S.units||[]).find(x=>x.id===id))) render();
 }
 
 /* ---- keyboard: arrows move the piece, Enter confirms move then registers attack ---- */
@@ -1062,7 +1131,7 @@ function onKey(e){
 
 function chooseAction(key){
   const act = curActions().find(a=>a.key===key);
-  draft.actionKey=key; draft.shots=[]; draft.shotIndex=0; draft.target=null; draft.direction=null; draft.cell=null; draft.amount=null; draft.weapon=null; draft.pair=[]; draft.named=[];
+  draft.actionKey=key; draft.shots=[]; draft.shotIndex=0; draft.target=null; draft.direction=null; draft.cell=null; draft.amount=null; draft.weapon=null; draft.pair=[]; draft.named=[]; draft.spend=0;
   if (act.targeting.kind==='cells') draft.shots = Array.from({length:act.targeting.shots},()=>[]);
   if (act.targeting.kind==='magnitude') draft.amount = 1;
   if (act.targeting.kind==='lane'){
@@ -1096,6 +1165,24 @@ function chooseWeapon(key){
   draft.shotIndex = 0; err=""; render();
 }
 
+/* Why this action cannot be used at all right now, or "" if it can. An ability
+ * that asks for a hero when there is no hero left it may name (every enemy is a
+ * 世界树 or still out on an island) would otherwise sit on the menu asking for
+ * something that does not exist — pickable, never sealable. The normal attack
+ * has always degraded to a hold in that case; an ability has nothing to degrade
+ * to, so it is shown as unusable instead. */
+function unaimable(a){
+  if (!a || !a.targeting) return "";
+  const k = a.targeting.kind;
+  if (k==='unit' || k==='any_unit'){
+    if (!(S.units||[]).some(u => nameableFor(a, u))) return "nothing it can name";
+  }
+  if (k==='two_units' && (a.targeting.options||[]).length < 2) return "nothing it can move";
+  if (a.targeting.cells && !a.targeting.cells.length) return "no square it can use";
+  if (a.targeting.choices && !a.targeting.choices.length) return "nowhere to aim it";
+  return "";
+}
+
 function orderReady(){
   if (!draft || (!draft.destination && !draft.held)) return false;
   if (!choicesReady()) return false;
@@ -1120,7 +1207,11 @@ function orderReady(){
 
 function sealOrder(){
   const act=currentAction(), t=act.targeting, action={key:draft.actionKey};
-  if (t.kind==='cells') action.shots = draft.shots;
+  if (t.kind==='cells'){
+    action.shots = draft.shots;
+    // Points fed into the shot, each one a point of damage (军火商人).
+    if (t.fuel) action.spend = Math.max(0, Math.min(draft.spend||0, t.fuel));
+  }
   if (t.kind==='unit'){
     const ids = namedUnits();
     if (unitCount() > 1) action.targets = ids; else action.target = ids[0];
@@ -1281,14 +1372,28 @@ function renderDraft(){
 }
 function draftPick(k){ cmd({cmd:'draft', hero:k}); }
 
-// Before anybody is placed: 工匠 marks two squares that become one step apart for
-// its own side. Aim both, then Enter.
+// Before anybody is placed: 工匠 marks two squares that become one step apart, 探险家
+// marks the four its island is cut from and then which of them it stands on. All of
+// them are the same gesture — aim N squares, then Enter — so the panel is driven by
+// how many the task wants rather than by which hero asked.
 let buildPick = [];
-function buildReady(){ return buildPick.length === 2; }
+function buildTask(){ return (S.build && S.build.task) || null; }
+function buildWants(){
+  const t = buildTask();
+  if (!t) return 0;
+  if (t.targeting.kind === 'two_cells') return 2;
+  return t.targeting.count || 1;
+}
+function buildAllowed(){
+  const t = buildTask();
+  return (t && t.targeting.cells) || null;   // null = anywhere on the board
+}
+function buildReady(){ return buildPick.length === buildWants(); }
 function confirmBuild(){
   if (!buildReady()) return;
   const cells = buildPick; buildPick = [];
-  cmd({cmd:'build', cells});
+  // A one-square task is sent as a cell, the way every other single-square pick is.
+  cmd(cells.length === 1 ? {cmd:'build', cell: cells[0]} : {cmd:'build', cells});
 }
 function renderBuild(){
   document.getElementById('leftheading').textContent = 'Building';
@@ -1297,11 +1402,17 @@ function renderBuild(){
   if (t){
     h += `<p class="note"><b>${t.hero}</b> · ${t.ability}</p>`;
     if (t.text) h += `<p class="note">${t.text}</p>`;
-    h += `<div class="step">Two squares</div>`;
-    h += `<p class="note">Click two squares anywhere on the board, then <b>Enter</b>.
-          Click one again to take it back. ${buildPick.length}/2 chosen.</p>`;
+    if (!['two_cells','cells','any_cell'].includes(t.targeting.kind)){
+      h += `<p class="err">This one asks for something the board cannot collect yet.</p>`;
+      document.getElementById('leftbody').innerHTML = h; return;
+    }
+    const want = buildWants(), only = buildAllowed();
+    h += `<div class="step">${want === 1 ? 'One square' : want + ' squares'}</div>`;
+    h += `<p class="note">Click ${want === 1 ? 'a square' : want + ' squares'}
+          ${only ? 'from the ones marked' : 'anywhere on the board'}, then <b>Enter</b>.
+          Click one again to take it back. ${buildPick.length}/${want} chosen.</p>`;
     h += buildReady()
-      ? `<button class="btn primary" onclick="confirmBuild()">Raise them — <b>Enter</b></button>`
+      ? `<button class="btn primary" onclick="confirmBuild()">Confirm — <b>Enter</b></button>`
       : '';
   } else {
     h += `<div class="waiting">Waiting for the other seat</div>`;
@@ -1484,10 +1595,11 @@ function renderCommit(){
     }
     h += `<div class="step">2 · Action</div>`;
     for (const a of curActions()){
-      const dis = a.affordable===false ? 'disabled' : '';
+      const why = a.blocked || unaimable(a);
+      const dis = (a.affordable===false || why) ? 'disabled' : '';
       h += `<button class="btn ${draft.actionKey===a.key?'on':''}" ${dis} onclick="chooseAction('${a.key}')">
              ${a.name}${a.ap_cost?`<span class="cost">${a.ap_cost} AP</span>`:''}
-             ${a.blocked?`<small class="blocked">${a.blocked}</small>`:(a.text?`<small>${a.text}</small>`:'')}</button>`;
+             ${why?`<small class="blocked">${why}</small>`:(a.text?`<small>${a.text}</small>`:'')}</button>`;
     }
     if (act) h += targetingHTML(act);
     const last = isGang() && gangPending().length===1;
@@ -1590,6 +1702,17 @@ function targetingHTML(act){
               ${t.shots>1?`Shot ${i+1}`:'Cells'} <span class="cost">${n}/${t.count}</span>
               ${t.shots>1&&i===1?'<small>Half damage</small>':''}</button>`;
     }
+    if (t.fuel){
+      // 军火商人 feeds its own shot: every point spent is a point of damage.
+      const su = selectedUnit() || {};
+      const x = Math.max(0, Math.min(draft.spend||0, t.fuel));
+      h += `<div class="step">Fuel</div>
+        <p class="note">Feed the shot. Every point spent is a point of damage.</p>
+        <input type="range" min="0" max="${t.fuel}" value="${x}" style="width:100%"
+               oninput="setSpend(this.value)">
+        <p class="note">Spending <b>${x}</b> of ${t.fuel} · this shot hits for
+           <b>${(su.atk||0) + x}</b></p>`;
+    }
   } else if (t.kind==='cone'){
     const arcs = coneArcs();
     let h = `<div class="step">3 · Spread</div>
@@ -1650,15 +1773,14 @@ function targetingHTML(act){
     }
   } else if (t.kind==='direction' && t.choices){
     h += `<div class="step">3 · Lane</div>`;
+    // Each lane describes itself, so this panel serves any ability thrown down one.
     h += t.choices.length
-      ? `<p class="note">Three squares down the lane, trampling whatever is in the two you cross.</p>`
-      : `<p class="note">No lane worth charging from here — nothing to trample and nowhere to land.</p>`;
+      ? `<p class="note">${act.text || 'Choose a lane.'}</p>`
+      : `<p class="note">No lane worth using from here.</p>`;
     for (const ch of t.choices){
-      const n = ch.victims.length;
-      const where = ch.landing ? 'charges through' : 'holds ground';
       h += `<button class="btn ${draft.direction===ch.dir?'on':''}" onclick="draft.direction='${ch.dir}';err='';render()">
-              ${DIRS[ch.dir]||ch.dir}<span class="cost">${where}</span>
-              <small>${n?`tramples ${n} ${n===1?'enemy':'enemies'} for ${ch.damage} each`:'nobody in the way'}${ch.landing?'':' · third square is taken'}</small></button>`;
+              ${DIRS[ch.dir]||ch.dir}<span class="cost">${ch.where||''}</span>
+              <small>${ch.label||''}</small></button>`;
     }
   } else if (t.kind==='direction'){
     h += `<p class="note">Choose which neighbouring column joins your own.</p>`;
@@ -1699,6 +1821,11 @@ function magUpdate(v){
   document.getElementById('magres').textContent = `+${v} atk, ${su.hp - (+v)}/${su.max_hp - (+v)} HP`;
 }
 
+function setSpend(v){
+  draft.spend = Math.max(0, +v || 0);
+  err=""; render();
+}
+
 function renderInterrupt(){
   // A killing blow has landed and nobody has been swept off the board yet: 教皇 may
   // step in front of it, and whoever swung then picks what it gains instead.
@@ -1710,6 +1837,15 @@ function renderInterrupt(){
     if (t.kind==='confirm'){
       h += `<button class="btn primary" onclick="cmd({cmd:'interrupt', answer:true})">Step in front of it — <b>Enter</b></button>`;
       h += `<button class="btn" onclick="cmd({cmd:'interrupt', answer:null})">Let it fall</button>`;
+    } else if (t.option_kind === 'unit'){
+      h += `<p class="note">Name a hero — click one on the board or below.</p>`;
+      for (const id of t.options){
+        const u = (S.units||[]).find(x=>x.id===id) || {};
+        h += `<button class="btn" onclick="cmd({cmd:'interrupt', answer:${id}})">
+                ${u.name||('#'+id)} <span class="cost">${u.hp||''}${u.hp?' HP':''}</span></button>`;
+      }
+    } else if (t.option_kind === 'cell'){
+      h += `<p class="note">Click any empty square on the board.</p>`;
     } else {
       for (const o of t.options){
         h += `<button class="btn" onclick="cmd({cmd:'interrupt', answer:'${o}'})">+1 ${o}</button>`;
@@ -1783,7 +1919,17 @@ function renderVictim(){
   document.getElementById('leftheading').textContent = 'Target choice';
   let h='';
   if (S.victim.needed){
-    h += `<p class="note">More than one enemy is standing in your marked cells. Choose which one takes the hit.</p>`;
+    // A shot may want more than one (猎人 once blooded), so say how many and show
+    // what has already been named rather than re-offering the same list in silence.
+    const want = S.victim.wanted || 1, got = (S.victim.picked || []).length;
+    h += want > 1
+      ? `<p class="note">Your shot catches ${want} of them. Name them one at a time —
+         <b>${got}/${want}</b> so far.</p>`
+      : `<p class="note">More than one enemy is standing in your marked cells. Choose which one takes the hit.</p>`;
+    for (const id of (S.victim.picked || [])){
+      const u=(S.units||[]).find(x=>x.id===id) || {};
+      h += `<button class="btn on" disabled>${u.name||''} <small>already named</small></button>`;
+    }
     for (const id of S.victim.options){
       const u=(S.units||[]).find(x=>x.id===id);
       h += `<button class="btn" onclick="cmd({cmd:'victim', entity:${id}})">

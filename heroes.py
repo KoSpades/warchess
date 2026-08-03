@@ -9,7 +9,8 @@ from dataclasses import dataclass, field
 import board as BOARD
 import damage as DMG
 import events as EV
-from entities import Modifier, UNTIL_OWNER_NEXT_TURN, UNTIL_TURN_END
+from entities import (Modifier, UNTIL_OWNER_NEXT_TURN, UNTIL_ROUND_END,
+                      UNTIL_TURN_END)
 from topology import LEFT, other_side
 
 
@@ -103,11 +104,16 @@ class Charge(Ability):
         for cell in lane[:-1]:
             if not match.topology.in_bounds(cell):
                 continue
+            if not match.topology.same_region(cell, actor.cell):
+                continue          # a sub-map in the lane is simply run over
             occ = match.occupant(cell)
-            if occ is not None and occ.side != actor.side:
-                victims.append(occ)   # allies in the way are simply ridden past
+            if occ is not None and occ.side != actor.side and occ.flags["targetable"]:
+                victims.append(occ)   # allies, and things that cannot be touched,
+                                      # are simply ridden past
         end = lane[-1]
-        blocked = not match.topology.in_bounds(end) or match.occupant(end) is not None
+        blocked = (not match.topology.in_bounds(end)
+                   or not match.topology.same_region(end, actor.cell)
+                   or match.occupant(end) is not None)
         return (None if blocked else end), victims
 
     def lanes(self, match, actor):
@@ -121,10 +127,18 @@ class Charge(Ability):
             landing, victims = p
             if landing is None and not victims:
                 continue   # nowhere to go and nobody to hit
+            n = len(victims)
             out.append({"dir": d,
                         "landing": list(landing) if landing else None,
+                        # The charge carries the charger, so it is the one that
+                        # ends up on the landing square.
+                        "mover": actor.id,
                         "victims": [v.id for v in victims],
-                        "damage": self.DAMAGE})
+                        "damage": self.DAMAGE,
+                        "where": "charges through" if landing else "holds ground",
+                        "label": (f"tramples {n} {'enemy' if n == 1 else 'enemies'} "
+                                  f"for {self.DAMAGE} each" if n else "nobody in the way")
+                        + ("" if landing else " · the third square is taken")})
         return out
 
     def validate(self, match, actor, params):
@@ -446,7 +460,7 @@ class Bless(Ability):
              "blessing to a hero.")
 
     def blessable(self, match, actor):
-        return [e.id for e in match.living(actor.side) if not e.vars.get("blessed")]
+        return [e.id for e in match.on_map(actor.side) if not e.vars.get("blessed")]
 
     def validate(self, match, actor, params):
         tgt = match.entity(params.get("target"))
@@ -949,6 +963,11 @@ class RaiseDoors(Ability):
     blurb = ("Before anyone deploys, pick two squares anywhere on the board. Your side "
              "may step between them as though they touched. Both sides can see them.")
 
+    def build_cells(self, match, side):
+        """Only the board proper. An island is not somewhere a door can open onto,
+        and `all_cells` already leaves one out, so this needs no rule of its own."""
+        return match.topology.all_cells()
+
     def validate_build(self, match, side, params):
         cells = [tuple(c) for c in (params.get("cells") or [])]
         if len(cells) != 2:
@@ -958,12 +977,127 @@ class RaiseDoors(Ability):
         for c in cells:
             if not match.topology.in_bounds(c):
                 return "That square is not on the board."
+            if match.topology.region(c) is not None:
+                return "A door cannot open onto an island."
         return None
 
     def build_effects(self, match, side, params):
         a, b = (tuple(c) for c in params["cells"])
         match.topology.link(a, b, side)
         match.log_line(f"{'Left' if side == LEFT else 'Right'} 工匠 raises a pair of doors.")
+
+
+class Avalanche(Ability):
+    """雪女's 大雪崩. Everything of theirs, wherever it stands, and the cold takes a
+    point of their strength with it."""
+
+    key = "avalanche"
+    name = "大雪崩 Great Avalanche"
+    ap_cost = 4
+    targeting = {"kind": "none"}
+    blurb = ("6 water damage to every enemy on the board, and every one of them loses "
+             "a point of AP.")
+    DAMAGE = 6
+
+    def build_damage(self, match, actor, params):
+        return [
+            DMG.DamageEvent(source=actor, target=e, amount=self.DAMAGE,
+                            category=DMG.ABILITY, element=DMG.WATER)
+            for e in match.enemies_in(None, actor.side)
+        ]
+
+    def side_effects(self, match, actor, params):
+        chilled = [e for e in match.enemies_in(None, actor.side) if e.ap > 0]
+        for e in chilled:
+            e.ap = max(0, e.ap - 1)
+        if chilled:
+            match.log_line(
+                f"{match.label(actor)}'s cold settles — "
+                + ", ".join(f"{match.label(e)} to {e.ap}" for e in chilled) + " AP."
+            )
+
+
+class Hook(Ability):
+    """渔夫's hook. Thrown down one of the eight lanes, it catches the first thing it
+    reaches and hauls it in to the square beside you. It is a haul, not a blow: the
+    catch takes no damage, it simply ends up somewhere it did not choose.
+
+    Three ways to waste it, all of them the thrower's misjudgement: the lane is
+    empty, the first thing down it is one of your own, or the square you would haul
+    it into is already taken."""
+
+    key = "hook"
+    name = "钩爪 Hook"
+    ap_cost = 2
+    targeting = {"kind": "direction",
+                 "options": ["forward", "backward", "up", "down",
+                             "fwd_up", "fwd_down", "back_up", "back_down"]}
+    blurb = ("Throw down any of the eight lanes. The first enemy it reaches is hauled "
+             "in to the square beside you. It fails if the lane is empty, if one of "
+             "your own is first, or if that square is taken.")
+
+    @staticmethod
+    def cast(match, actor, name):
+        """(catch, landing) for this lane, or None if the throw would come to
+        nothing. The landing square is the one beside the thrower down that lane."""
+        step = match.topology.direction_step(actor.side, name)
+        if step is None or not actor.cells:
+            return None
+        landing = (actor.cell[0] + step[0], actor.cell[1] + step[1])
+        if not match.topology.same_region(landing, actor.cell):
+            return None              # the square beside you is not on your map
+        for cell in match.topology.ray(actor.cell, step):
+            if not match.topology.same_region(cell, actor.cell):
+                continue             # the line passes clean over a sub-map
+            occ = match.occupant(cell)
+            if occ is None:
+                continue
+            if occ.side == actor.side or not occ.flags["targetable"]:
+                return None          # one of your own is in the way
+            if match.occupant(landing) is not None and landing != occ.cell:
+                return None          # nowhere to haul it to
+            return occ, landing
+        return None
+
+    def lanes(self, match, actor):
+        """Every throw worth making, for the client to offer and preview."""
+        out = []
+        for name in match.topology.DIRECTIONS8:
+            got = self.cast(match, actor, name)
+            if got is None:
+                continue
+            catch, landing = got
+            out.append({"dir": name, "landing": list(landing),
+                        # The hook moves the catch, never the thrower.
+                        "mover": catch.id,
+                        "victims": [catch.id], "damage": 0,
+                        "where": "hauls it in",
+                        "label": f"catches {catch.name} and drags it beside you"})
+        return out
+
+    def validate(self, match, actor, params):
+        if params.get("direction") not in match.topology.DIRECTIONS8:
+            return "Choose a lane to throw down."
+        if self.cast(match, actor, params["direction"]) is None:
+            return "Nothing to catch that way — an empty lane, one of your own, or no room to haul it in."
+        return None
+
+    def move_effects(self, match, actor, params):
+        """Hauled in with the movement, so whoever is dragged into a marked square
+        is the one that takes what was aimed at it — the same rule 魔术师's swap
+        plays by."""
+        got = self.cast(match, actor, params.get("direction"))
+        if got is None:
+            match.log_line(f"{match.label(actor)} throws and comes up empty.")
+            return
+        catch, landing = got
+        if match.occupant(landing) is not None and landing != catch.cell:
+            match.log_line(f"{match.label(actor)} has nowhere to haul it in to.")
+            return
+        frm = catch.cell
+        catch.set_cell(landing)
+        match.bus.emit(EV.AFTER_MOVE, {"entity": catch, "from": frm, "to": landing})
+        match.log_line(f"{match.label(actor)} hauls {match.label(catch)} in.")
 
 
 class Recurse(Ability):
@@ -1040,7 +1174,7 @@ class GreatFog(Ability):
 
     def side_effects(self, match, actor, params):
         fogged = []
-        for e in match.living():
+        for e in match.on_map():
             if e.side == actor.side:
                 continue
             # No finite range to shorten (雷霆龙 reaches the whole board), and never
@@ -1081,7 +1215,7 @@ class Inspire(Ability):
     blurb = "Every ally gains +1 attack, permanently. Casts stack."
 
     def side_effects(self, match, actor, params):
-        for e in match.living():
+        for e in match.on_map():
             if e.side == actor.side:
                 e.add_modifier(Modifier("atk", "add", 1))
         match.log_line(f"{match.label(actor)} inspires the line — +1 attack to all allies.")
@@ -1096,7 +1230,7 @@ class Incite(Ability):
     blurb = "Once per match: every ally gains +1 movement, permanently."
 
     def side_effects(self, match, actor, params):
-        for e in match.living():
+        for e in match.on_map():
             if e.side == actor.side:
                 e.add_modifier(Modifier("move", "add", 1))
         match.log_line(f"{match.label(actor)} rallies the line — +1 movement to all allies.")
@@ -1965,11 +2099,19 @@ class ArmsDealer:
     CHOICE = "armory"
 
     def _open_the_bar(self, match, owner):
+        """Who has a bar and who does not, settled fresh each round rather than only
+        added to. Scenery never gets one (世界树), nor does anything off the board
+        (探险家 before its island lands) — and both of those can change under us."""
         if not owner.alive:
             return
+        welcome = {e.id for e in match.on_map(owner.side) if e.flags["takes_turns"]}
         for e in match.living(owner.side):
-            if not any(m.source is owner and m.stat == "max_ap" for m in e.modifiers):
+            mine = [m for m in e.modifiers if m.source is owner and m.stat == "max_ap"]
+            if e.id in welcome and not mine:
                 e.add_modifier(Modifier("max_ap", "set", self.OPEN_BAR, source=owner))
+            elif e.id not in welcome and mine:
+                e.modifiers = [m for m in e.modifiers if m not in mine]
+                e.ap = min(e.ap, e.max_ap)
 
     def on_match_start(self, match, owner, ctx):
         self._open_the_bar(match, owner)
@@ -1981,7 +2123,7 @@ class ArmsDealer:
         """One sale a round, riding along with its own turn — it still moves and
         shoots. Every affordable pairing of hero and weapon is offered."""
         opts = []
-        for e in match.living(owner.side):
+        for e in match.on_map(owner.side):
             if e is owner or not e.flags["counts_for_defeat"]:
                 continue      # it does not sell to itself
             for w in ARMS:
@@ -2029,6 +2171,105 @@ class ArmedWith:
     is holding now rather than what it was built with."""
 
     describe = "Carrying a weapon bought from 军火商人."
+
+
+class WorldTree:
+    """世界树. It stands in the middle of the board and never acts. Its own side may
+    strike it with an ordinary attack — no blow lands, because the tree has nothing
+    to wound; what counts is how many times it has been struck.
+
+    Nothing here is friendly fire. The tree simply offers itself as a target to its
+    own side, and the attack resolves into a tally instead of damage."""
+
+    describe = ("Stands in the middle of the board and never takes a turn. Your own "
+                "heroes may attack it. First strike: 长冬 — every enemy is a square "
+                "slower for the rest of the round. Third: 魔狼, 巨蟒 and 邪龙 take "
+                "three enemies for 1, 2 and 3, the same hero allowed more than once. "
+                "Fifth: it falls, 洛基 rises on a square of your choosing, and the "
+                "ground under everything the beasts bit catches fire.")
+    struck_by_allies = True
+    BEASTS = [("魔狼 Fenrir", 1), ("巨蟒 Jörmungandr", 2), ("邪龙 Níðhöggr", 3)]
+
+    @EV.hook(priority=10)
+    def on_match_start(self, match, owner, ctx):
+        if ctx.get("entity") not in (None, owner):
+            return
+        # Scenery, not a life: it blocks the middle, the enemy cannot touch it, and
+        # losing it never loses the game. Settled early, because these say what the
+        # hero *is* — anything that reads them must not race the answer.
+        owner.flags.update(takes_turns=False, counts_for_defeat=False,
+                           blocks_movement=True, targetable=False)
+
+    def on_struck(self, match, owner, attacker):
+        n = owner.vars.get("struck", 0) + 1
+        owner.vars["struck"] = n
+        match.log_line(f"{match.label(attacker)} strikes 世界树 — {n} now.")
+        if n == 1:
+            self._long_winter(match, owner)
+        elif n == 3:
+            self._loose_the_beasts(match, owner)
+        elif n == 5:
+            self._fell(match, owner)
+
+    def _long_winter(self, match, owner):
+        foes = [e for e in match.on_map(other_side(owner.side)) if e.move_allowance > 0]
+        for e in foes:
+            e.add_modifier(Modifier("move", "add", -1, source=self,
+                                    duration=UNTIL_ROUND_END))
+        match.log_line(
+            f"长冬 settles — every enemy is a square slower for the rest of round "
+            f"{match.round}."
+        )
+
+    def _loose_the_beasts(self, match, owner):
+        foes = [e.id for e in match.living(other_side(owner.side))
+                if e.flags["targetable"]]
+        if not foes:
+            return
+        for name, amount in self.BEASTS:
+            match.interrupts.append({
+                "kind": "pick", "key": "beast", "side": owner.side,
+                "tree": owner.id, "beast": name, "amount": amount,
+                "options": list(foes),
+                "option_kind": "unit",
+                "name": name,
+                "text": f"{name} is loose. Name the hero it takes for {amount}. "
+                        f"The same one may be named more than once.",
+            })
+
+    def _fell(self, match, owner):
+        match.log_line("世界树 comes down.")
+        # The ground under everything the beasts bit catches, once per square.
+        lit = set()
+        for eid in owner.vars.get("bitten", []):
+            e = match.entity(eid)
+            if e is None or not e.alive or not e.cells or e.cell in lit:
+                continue
+            lit.add(e.cell)
+            match.board.add_burning(e.cell, owner.side)
+        if lit:
+            match.log_line(f"The wreck takes light — {len(lit)} square(s) burning.")
+        owner.alive = False
+        owner.cells = set()
+        free = [list(c) for c in match.topology.all_cells() if match.occupant(c) is None]
+        match.interrupts.append({
+            "kind": "pick", "key": "loki", "side": owner.side, "hero": "loki",
+            "options": free,
+            "option_kind": "cell",
+            "name": "洛基降临 Loki Arrives",
+            "text": "The tree is down. Choose any empty square for 洛基 to step into.",
+        })
+
+    def status(self, match, owner):
+        n = owner.vars.get("struck", 0)
+        nxt = {0: "长冬 at the first strike", 1: "the beasts at the third",
+               2: "the beasts at the third", 3: "it falls at the fifth",
+               4: "it falls at the fifth"}.get(n, "")
+        return {
+            "key": "world_tree", "badge": f"树{n}", "label": "世界树 STRUCK",
+            "text": f"Struck {n} time{'' if n == 1 else 's'}."
+                    + (f" Next: {nxt}." if nxt else ""),
+        }
 
 
 class FourBeasts:
@@ -2255,6 +2496,9 @@ class HeroDef:
     # picks the order (哥布林团伙); ranked members must act in ascending order
     # (蛇帝's head leads, the tail follows).
     gang_rank: int = None
+    # A hero that is not deployed by its owner but stands somewhere the board
+    # decides (世界树 at the middle). It takes a draft slot and no zone square.
+    deploys: str = None
     blurb: str = ""
 
 
@@ -2309,6 +2553,341 @@ class WeaponMaster:
         if ctx.get("entity") is owner:
             owner.vars["stance_dr"] = 0
             owner.vars["ability_immune"] = False
+
+# --------------------------------------------------------- 探险家's 岛屿
+#
+# The island is not a hero rule: it is a piece of board. `Topology.regions` cuts
+# four squares out of the map into a sub-map of their own — nothing there is a
+# neighbour of anything here, no distance reaches it, and `all_cells` does not
+# list it, so no ability can name a square on it without asking for it by name.
+# Joining it back on at round four is one call and the board is whole again.
+
+
+def t_tetromino(cells):
+    """True if these four squares form a T: a straight bar of three with the
+    fourth attached to the middle of the bar. All four rotations count."""
+    pool = {tuple(c) for c in cells}
+    if len(pool) != 4:
+        return False
+    for stem in pool:
+        bar = sorted(pool - {stem})
+        cols = [c for c, _ in bar]
+        rows = [r for _, r in bar]
+        if len(set(rows)) == 1 and cols == list(range(cols[0], cols[0] + 3)):
+            middle = (cols[1], rows[0])
+        elif len(set(cols)) == 1 and rows == list(range(rows[0], rows[0] + 3)):
+            middle = (cols[0], rows[1])
+        else:
+            continue
+        if abs(stem[0] - middle[0]) + abs(stem[1] - middle[1]) == 1:
+            return True
+    return False
+
+
+def island_region(side):
+    return f"island:{side}"
+
+
+class ChooseIsland(Ability):
+    """Chosen before anybody deploys, like 工匠's doors, so both sides lay their
+    forces out already knowing which four squares are gone."""
+
+    key = "choose_island"
+    name = "勘定岛屿 Chart the Island"
+    ap_cost = 0
+    prebuild = True
+    targeting = {"kind": "cells", "count": 4}
+    blurb = ("Before anyone deploys, mark four squares in a T. They leave the board "
+             "entirely until round four — nothing can enter them, and nothing on "
+             "them can be touched. Both sides see it.")
+
+    def validate_build(self, match, side, params):
+        cells = [tuple(c) for c in (params.get("cells") or [])]
+        if len(cells) != 4:
+            return "Mark four squares."
+        if len(set(cells)) != 4:
+            return "Mark four different squares."
+        for c in cells:
+            if not match.topology.in_bounds(c):
+                return "That square is not on the board."
+            if match.topology.region(c) is not None:
+                return "That square is already part of an island."
+            if any(c in (a, b) for a, b, _ in match.topology.links):
+                return "A door already opens onto that square."
+        mid = ((match.topology.cols + 1) // 2, (match.topology.rows + 1) // 2)
+        if mid in cells and match.board_places("centre"):
+            return "世界树 stands in the middle — the island cannot take that square."
+        if not t_tetromino(cells):
+            return "The four squares must form a T."
+        return None
+
+    def build_effects(self, match, side, params):
+        cells = [tuple(c) for c in params["cells"]]
+        match.topology.detach(cells, island_region(side))
+        match.islands[side] = {"cells": cells, "stand": cells[0],
+                               "region": island_region(side)}
+        match.log_line(
+            f"{'Left' if side == LEFT else 'Right'} 探险家 charts an island — four "
+            f"squares leave the board."
+        )
+
+
+class MakeLandfall(Ability):
+    """The second half of the same decision: which of the four the explorer itself
+    starts on. Split into its own build task so each is a plain pick."""
+
+    key = "make_landfall"
+    name = "登岛 Make Landfall"
+    ap_cost = 0
+    prebuild = True
+    targeting = {"kind": "any_cell"}
+    blurb = "Choose which square of your island you start on. The other three are what you dig."
+
+    def build_cells(self, match, side):
+        isl = match.islands.get(side) or {}
+        return list(isl.get("cells") or [])
+
+    def validate_build(self, match, side, params):
+        cell = params.get("cell")
+        if not cell:
+            return "Choose a square."
+        if tuple(cell) not in self.build_cells(match, side):
+            return "Choose one of your island's four squares."
+        return None
+
+    def build_effects(self, match, side, params):
+        match.islands[side]["stand"] = tuple(params["cell"])
+
+
+class Dig(Ability):
+    """One resource, into one empty square of the island. Every round the island is
+    still detached, this is the only thing the explorer may do."""
+
+    ap_cost = 0
+    resource = None
+    targeting = {"kind": "any_cell"}
+
+    def available(self, match, actor):
+        return bool(Explorer.free_cells(match, actor))
+
+    def cells(self, match, actor):
+        return Explorer.free_cells(match, actor)
+
+    def validate(self, match, actor, params):
+        cell = tuple(params.get("cell") or ())
+        if cell not in Explorer.free_cells(match, actor):
+            return "That square is not free island ground."
+        return None
+
+    def side_effects(self, match, actor, params):
+        cell = tuple(params["cell"])
+        actor.vars.setdefault("dug", []).append(self.resource)
+        apply_resource(match, actor, self.resource, cell)
+
+
+class DigGrapes(Dig):
+    key = "dig_grapes"
+    name = "葡萄 Grapes"
+    resource = "grape"
+    blurb = ("Plant a vine. The first friendly hero to step onto it mends 4. The vine "
+             "stays where it is for the rest of the match.")
+
+
+class TrainNatives(Dig):
+    key = "train_natives"
+    name = "奴隶 Slaves"
+    resource = "slave"
+    blurb = ("Train a 土著 on that square: a hero of your own whose blow is worth "
+             "a sixth of whatever it lands on.")
+
+
+class MineOre(Dig):
+    key = "mine_ore"
+    name = "矿物 Ore"
+    resource = "mineral"
+    blurb = ("Dig ore and beat it into armour: +3 max HP (and the health with it), "
+             "+1 attack, +1 range. The square is left as bare as it was found.")
+
+
+def apply_resource(match, owner, resource, cell):
+    """What a dug resource does, wherever it is dug. The island and the three
+    squares 全为不同 grants on the main map go through exactly this."""
+    if resource == "grape":
+        match.board.add_effect(cell, BOARD.GrapeVine(owner.side))
+        match.log_line(f"{match.label(owner)} plants a vine.", side=owner.side)
+    elif resource == "slave":
+        e = match.spawn(BY_KEY["native"], owner.side, cell)
+        if match.topology.region(cell) is not None:
+            # Trained on ground that is not yet part of the board: it can neither
+            # act nor be touched until the island arrives.
+            e.flags.update(takes_turns=False, targetable=False)
+        match.bus.emit(EV.MATCH_START, {"entity": e})
+        match.log_line(f"{match.label(owner)} trains a 土著.", side=owner.side)
+    elif resource == "mineral":
+        owner.max_hp += MineOre.PLATE
+        owner.hp += MineOre.PLATE
+        owner.add_modifier(Modifier("atk", "add", 1))
+        owner.add_modifier(Modifier("rng", "add", 1))
+        match.log_line(f"{match.label(owner)} beats out another plate of armour.",
+                       side=owner.side)
+
+
+MineOre.PLATE = 3
+
+
+class Explorer:
+    """探险家. Spends the first three rounds on four squares that are not part of the
+    board, digging one resource a round, and arrives at the top of round four with
+    whatever it found. Three of a kind, or one of each, is worth more."""
+
+    describe = ("Charts four squares in a T before anyone deploys; they leave the "
+                "board until round four and it stands on them alone, untouchable. "
+                "Each of the first three rounds it digs one resource into an empty "
+                "island square — a vine, a 土著, or a plate of armour — and does "
+                "nothing else. At the top of round four the island is joined back "
+                "on. Three of one resource, or one of each, pays a bonus.")
+
+    JOIN_ROUND = 4
+    GREAT_PLATE = 6      # 完全矿物装甲, on top of the three ordinary plates
+    REVOLT_HP = 2        # 反动, on each 土著 — and the explorer with them
+
+    # --- island bookkeeping, shared with the dig abilities ----------------
+
+    @staticmethod
+    def sealed_cells(match, owner):
+        """The island's squares while it is still off the board, else nothing."""
+        cells = owner.vars.get("island_cells") or []
+        return [c for c in cells if match.topology.region(c) is not None]
+
+    @staticmethod
+    def free_cells(match, owner):
+        """Island ground with nothing standing or planted on it."""
+        return [c for c in Explorer.sealed_cells(match, owner)
+                if match.occupant(c) is None
+                and not match.board.has_kind(c, BOARD.GrapeVine.kind)]
+
+    # --- the match ---------------------------------------------------------
+
+    @EV.hook(priority=10)
+    def on_match_start(self, match, owner, ctx):
+        if ctx.get("entity") not in (None, owner):
+            return
+        isl = match.islands.get(owner.side) or {}
+        owner.vars["island_cells"] = [tuple(c) for c in (isl.get("cells") or [])]
+        owner.vars.setdefault("dug", [])
+        # Off the board is off the board: for three rounds nothing can reach it.
+        owner.flags["targetable"] = False
+
+    def move_zone(self, match, owner, pending):
+        """While the island is off the board the explorer does not walk: the whole
+        turn is one spadeful, and its square is dictated to be the one it is on.
+        Without this it could commit to a square and dig the same one, and arrive
+        on top of what it had just put there."""
+        if not self.sealed_cells(match, owner) or not owner.cells:
+            return None
+        return [owner.cell]
+
+    def sole_actions(self, match, owner):
+        """While the island is still its own map there is nothing else to do: no
+        hold, no attack — the whole turn is one spadeful. If there were somehow no
+        ground left to dig, the ordinary menu comes back rather than none at all."""
+        if not self.sealed_cells(match, owner):
+            return None
+        keys = [ab.key for ab in owner.abilities
+                if isinstance(ab, Dig) and ab.available(match, owner)]
+        return keys or None
+
+    def on_round_start(self, match, owner, ctx):
+        if match.round < self.JOIN_ROUND or owner.vars.get("joined"):
+            return
+        self._join(match, owner)
+
+    def _join(self, match, owner):
+        owner.vars["joined"] = True
+        region = island_region(owner.side)
+        cells = owner.vars.get("island_cells") or []
+        match.topology.rejoin(region)
+        owner.flags["targetable"] = True
+        for e in match.living(owner.side):
+            if e.cells and e.cell in cells:
+                e.flags.update(takes_turns=True, targetable=True)
+        match.log_line("The island runs aground against the mainland.")
+        self._bonus(match, owner)
+
+    def _bonus(self, match, owner):
+        dug = owner.vars.get("dug") or []
+        if len(dug) < 3:
+            return
+        kinds = set(dug)
+        if len(kinds) == 1:
+            self._all_same(match, owner, dug[0])
+        elif len(kinds) == 3:
+            self._all_different(match, owner)
+
+    def _all_same(self, match, owner, resource):
+        if resource == "grape":
+            # 大葡萄园. Set on the vines themselves rather than on the explorer, so
+            # the vineyard outlives whatever happens to the hero that planted it.
+            for effs in match.board.effects.values():
+                for eff in effs:
+                    if eff.kind == BOARD.GrapeVine.kind and eff.owner_side == owner.side:
+                        eff.great = True
+            match.log_line("大葡萄园 — every vine mends its own at the end of a round.")
+        elif resource == "mineral":
+            owner.max_hp += self.GREAT_PLATE
+            owner.hp += self.GREAT_PLATE
+            match.log_line(f"完全矿物装甲 — {match.label(owner)} is sealed in ore.")
+        elif resource == "slave":
+            natives = [e for e in match.living(owner.side) if e.key == "native"]
+            for e in natives:
+                e.max_hp += self.REVOLT_HP
+                e.hp += self.REVOLT_HP
+            match.log_line(
+                f"反动 — the 土著 turn on {match.label(owner)}, and are the stronger "
+                f"for it."
+            )
+            # The cost is not damage and nothing can be interposed against it.
+            owner.hp = 0
+            match.sweep_deaths()
+
+    def _all_different(self, match, owner):
+        free = [list(c) for c in match.topology.all_cells()
+                if match.occupant(c) is None
+                and not match.board.has_kind(c, BOARD.GrapeVine.kind)]
+        if not free:
+            return
+        match.log_line("全为不同 — the whole mainland is there to be worked.")
+        for res in ("grape", "slave", "mineral"):
+            match.interrupts.append({
+                "kind": "pick", "key": "dig", "side": owner.side,
+                "explorer": owner.id, "resource": res,
+                "options": [list(c) for c in free],
+                "option_kind": "cell",
+                "name": RESOURCE_NAMES[res],
+                "text": f"全为不同: choose a square anywhere on the board to "
+                        f"{RESOURCE_VERBS[res]}.",
+            })
+
+
+RESOURCE_NAMES = {"grape": "葡萄 Grapes", "slave": "奴隶 Slaves", "mineral": "矿物 Ore"}
+RESOURCE_VERBS = {"grape": "plant a vine on", "slave": "train a 土著 on",
+                  "mineral": "dig for ore on"}
+
+
+class NativeStrike:
+    """土著 fight with what they are given, so their blow is measured against
+    whatever it lands on rather than by any arm of their own."""
+
+    describe = "Its normal attack deals a sixth of the target's maximum health, rounded down."
+    SHARE = 6
+
+    def on_before_damage(self, match, owner, ev):
+        if ev.source is not owner or ev.cancelled:
+            return
+        if ev.category != DMG.NORMAL_ATTACK:
+            return
+        ev.amount = ev.target.max_hp // self.SHARE
+
 
 ROSTER = [
     HeroDef(
@@ -2816,6 +3395,43 @@ ROSTER = [
         blurb="Marks a hero and lets its own next turn decide what it has earned.",
     ),
     HeroDef(
+        key="world_tree",
+        name="世界树",
+        name_en="worldTree",
+        max_hp=1,
+        atk=0,
+        move=0,
+        max_ap=0,
+        attack={"mode": None},
+        passives=[WorldTree],
+        deploys="centre",
+        blurb="Stands in the middle and never moves. Cut it down yourself, and see what comes out.",
+    ),
+    HeroDef(
+        key="fisherman",
+        name="渔夫",
+        name_en="fisherman",
+        max_hp=16,
+        atk=3,
+        move=1,
+        max_ap=2,
+        attack={"mode": CELL, "cells": 2, "range": 2},
+        abilities=[Hook()],
+        blurb="Drags whatever it can reach out of their line and into yours.",
+    ),
+    HeroDef(
+        key="snow_woman",
+        name="雪女",
+        name_en="snowWoman",
+        max_hp=16,
+        atk=2,
+        move=1,
+        max_ap=4,
+        attack={"mode": CELL, "cells": 2, "range": 5},
+        abilities=[Avalanche()],
+        blurb="Buries the whole board at once, and the cold takes their strength with it.",
+    ),
+    HeroDef(
         key="water_mage",
         name="水法师",
         name_en="waterMage",
@@ -2956,6 +3572,21 @@ ROSTER = [
         passives=[GangTactics],
         blurb="Three bodies for one slot — two javelins and a commander, all acting on one turn.",
     ),
+    HeroDef(
+        key="explorer",
+        name="探险家",
+        name_en="explorer",
+        max_hp=3,
+        atk=2,
+        move=1,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 2, "range": 1},
+        abilities=[ChooseIsland(), MakeLandfall(),
+                   DigGrapes(), TrainNatives(), MineOre()],
+        passives=[Explorer],
+        deploys="island",
+        blurb="Spends three rounds on an island of its own making, then brings back what it dug up.",
+    ),
 ]
 
 BY_KEY = {h.key: h for h in ROSTER}
@@ -3021,11 +3652,41 @@ SQUAD_MEMBERS = [
     ),
 ]
 
+SQUAD_MEMBERS += [
+    HeroDef(
+        key="loki",
+        name="洛基",
+        name_en="loki",
+        max_hp=10,
+        atk=5,
+        move=2,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 2, "range": 2},
+        blurb="Walks out of the wreck of the world tree.",
+    ),
+]
+
 for _m in SQUAD_MEMBERS:
     BY_KEY[_m.key] = _m
 
 # A punching-bag for --test mode: one-enemy attack (you pick the target), no
 # ability. Not in ROSTER, so it can never be drafted in a real game.
+NATIVE = HeroDef(
+    key="native",
+    name="土著",
+    name_en="native",
+    max_hp=5,
+    atk=1,           # decorative: NativeStrike rewrites the blow against its target
+    move=1,
+    max_ap=0,
+    attack={"mode": CELL, "cells": 2, "range": 1},
+    passives=[NativeStrike],
+    blurb="Trained by 探险家. Its blow is a sixth of whatever it lands on.",
+)
+SQUAD_MEMBERS.append(NATIVE)
+BY_KEY[NATIVE.key] = NATIVE
+
+
 DUMMY = HeroDef(
     key="dummy",
     name="木桩",
@@ -3043,7 +3704,7 @@ BY_KEY[DUMMY.key] = DUMMY
 # whenever you add heroes; --test fills the rest of your side with dummies.
 # Whoever is newest goes here — --test always deploys the hero just added, so it
 # can be played immediately. Up to two; the rest of the side is padded with dummies.
-TEST_HEROES = ["artisan", "arms_dealer"]
+TEST_HEROES = ["explorer", "world_tree"]
 
 
 
@@ -3076,7 +3737,8 @@ def check_roster():
         seen[h.key] = h.name
 
         mode = (h.attack or {}).get("mode")
-        if mode not in ATK.MODES:
+        # None is a real answer: 世界树 never attacks anything.
+        if mode is not None and mode not in ATK.MODES:
             bad.append(f"{where}: unknown attack mode {mode!r}")
         if mode == CELL:
             for field in ("cells", "range"):

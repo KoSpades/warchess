@@ -3291,6 +3291,782 @@ ok("a spent hero does not keep claiming the warhead's number", gk7.atk == own,
 ok("...and genuinely has no attack",
    not any(a["key"] == "attack" for a in m.action_menu(gk7)))
 
+# 67 — 雪女: the whole board at once, and the cold with it
+def snow_arena():
+    m = arena([("snow_woman", (3, 3)), ("gatekeeper", (3, 1))],
+              [("thunder_dragon", (7, 3)), ("cannoneer", (7, 1)), ("dummy", (7, 2))])
+    sw = unit(m, LEFT, "snow_woman"); sw.ap = sw.max_ap
+    return (m, sw, unit(m, LEFT, "gatekeeper"), unit(m, RIGHT, "thunder_dragon"),
+            unit(m, RIGHT, "cannoneer"), unit(m, RIGHT, "dummy"))
+
+fall = {"destination": None, "action": {"key": "ability:avalanche"}}
+
+m, sw, ally, td, cannon, d = snow_arena()
+td.ap = 3
+hp0 = (td.hp, cannon.hp, d.hp, ally.hp)
+turn(m, sw.id, fall, d.id, hold)
+ok("it buries every enemy on the board, wherever they stand",
+   (hp0[0] - td.hp, hp0[1] - cannon.hp, hp0[2] - d.hp) == (6, 6, 6),
+   f"{hp0[0]-td.hp}, {hp0[1]-cannon.hp}, {hp0[2]-d.hp}")
+ok("...and leaves your own line alone", ally.hp == hp0[3], f"took {hp0[3] - ally.hp}")
+ok("the cold takes a point of AP", td.ap == 2, str(td.ap))
+ok("...and cannot take one from an empty bar", cannon.ap == 0, str(cannon.ap))
+ok("it costs the whole bar", sw.ap == 0 + 1, f"{sw.ap} AP (+1 at turn end)")
+
+# it is water, and it counts one creature once
+m = arena([("snow_woman", (3, 3)), ("gatekeeper", (3, 1))],
+          [("snake_head", (7, 2)), ("snake_tail", (7, 3))])
+sw2 = unit(m, LEFT, "snow_woman"); sw2.ap = sw2.max_ap
+hd5 = unit(m, RIGHT, "snake_head")
+ok("a two-bodied hero is buried once, not twice",
+   len(sw2.abilities[0].build_damage(m, sw2, {})) == 1,
+   str(len(sw2.abilities[0].build_damage(m, sw2, {}))))
+ok("...and the blow is water",
+   sw2.abilities[0].build_damage(m, sw2, {})[0].element == DMG.WATER)
+
+# 68 — 世界树: stands in the middle, and your own heroes cut it down
+def tree_arena():
+    m = Match()
+    m.assign_draft(["world_tree", "cannoneer", "gatekeeper"],
+                   ["cannoneer", "dummy", "berserker"])
+    for k, c in (("cannoneer", (3, 2)), ("gatekeeper", (3, 3))):
+        assert m.place(LEFT, k, c) is None, (k, c)
+    for k, c in (("cannoneer", (7, 2)), ("dummy", (7, 3)), ("berserker", (7, 4))):
+        assert m.place(RIGHT, k, c) is None, (k, c)
+    assert m.lock_force(LEFT) is None
+    assert m.lock_force(RIGHT) is None
+    tree = next(e for e in m.entities if e.key == "world_tree")
+    return m, tree, unit(m, LEFT, "cannoneer"), unit(m, LEFT, "gatekeeper")
+
+chop = {"destination": None, "action": {"key": "attack", "shots": [[[5, 3]]]}}
+
+def answer_all(m, pick=None):
+    guard = 0
+    while m.phase == "interrupt" and m.interrupts and guard < 12:
+        guard += 1
+        t = m.interrupts[0]
+        m.choose_interrupt(t["side"], pick(t) if pick else t["options"][0])
+
+def chop_once(m, tree, auto=True):
+    """One exchange in which whoever can reach the tree strikes it. `auto` answers
+    whatever the strike raises; pass False to inspect it instead."""
+    L = [e for e in m.unacted(LEFT)]
+    R = [e for e in m.unacted(RIGHT)]
+    if L:
+        m.select_hero(LEFT, L[0].id)
+        reach = m.topology.distance(L[0].cell, (5, 3)) <= (L[0].rng or 0)
+        m.commit(LEFT, chop if reach else hold)
+    if R and m.phase == "commit":
+        m.select_hero(RIGHT, R[0].id); m.commit(RIGHT, hold)
+    if auto:
+        answer_all(m)
+
+m, tree, can, gk = tree_arena()
+ok("it stands in the middle without being placed", tree.cell == (5, 3), str(tree.cell))
+ok("...taking no square of your deployment zone",
+   sorted(m.deploy_bodies(LEFT)) == ["cannoneer", "gatekeeper"], str(m.deploy_bodies(LEFT)))
+ok("it never takes a turn", not tree.flags["takes_turns"])
+ok("...is not a life to lose", not tree.flags["counts_for_defeat"])
+ok("...and blocks the middle", tree.flags["blocks_movement"]
+   and m.occupant((5, 3)) is tree)
+ok("the enemy cannot lay a finger on it",
+   not m.enemies_in([(5, 3)], RIGHT), str(m.enemies_in([(5, 3)], RIGHT)))
+ok("...but your own may strike it",
+   [e.id for e in m.strikeable_allies([(5, 3)], LEFT)] == [tree.id])
+
+# first strike — 长冬
+foe = unit(m, RIGHT, "cannoneer")
+mv0 = foe.move_allowance
+chop_once(m, tree)
+ok("the first strike counts", tree.vars.get("struck") == 1, str(tree.vars.get("struck")))
+ok("...and takes nothing off the tree", tree.hp == tree.max_hp, f"{tree.hp}")
+ok("长冬 slows every enemy by a square", foe.move_allowance == mv0 - 1,
+   f"{mv0} -> {foe.move_allowance}")
+r0 = m.round
+while m.round == r0:
+    L = [e.id for e in m.unacted(LEFT)]; R = [e.id for e in m.unacted(RIGHT)]
+    turn(m, L[0] if L else None, hold, R[0] if R else None, hold)
+ok("...and thaws when the round turns over", foe.move_allowance == mv0,
+   f"{foe.move_allowance}")
+
+# third strike — the beasts
+m, tree, can, gk = tree_arena()
+while tree.vars.get("struck", 0) < 3 and m.phase == "commit":
+    chop_once(m, tree, auto=False)
+    if m.interrupts: break
+ok("the third strike looses all three beasts",
+   [t.get("amount") for t in m.interrupts] == [1, 2, 3],
+   str([t.get("beast") for t in m.interrupts]))
+ok("...and each names an enemy", m.interrupts[0]["option_kind"] == "unit")
+victim = m.entity(m.interrupts[0]["options"][0])
+hp0 = victim.hp
+answer_all(m, pick=lambda t: victim.id)
+ok("the same hero may be named by all three", hp0 - victim.hp == 1 + 2 + 3,
+   f"took {hp0 - victim.hp}")
+
+# fifth strike — it falls, and 洛基 walks out
+while tree.alive and m.phase == "commit":
+    chop_once(m, tree, auto=False)
+    if m.interrupts: break
+ok("the fifth strike brings it down", not tree.alive and tree.vars["struck"] == 5,
+   f"alive={tree.alive} struck={tree.vars.get('struck')}")
+ok("...and the middle is free again", m.occupant((5, 3)) is None)
+ok("the ground under what the beasts bit is alight",
+   m.board.has_kind(victim.cell, "burning"), str(m.board.serialise()))
+ok("洛基 is asked for a square", m.interrupts and m.interrupts[0]["key"] == "loki",
+   str(m.interrupts[:1]))
+answer_all(m, pick=lambda t: [1, 5])
+loki = next((e for e in m.living(LEFT) if e.key == "loki"), None)
+ok("洛基 walks out where you asked", loki is not None and loki.cell == (1, 5),
+   str(loki and loki.cell))
+ok("...at his own stats", loki and (loki.max_hp, loki.atk, loki.rng, loki.grid,
+                                    loki.move_allowance) == (10, 5, 2, 2, 2),
+   f"{loki.max_hp}/{loki.atk}/{loki.rng}/{loki.grid}/{loki.move_allowance}")
+ok("...and he takes turns like anything else",
+   loki.flags["takes_turns"] and loki.flags["counts_for_defeat"])
+
+# 69 — 渔夫: hauls whatever it can reach out of their line and into yours
+def fisher_arena():
+    m = arena([("fisherman", (3, 3)), ("gatekeeper", (3, 1))],
+              [("cannoneer", (7, 3)), ("dummy", (7, 1))])
+    fm = unit(m, LEFT, "fisherman"); fm.ap = fm.max_ap
+    return m, fm, unit(m, LEFT, "gatekeeper"), unit(m, RIGHT, "cannoneer"), unit(m, RIGHT, "dummy")
+
+cast = lambda d: {"destination": None, "action": {"key": "ability:hook", "direction": d}}
+
+# straight down the lane
+m, fm, ally, cannon, d = fisher_arena()
+hp0 = cannon.hp
+turn(m, fm.id, cast("forward"), d.id, hold)
+ok("it hauls the catch in beside you", cannon.cell == (4, 3), str(cannon.cell))
+ok("...and the haul is no blow", cannon.hp == hp0, f"took {hp0 - cannon.hp}")
+
+# it reaches as far as the lane runs
+m, fm, ally, cannon, d = fisher_arena()
+cannon.set_cell((9, 3))
+turn(m, fm.id, cast("forward"), d.id, hold)
+ok("the lane runs to the board's edge", cannon.cell == (4, 3), str(cannon.cell))
+
+# diagonals count among the eight
+m, fm, ally, cannon, d = fisher_arena()
+cannon.set_cell((5, 5))                  # on the forward-and-down lane from C3
+turn(m, fm.id, cast("fwd_down"), d.id, hold)
+ok("a corner lane throws just as well", cannon.cell == (4, 4), str(cannon.cell))
+
+# one of your own in the way spoils it
+m, fm, ally, cannon, d = fisher_arena()
+ally.set_cell((5, 3))
+m.select_hero(LEFT, fm.id)
+ok("one of your own down the lane spoils the throw",
+   m.commit(LEFT, cast("forward")) is not None)
+ok("...and that lane is not offered",
+   "forward" not in [l["dir"] for l in fm.abilities[0].lanes(m, fm)],
+   str([l["dir"] for l in fm.abilities[0].lanes(m, fm)]))
+m.deselect(LEFT)
+
+# no room to haul it in to
+m, fm, ally, cannon, d = fisher_arena()
+ally.set_cell((4, 3))
+m.select_hero(LEFT, fm.id)
+ok("a taken square leaves nowhere to haul it", m.commit(LEFT, cast("forward")) is not None)
+m.deselect(LEFT)
+
+# an empty lane catches nothing
+m, fm, ally, cannon, d = fisher_arena()
+m.select_hero(LEFT, fm.id)
+ok("an empty lane catches nothing", m.commit(LEFT, cast("up")) is not None)
+m.deselect(LEFT)
+
+# the haul happens with movement, so it can drag somebody into a marked square
+m, fm, ally, cannon, d = fisher_arena()
+hp0 = cannon.hp
+m.select_hero(LEFT, fm.id); m.commit(LEFT, cast("forward"))
+m.select_hero(RIGHT, d.id); m.commit(RIGHT, hold)
+ok("it lands where the hook put it", cannon.cell == (4, 3))
+ok("...having taken nothing on the way", cannon.hp == hp0)
+
+# 70 — nothing the board calls untouchable is a target, however it is aimed
+def untouchable_arena(foe_key, at=(6, 3)):
+    m = Match()
+    m.assign_draft(["world_tree", "gatekeeper"], [foe_key, "dummy"])
+    assert m.place(LEFT, "gatekeeper", (3, 3)) is None
+    assert m.place(RIGHT, foe_key, (7, 3)) is None
+    assert m.place(RIGHT, "dummy", (7, 1)) is None
+    assert m.lock_force(LEFT) is None
+    assert m.lock_force(RIGHT) is None
+    tree = next(e for e in m.entities if e.key == "world_tree")
+    foe = unit(m, RIGHT, foe_key)
+    foe.ap = foe.max_ap
+    # Stand it right next to the tree, so nothing is ever refused for range.
+    foe.set_cell(at)
+    m.select_hero(RIGHT, foe.id)
+    return m, tree, foe
+
+def refused(foe_key, key, at=(6, 3), **params):
+    m, tree, foe = untouchable_arena(foe_key, at)
+    a = {"key": key}
+    for k, v in params.items():
+        a[k] = tree.id if v == "TREE" else (foe.id if v == "SELF" else v)
+    if a.get("targets") == "TREE_LIST":
+        a["targets"] = [tree.id]
+    return m.commit(RIGHT, {"destination": None, "action": a})
+
+for who, key in (("druid", "ability:pierce"), ("assassin", "ability:garrote"),
+                 ("ghost", "ability:possess"), ("strongman", "ability:slam")):
+    why = refused(who, key, target="TREE")
+    ok(f"{who} cannot name the tree with an ability", why is not None, repr(why))
+
+ok("nor can 魔术师 shuffle it out of the middle",
+   refused("magician", "ability:transfer", first="TREE", second="SELF") is not None)
+ok("nor can a unit-locked attack commit to it",
+   refused("thunder_dragon", "attack", targets="TREE_LIST") is not None)
+
+m, tree, cen = untouchable_arena("centaur", (7, 3))
+lane = cen.abilities[0].path(m, cen, "forward")
+ok("nor does a charge trample it on the way past",
+   lane is None or tree.id not in [v.id for v in lane[1]])
+
+# the same gate must not close on the side that is *meant* to strike it
+m, tree, _ = untouchable_arena("dummy")
+friend = unit(m, LEFT, "gatekeeper")
+friend.set_cell((4, 3))
+ok("your own may still take an axe to it",
+   [e.id for e in m.strikeable_allies([(5, 3)], LEFT)] == [tree.id])
+m.select_hero(LEFT, friend.id)
+ok("...and the strike is accepted",
+   m.commit(LEFT, {"destination": None,
+                   "action": {"key": "attack", "shots": [[[5, 3]]]}}) is None)
+
+# and the bodiless 鬼魂 is covered by the same rule
+m2 = Match()
+m2.assign_draft(["ghost", "dummy"], ["druid", "dummy"])
+for side, ks in ((LEFT, (("ghost", (3, 2)), ("dummy", (3, 3)))),
+                 (RIGHT, (("druid", (7, 2)), ("dummy", (7, 3))))):
+    for k, c in ks:
+        assert m2.place(side, k, c) is None, (k, c)
+assert m2.lock_force(LEFT) is None
+assert m2.lock_force(RIGHT) is None
+gh = unit(m2, LEFT, "ghost")
+dr = unit(m2, RIGHT, "druid")
+dr.ap = dr.max_ap
+dr.set_cell((4, 2))
+m2.select_hero(RIGHT, dr.id)
+gh.flags["targetable"] = False          # as it is between manifestations
+ok("...and a hero with no body to hit is off limits by the same rule",
+   m2.commit(RIGHT, {"destination": None,
+                     "action": {"key": "ability:pierce", "target": gh.id}}) is not None)
+
+# 71 — 探险家: three rounds on a board of its own, then whatever it dug up
+def island_arena(T=((4, 1), (4, 2), (4, 3), (5, 2)), stand=(4, 2), foes=None):
+    m = Match()
+    m.assign_draft(["explorer", "cannoneer", "gatekeeper"],
+                   ["cannoneer", "dummy", "berserker"])
+    assert m.build_choose(LEFT, {"cells": [list(c) for c in T]}) is None
+    assert m.build_choose(LEFT, {"cell": list(stand)}) is None
+    for k, c in (("cannoneer", (3, 3)), ("gatekeeper", (3, 1))):
+        assert m.place(LEFT, k, c) is None, (k, c)
+    for k, c in (("cannoneer", (7, 2)), ("dummy", (7, 3)), ("berserker", (7, 4))):
+        assert m.place(RIGHT, k, c) is None, (k, c)
+    assert m.lock_force(LEFT) is None
+    assert m.lock_force(RIGHT) is None
+    return m, next(e for e in m.entities if e.key == "explorer")
+
+def island_round(m, ex, ability, cell):
+    """One whole round: the explorer digs, everybody else holds."""
+    r0, guard = m.round, 0
+    todo = ability
+    while m.round == r0 and m.phase == "commit" and guard < 20:
+        guard += 1
+        for side in (LEFT, RIGHT):
+            if m.commits[side] is not None:
+                continue
+            un = m.unacted(side)
+            if not un:
+                continue
+            pick = next((e for e in un if e is ex), un[0])
+            m.select_hero(side, pick.id)
+            if pick is ex and todo:
+                assert m.commit(side, {"destination": None, "action": {
+                    "key": "ability:" + todo, "cell": list(cell)}}) is None
+                todo = None
+            else:
+                m.commit(side, hold)
+
+def island_run(ability, cells=((4, 1), (4, 3), (5, 2))):
+    m, ex = island_arena()
+    for cell in cells:
+        island_round(m, ex, ability, cell)
+    return m, ex
+
+# --- the T, and the ground it takes out of the board
+ok("four squares in a line are not a T", not HEROES.t_tetromino([(1, 1), (2, 1), (3, 1), (4, 1)]))
+ok("a square block is not a T", not HEROES.t_tetromino([(1, 1), (2, 1), (1, 2), (2, 2)]))
+ok("a bar with a stem off its middle is", HEROES.t_tetromino([(1, 1), (2, 1), (3, 1), (2, 2)]))
+ok("...and so is the same shape turned on its side",
+   HEROES.t_tetromino([(4, 1), (4, 2), (4, 3), (5, 2)]))
+ok("a stem off the end is not", not HEROES.t_tetromino([(1, 1), (2, 1), (3, 1), (1, 2)]))
+
+m, ex = island_arena()
+isle = [(4, 1), (4, 2), (4, 3), (5, 2)]
+ok("the island leaves the board", not [c for c in isle if c in m.topology.all_cells()],
+   str([c for c in isle if c in m.topology.all_cells()]))
+ok("...taking those squares out of the deployment zone",
+   not [c for c in isle if c in m.topology.deployment_zone(LEFT)])
+ok("...and it is no neighbour of the mainland",
+   (4, 2) not in m.topology.neighbours((3, 2)), str(m.topology.neighbours((3, 2))))
+ok("...while its own squares still touch each other",
+   sorted(m.topology.neighbours((4, 2))) == sorted([(4, 1), (4, 3), (5, 2)]),
+   str(m.topology.neighbours((4, 2))))
+ok("nothing on the mainland is at any reach of it",
+   m.topology.distance((3, 3), (4, 3)) > m.topology.cols, str(m.topology.distance((3, 3), (4, 3))))
+ok("the explorer takes no square of the deployment zone",
+   sorted(m.deploy_bodies(LEFT)) == ["cannoneer", "gatekeeper"], str(m.deploy_bodies(LEFT)))
+ok("it stands where it said it would", ex.cell == (4, 2), str(ex.cell))
+ok("...where the enemy cannot lay a finger on it", not ex.flags["targetable"])
+ok("...and does not walk at all while it is out there",
+   m.legal_moves(ex) == [[4, 2]], str(m.legal_moves(ex)))
+ok("digging is the only thing it may do",
+   sorted(a["key"] for a in m.action_menu(ex))
+   == ["ability:dig_grapes", "ability:mine_ore", "ability:train_natives"],
+   str([a["key"] for a in m.action_menu(ex)]))
+ok("...and it may only dig its own free ground",
+   sorted(map(tuple, m.action_menu(ex)[0]["targeting"]["cells"])) == [(4, 1), (4, 3), (5, 2)],
+   str(m.action_menu(ex)[0]["targeting"]["cells"]))
+
+# the world tree gets the middle first
+m2 = Match()
+m2.assign_draft(["explorer", "world_tree", "gatekeeper"], ["dummy", "dummy", "berserker"])
+ok("an island may not be charted over 世界树",
+   m2.build_choose(LEFT, {"cells": [[4, 3], [5, 3], [6, 3], [5, 2]]}) is not None,
+   repr(m2.build_choose(LEFT, {"cells": [[4, 3], [5, 3], [6, 3], [5, 2]]})))
+ok("...but the same T one square over is fine",
+   m2.build_choose(LEFT, {"cells": [[1, 1], [1, 2], [1, 3], [2, 2]]}) is None)
+
+# --- 完全矿物装甲
+m, ex = island_run("mine_ore")
+ok("三矿物 arrives armoured", (ex.hp, ex.max_hp) == (18, 18), f"{ex.hp}/{ex.max_hp}")
+ok("...with the health as well as the ceiling", ex.hp == ex.max_hp, f"{ex.hp}")
+ok("...and sharper for it", (ex.atk, ex.rng) == (5, 4), f"atk {ex.atk} rng {ex.rng}")
+ok("the island is back on the board", m.topology.region((4, 2)) is None)
+ok("...and the explorer can be reached at last", ex.flags["targetable"])
+ok("...and does ordinary things again",
+   "none" in [a["key"] for a in m.action_menu(ex)], str([a["key"] for a in m.action_menu(ex)]))
+
+# --- 反动
+m, ex = island_run("train_natives")
+natives = [e for e in m.living(LEFT) if e.key == "native"]
+ok("三奴隶 raises three of them", len(natives) == 3, str(len(natives)))
+ok("...each the stronger for the revolt",
+   [(e.hp, e.max_hp) for e in natives] == [(7, 7)] * 3, str([(e.hp, e.max_hp) for e in natives]))
+ok("...and they take their own turns now", all(e.flags["takes_turns"] for e in natives))
+ok("...and can be reached", all(e.flags["targetable"] for e in natives))
+ok("the explorer pays for it with its life", not ex.alive)
+ok("...but the side is not beaten while its 土著 stand",
+   m.phase != "gameover" and [e for e in m.living(LEFT) if e.flags["counts_for_defeat"]],
+   m.phase)
+
+# the 土著's blow is measured against what it hits
+foe = unit(m, RIGHT, "berserker")
+n = natives[0]
+n.set_cell((6, 4)); n.ap = n.max_ap
+hp0, expect = foe.hp, foe.max_hp // 6
+m.select_hero(LEFT, n.id)
+m.commit(LEFT, {"destination": None, "action": {"key": "attack", "shots": [[list(foe.cell)]]}})
+r = m.unacted(RIGHT)
+if r:
+    m.select_hero(RIGHT, r[0].id); m.commit(RIGHT, hold)
+ok("a 土著 takes a sixth of whatever it hits", hp0 - foe.hp == expect,
+   f"{hp0}->{foe.hp}, wanted {expect} of {foe.max_hp}")
+ok("...which is not its own stat line", expect != n.atk, f"{expect} vs atk {n.atk}")
+
+# --- 大葡萄园
+m, ex = island_run("dig_grapes")
+vines = [(c, e) for c, effs in m.board.effects.items() for e in effs if e.kind == "vineyard"]
+ok("三葡萄 leaves three vines", len(vines) == 3, str(len(vines)))
+ok("...every one of them a 大葡萄园", all(e.great for _, e in vines))
+gk = unit(m, LEFT, "gatekeeper")
+gk.hp = 5; gk.set_cell((4, 4))
+m.select_hero(LEFT, gk.id)
+m.commit(LEFT, {"destination": [4, 3], "action": {"key": "none"}})
+r = m.unacted(RIGHT)
+m.select_hero(RIGHT, r[0].id); m.commit(RIGHT, hold)
+ok("the first friend to reach a vine mends 4", gk.hp == 9, str(gk.hp))
+ok("...and that vine is spent",
+   [e.spent for c, e in vines if c == (4, 3)] == [True])
+before, r0, guard = gk.hp, m.round, 0
+while m.round == r0 and guard < 20:
+    guard += 1
+    for side in (LEFT, RIGHT):
+        if m.commits[side] is not None:
+            continue
+        un = m.unacted(side)
+        if un:
+            m.select_hero(side, un[0].id); m.commit(side, hold)
+ok("...but the vineyard still mends 2 when the round turns over", gk.hp == before + 2,
+   f"{before} -> {gk.hp}")
+
+# --- 全为不同
+m, ex = island_arena()
+for ability, cell in (("dig_grapes", (4, 1)), ("train_natives", (4, 3)), ("mine_ore", (5, 2))):
+    island_round(m, ex, ability, cell)
+ok("一样一种 stops the board for three more", m.phase == "interrupt", m.phase)
+ok("...one task per resource",
+   [t["resource"] for t in m.interrupts] == ["grape", "slave", "mineral"],
+   str([t.get("resource") for t in m.interrupts]))
+ok("...offered anywhere on the mainland", (8, 1) in [tuple(c) for c in m.interrupts[0]["options"]])
+ok("...and never on the enemy's head",
+   tuple(unit(m, RIGHT, "dummy").cell) not in [tuple(c) for c in m.interrupts[0]["options"]])
+taken = (6, 1)
+m.choose_interrupt(LEFT, list(taken))
+ok("a square just used is withdrawn from the rest",
+   all(tuple(c) != taken for t in m.interrupts for c in t["options"]))
+m.choose_interrupt(LEFT, [6, 2])
+m.choose_interrupt(LEFT, [6, 3])
+ok("the round picks up where it left off", m.phase == "commit", m.phase)
+ok("...with a second vine on the mainland",
+   sorted(c for c, effs in m.board.effects.items()
+          for e in effs if e.kind == "vineyard") == [(4, 1), (6, 1)],
+   str(sorted(c for c, effs in m.board.effects.items() for e in effs if e.kind == "vineyard")))
+ok("...a second 土著 with it",
+   sorted(e.cell for e in m.living(LEFT) if e.key == "native") == [(4, 3), (6, 2)],
+   str(sorted(e.cell for e in m.living(LEFT) if e.key == "native")))
+ok("...and two plates of armour on the explorer",
+   (ex.max_hp, ex.atk, ex.rng) == (9, 4, 3), f"{ex.max_hp}/{ex.atk}/{ex.rng}")
+
+# --- nothing on the mainland can reach in, and 工匠 cannot open onto it
+m3 = Match()
+m3.assign_draft(["explorer", "artisan", "gatekeeper"], ["dummy", "dummy", "berserker"])
+assert m3.build_choose(LEFT, {"cells": [[4, 1], [4, 2], [4, 3], [5, 2]]}) is None
+assert m3.build_choose(LEFT, {"cell": [4, 2]}) is None
+_h, door = m3.build_ability(LEFT)
+ok("工匠 is never offered an island square",
+   not [c for c in ([4, 1], [4, 2], [4, 3], [5, 2])
+        if c in m3.build_targeting(LEFT, door)["cells"]],
+   str(m3.build_targeting(LEFT, door)["cells"])[:60])
+ok("...and cannot open one by hand",
+   m3.build_choose(LEFT, {"cells": [[2, 3], [4, 2]]}) is not None,
+   repr(m3.build_choose(LEFT, {"cells": [[2, 3], [4, 2]]})))
+ok("...though a mainland pair is fine",
+   m3.build_choose(LEFT, {"cells": [[2, 3], [6, 3]]}) is None)
+
+# the other order: the door goes up first, and the island may not swallow it
+m4 = Match()
+m4.assign_draft(["artisan", "explorer", "gatekeeper"], ["dummy", "dummy", "berserker"])
+assert m4.build_choose(LEFT, {"cells": [[2, 3], [5, 3]]}) is None
+ok("an island may not be charted over a door",
+   m4.build_choose(LEFT, {"cells": [[5, 2], [5, 3], [5, 4], [6, 3]]}) is not None,
+   repr(m4.build_choose(LEFT, {"cells": [[5, 2], [5, 3], [5, 4], [6, 3]]})))
+ok("...but anywhere clear of it is fine",
+   m4.build_choose(LEFT, {"cells": [[8, 1], [8, 2], [8, 3], [7, 2]]}) is None)
+
+# 潜水者 cannot bury a charge out there either
+m5 = Match()
+m5.assign_draft(["explorer", "cannoneer", "gatekeeper"], ["diver", "dummy", "berserker"])
+assert m5.build_choose(LEFT, {"cells": [[4, 1], [4, 2], [4, 3], [5, 2]]}) is None
+assert m5.build_choose(LEFT, {"cell": [4, 2]}) is None
+for k, c in (("cannoneer", (3, 3)), ("gatekeeper", (3, 1))):
+    assert m5.place(LEFT, k, c) is None
+for k, c in (("diver", (7, 2)), ("dummy", (7, 3)), ("berserker", (7, 4))):
+    assert m5.place(RIGHT, k, c) is None
+assert m5.lock_force(LEFT) is None
+assert m5.lock_force(RIGHT) is None
+ok("潜水者 cannot bury a charge on an island",
+   m5.opening_choose(RIGHT, {"cell": [4, 1]}) is not None,
+   repr(m5.opening_choose(RIGHT, {"cell": [4, 1]})))
+ok("...but its own ground is fine", m5.opening_choose(RIGHT, {"cell": [6, 2]}) is None)
+ex5 = next(e for e in m5.entities if e.key == "explorer")
+ok("the explorer digs its own island", m5.validate_targeting(ex5, ex5.abilities[2], {"cell": [4, 1]}) is None)
+ok("...and nowhere else", m5.validate_targeting(ex5, ex5.abilities[2], {"cell": [6, 3]}) is not None)
+ok("an island is part of nobody's row", (4, 2) not in m5.topology.row(2), str(m5.topology.row(2)))
+ok("...nor of any column", (4, 2) not in m5.topology.column(4), str(m5.topology.column(4)))
+ok("...nor of the whole board", not [c for c in ((4, 1), (4, 2)) if c in m5.shape_cells((3, 3), "board")])
+ok("...nor of what surrounds the square beside it",
+   (4, 2) not in m5._surround8((3, 2)), str(sorted(m5._surround8((3, 2)))))
+
+# --- the island is out of the game: no skill of either side reaches it
+m6 = Match()
+m6.assign_draft(["explorer", "elder", "arms_dealer"], ["mist_lady", "world_tree", "berserker"])
+assert m6.build_choose(LEFT, {"cells": [[4, 1], [4, 2], [4, 3], [5, 2]]}) is None
+assert m6.build_choose(LEFT, {"cell": [4, 2]}) is None
+for k, c in (("elder", (3, 3)), ("arms_dealer", (3, 1))):
+    assert m6.place(LEFT, k, c) is None, (k, c)
+for k, c in (("mist_lady", (7, 2)), ("berserker", (7, 4))):
+    assert m6.place(RIGHT, k, c) is None, (k, c)
+assert m6.lock_force(LEFT) is None
+assert m6.lock_force(RIGHT) is None
+ex6 = next(e for e in m6.entities if e.key == "explorer")
+tree6 = next(e for e in m6.entities if e.key == "world_tree")
+elder6, ml6 = unit(m6, LEFT, "elder"), unit(m6, RIGHT, "mist_lady")
+ad6 = unit(m6, LEFT, "arms_dealer")
+mv6, rng6 = ex6.move_allowance, ex6.rng
+shore6 = elder6.move_allowance       # 长冬 comes from the right, so it bites the left
+tree6.passives[0]._long_winter(m6, tree6)
+ok("长冬 does not reach an island", ex6.move_allowance == mv6, str(ex6.move_allowance))
+ml6.abilities[0].side_effects(m6, ml6, {})
+ok("...nor does 大雾", ex6.rng == rng6, str(ex6.rng))
+ok("...nor a blessing of its own side",
+   ex6.id not in elder6.abilities[0].blessable(m6, elder6))
+ok("...nor 军火商人's open bar", ex6.max_ap == 0, str(ex6.max_ap))
+ok("...and it is sold nothing either",
+   not [o for o in ad6.passives[0].turn_choice(m6, ad6)["options"]
+        if o["value"].split(":")[1] == str(ex6.id)])
+ok("but the mainland feels every bit of it",
+   elder6.move_allowance == shore6 - 1, f"{shore6} -> {elder6.move_allowance}")
+
+# --- what takes no turn is never selectable, and never spends an exchange
+m7 = Match()
+m7.assign_draft(["world_tree", "cannoneer", "gatekeeper"], ["dummy", "dummy", "berserker"])
+for k, c in (("cannoneer", (3, 3)), ("gatekeeper", (3, 1))):
+    assert m7.place(LEFT, k, c) is None
+for k, c in (("dummy", (7, 2)), ("dummy", (7, 3)), ("berserker", (7, 4))):
+    assert m7.place(RIGHT, k, c) is None
+assert m7.lock_force(LEFT) is None
+assert m7.lock_force(RIGHT) is None
+tree7 = next(e for e in m7.entities if e.key == "world_tree")
+ok("世界树 cannot be picked for a turn", m7.select_hero(LEFT, tree7.id) is not None,
+   repr(m7.select_hero(LEFT, tree7.id)))
+m8, ex8 = island_arena()
+island_round(m8, ex8, "train_natives", (4, 1))
+nat8 = next(e for e in m8.living(LEFT) if e.key == "native")
+ok("...and neither can a 土著 still out at sea",
+   m8.select_hero(LEFT, nat8.id) is not None, repr(m8.select_hero(LEFT, nat8.id)))
+
+# --- digging is the whole turn: it cannot walk onto what it just put down
+m9, ex9 = island_arena()
+m9.select_hero(LEFT, ex9.id)
+ok("the explorer cannot walk while its island is off the board",
+   m9.commit(LEFT, {"destination": [4, 1],
+                    "action": {"key": "ability:train_natives", "cell": [4, 1]}}) is not None)
+ok("...but standing still and digging is fine",
+   m9.commit(LEFT, {"destination": [4, 2],
+                    "action": {"key": "ability:train_natives", "cell": [4, 1]}}) is None)
+for e in m9.unacted(RIGHT)[:1]:
+    m9.select_hero(RIGHT, e.id); m9.commit(RIGHT, hold)
+bodies9 = [e.cell for e in m9.living(LEFT) if e.cells]
+ok("...and nothing ends up sharing a square",
+   len(bodies9) == len(set(bodies9)), str(sorted(bodies9)))
+
+# --- two explorers keep two separate islands
+m10 = Match()
+m10.assign_draft(["explorer", "cannoneer", "gatekeeper"], ["explorer", "dummy", "berserker"])
+assert m10.build_choose(LEFT, {"cells": [[3, 1], [3, 2], [3, 3], [4, 2]]}) is None
+ok("one island cannot be charted on top of another",
+   m10.build_choose(RIGHT, {"cells": [[3, 1], [3, 2], [3, 3], [4, 2]]}) is not None)
+assert m10.build_choose(RIGHT, {"cells": [[7, 1], [7, 2], [7, 3], [6, 2]]}) is None
+assert m10.build_choose(LEFT, {"cell": [3, 2]}) is None
+assert m10.build_choose(RIGHT, {"cell": [7, 2]}) is None
+for k, c in (("cannoneer", (2, 3)), ("gatekeeper", (2, 1))):
+    assert m10.place(LEFT, k, c) is None
+for k, c in (("dummy", (8, 3)), ("berserker", (8, 4))):
+    assert m10.place(RIGHT, k, c) is None
+assert m10.lock_force(LEFT) is None
+assert m10.lock_force(RIGHT) is None
+exL = next(e for e in m10.entities if e.key == "explorer" and e.side == LEFT)
+ok("the two islands are different maps",
+   m10.topology.region((3, 2)) != m10.topology.region((7, 2)))
+ok("...and neither explorer can dig the other's",
+   m10.validate_targeting(exL, exL.abilities[2], {"cell": [7, 1]}) is not None)
+
+# --- an attack passes clean over the island
+m, ex = island_arena(T=((5, 1), (5, 2), (5, 3), (6, 2)), stand=(5, 2))
+sn = m.spawn(HEROES.BY_KEY["sniper"], LEFT, (2, 2))   # row 2 is clear of its own
+sn.ap = sn.max_ap
+tgt = unit(m, RIGHT, "cannoneer")
+tgt.set_cell((7, 2))
+lanes = [l["dir"] for l in LineShot.lanes(m, sn)]
+ok("a lane fires straight through an island", "forward" in lanes, str(lanes))
+hit = LineShot.scan(m, sn, "forward")
+ok("...and finds what is on the far side of it", hit and hit[0] is tgt,
+   str(hit and hit[0].key))
+
+# 72 — the six-hero board: 世界树, 军火商人, 探险家, 蛇帝, 武器大师, 鸟嘴医生
+def six_arena():
+    m = Match()
+    m.assign_draft(["world_tree", "explorer", "arms_dealer"],
+                   ["snake_emperor", "weapon_master", "plague_doctor"])
+    assert m.build_choose(LEFT, {"cells": [[2, 1], [2, 2], [2, 3], [3, 2]]}) is None
+    assert m.build_choose(LEFT, {"cell": [2, 2]}) is None
+    assert m.place(LEFT, "arms_dealer", (1, 3)) is None
+    for k, c in (("snake_head", (7, 3)), ("snake_tail", (8, 3)),
+                 ("weapon_master", (7, 2)), ("plague_doctor", (7, 4))):
+        assert m.place(RIGHT, k, c) is None, (k, c)
+    assert m.lock_force(LEFT) is None
+    assert m.lock_force(RIGHT) is None
+    guard = 0
+    while m.phase == "opening" and guard < 12:
+        guard += 1
+        for side in (LEFT, RIGHT):
+            if m.opening is None or m.phase != "opening":
+                break
+            pend = m.opening["pending"][side]
+            if pend:
+                e = m.entity(pend[0]["entity"])
+                ab = next(a for a in e.abilities if a.key == pend[0]["ability_key"])
+                t = m.ability_targeting(e, ab)
+                cells = t.get("cells") or [list(c) for c in m.topology.all_cells()]
+                m.opening_choose(side, {"cell": list(cells[-1]), "target": e.id})
+    return m
+
+m6a = six_arena()
+def who(k, side=None):
+    return next(e for e in m6a.entities
+                if e.key == k and (side is None or e.side == side))
+tree6a, ex6a, ad6a = who("world_tree"), who("explorer"), who("arms_dealer")
+hd6a, pd6a = who("snake_head"), who("plague_doctor")
+
+ok("the board takes all six", m6a.phase == "commit", m6a.phase)
+ok("...with 世界树 in the middle and the island off the board",
+   tree6a.cell == (5, 3) and m6a.topology.region((2, 2)) is not None)
+
+# 军火商人 opens a bar for the people who can use one
+ok("军火商人 gives 世界树 no AP bar", tree6a.max_ap == 0, str(tree6a.max_ap))
+ok("...nor anything still out at sea", ex6a.max_ap == 0, str(ex6a.max_ap))
+ok("...but keeps its own", ad6a.max_ap == 99, str(ad6a.max_ap))
+ok("...and sells to neither of them",
+   not [o for o in ad6a.passives[0].turn_choice(m6a, ad6a)["options"]
+        if o["value"].split(":")[1] in (str(tree6a.id), str(ex6a.id))])
+# and it corrects itself once the island lands
+ex6a.vars["dug"] = ["mineral"] * 3
+m6a.round = Explorer_JOIN = 4
+ex6a.passives[0].on_round_start(m6a, ex6a, {})
+ad6a.passives[0]._open_the_bar(m6a, ad6a)
+ok("the bar opens for 探险家 the moment its island lands", ex6a.max_ap == 99,
+   str(ex6a.max_ap))
+ok("...and 世界树 still gets none", tree6a.max_ap == 0, str(tree6a.max_ap))
+
+# a nuke over the whole board counts a two-bodied hero once and skips what it cannot touch
+m6b = six_arena()
+ad6b = next(e for e in m6b.entities if e.key == "arms_dealer")
+ad6b.vars["arms"] = HEROES.ARMS_BY_KEY["nuke"]
+mode6 = ATK_MODE = None
+import attacks as _ATK
+mode6 = _ATK.mode_for(ad6b)
+insts6 = mode6.build(m6b, ad6b, ad6b.cell, {"key": "attack"})
+insts6 = insts6 if isinstance(insts6, list) else [insts6]
+nuked = [ev.target for i in insts6 for ev in i.build_damage(m6b, None)]
+keys6 = [e.key for e in nuked]
+ok("核爆 counts 蛇帝 once, not once a body",
+   keys6.count("snake_head") + keys6.count("snake_tail") == 1, str(keys6))
+ok("...spares an island it cannot reach", "explorer" not in keys6, str(keys6))
+ok("...and its own 世界树", "world_tree" not in keys6, str(keys6))
+
+# 鸟嘴医生 may walk in anywhere on the board — but not onto an island
+m6c = six_arena()
+pd6c = next(e for e in m6c.entities if e.key == "plague_doctor")
+plague = pd6c.abilities[0]
+ok("鸟嘴医生 is never offered an island square to open on",
+   not [c for c in plague.cells(m6c, pd6c) if m6c.topology.region(c) is not None])
+for _ in range(9):
+    m6c.board.spread_effects(m6c)
+    m6c.round += 1
+crept = [c for c, effs in m6c.board.effects.items()
+         for e in effs if e.kind == "infection"]
+ok("...and the plague never creeps onto one either",
+   not [c for c in crept if m6c.topology.region(c) is not None], str(len(crept)))
+
+# ground under a two-bodied hero is one patch of ground
+m6d = six_arena()
+hd6d = next(e for e in m6d.entities if e.key == "snake_head")
+tl6d = next(e for e in m6d.entities if e.key == "snake_tail")
+m6d.board.add_effect(hd6d.cell, BOARD.Infection(LEFT, 1))
+m6d.board.add_effect(tl6d.cell, BOARD.Infection(LEFT, 1))
+pool0 = hd6d.hp
+m6d.select_hero(RIGHT, hd6d.id)
+m6d.commit(RIGHT, hold)
+for e in m6d.unacted(LEFT)[:1]:
+    m6d.select_hero(LEFT, e.id); m6d.commit(LEFT, hold)
+ok("infected ground under both halves bites 蛇帝 once",
+   pool0 - hd6d.hp == BOARD.Infection.DAMAGE, f"{pool0} -> {hd6d.hp}")
+
+# 洛基 comes out of the wreck onto the board, never onto an island
+m6e = six_arena()
+tree6e = next(e for e in m6e.entities if e.key == "world_tree")
+tree6e.vars["struck"] = 4
+tree6e.passives[0].on_struck(m6e, tree6e,
+                             next(e for e in m6e.entities if e.key == "arms_dealer"))
+lok = [t for t in m6e.interrupts if t.get("key") == "loki"]
+ok("felling 世界树 calls 洛基 up", bool(lok))
+ok("...but never onto an island",
+   not [c for c in lok[0]["options"] if m6e.topology.region(tuple(c)) is not None])
+
+# an opening pick must tell the client the same squares the validator will accept
+m6f = six_arena()
+pd6f = next(e for e in m6f.entities if e.key == "plague_doctor")
+m6g = Match()
+m6g.assign_draft(["plague_doctor", "cannoneer", "gatekeeper"],
+                 ["dummy", "dummy", "berserker"])
+for k, c in (("plague_doctor", (3, 3)), ("cannoneer", (3, 1)), ("gatekeeper", (3, 2))):
+    assert m6g.place(LEFT, k, c) is None, (k, c)
+for k, c in (("dummy", (7, 2)), ("dummy", (7, 3)), ("berserker", (7, 4))):
+    assert m6g.place(RIGHT, k, c) is None
+assert m6g.lock_force(LEFT) is None
+assert m6g.lock_force(RIGHT) is None
+task6 = view.state_for(m6g, LEFT)["opening"]["task"]
+ok("an opening pick ships the squares it will actually accept",
+   bool(task6 and task6["targeting"].get("cells")),
+   str(task6 and task6["targeting"]))
+ok("...and one of them is genuinely legal",
+   m6g.opening_choose(LEFT, {"cell": task6["targeting"]["cells"][0]}) is None)
+
+# 73 — things the random-match hunt turned up
+# A squad commits as a squad however little of it is left.
+m73 = Match()
+m73.assign_draft(["goblin_gang", "cannoneer"], ["dummy", "berserker"])
+for k, c in (("goblin_javelin", (3, 1)), ("goblin_javelin", (3, 2)),
+             ("goblin_commander", (3, 3)), ("cannoneer", (2, 5))):
+    assert m73.place(LEFT, k, c) is None, (k, c)
+for k, c in (("dummy", (7, 3)), ("berserker", (7, 4))):
+    assert m73.place(RIGHT, k, c) is None
+assert m73.lock_force(LEFT) is None
+assert m73.lock_force(RIGHT) is None
+crew = [e for e in m73.living(LEFT) if e.hero.gang == "goblin_gang"]
+for g in crew[:-1]:
+    g.alive = False
+    g.cells = set()
+lone = crew[-1]
+assert m73.select_hero(LEFT, lone.id) is None
+ok("a lone goblin is still a squad turn, not a plain one",
+   m73.commit(LEFT, {"destination": None, "action": {"key": "none"}}) is not None,
+   repr(m73.commit(LEFT, {"destination": None, "action": {"key": "none"}})))
+ok("...and the squad shape is what it takes",
+   m73.commit(LEFT, {"orders": [{"entity": lone.id, "destination": None,
+                                 "action": {"key": "none"}}]}) is None)
+
+# Two islands can squeeze a deployment zone, but never shut it
+def _t_shapes(topo):
+    out = set()
+    for c in range(1, topo.cols + 1):
+        for r in range(1, topo.rows + 1):
+            for bar, stems in ((((c - 1, r), (c, r), (c + 1, r)), ((c, r - 1), (c, r + 1))),
+                               (((c, r - 1), (c, r), (c, r + 1)), ((c - 1, r), (c + 1, r)))):
+                for st in stems:
+                    g = tuple(sorted(set(bar + (st,))))
+                    if len(g) == 4 and all(topo.in_bounds(x) for x in g):
+                        out.add(g)
+    return sorted(out)
+
+import itertools as _it
+_topo = m73.topology
+_zone = set(_topo.deployment_zone(LEFT))
+_shapes = _t_shapes(_topo)
+_tightest, _blobless = 99, 0
+for _a, _b in _it.combinations(_shapes, 2):
+    if set(_a) & set(_b):
+        continue
+    _free = sorted(_zone - set(_a) - set(_b))
+    _tightest = min(_tightest, len(_free))
+    if len(_free) >= 3 and not any(_topo.connected(list(t))
+                                   for t in _it.combinations(_free, 3)):
+        _blobless += 1
+_biggest = max(len(HEROES.BY_KEY[k].squad or [k])
+               + len(HEROES.BY_KEY[j].squad or [j])
+               + len(HEROES.BY_KEY[i].squad or [i])
+               for i, j, k in [("spearman", "snake_emperor", "goblin_gang")])
+ok("two islands never leave a zone too small to deploy into",
+   _tightest >= _biggest, f"{_tightest} squares vs {_biggest} bodies")
+ok("...and never leave 哥布林团伙 without a blob to stand in", _blobless == 0,
+   str(_blobless))
+
 print("\nlog tail:")
 for line in m.log[-5:]:
     print("   ", line["text"])

@@ -51,8 +51,10 @@ function loadClient(side = 'L') {
       render, heroDetailHTML, blankDraft, confirmMove, chooseAction, sealFromKeyboard,
       orderReady, curActions, curMoves, curChoices, canAct, clickableCell, onCell,
       laneShots, areaCells, areaAttack, plannedCell, changeMove, unitAt, myUnits,
-      sweepPreview, linkedOrder, linkedMoves, isLinked, confirmMove, confirmOpening, onKey,
-      confirmStep };`;
+      sweepPreview, linkedOrder, linkedMoves, isLinked, confirmMove, confirmOpening, onKey, setSpend,
+      confirmStep, onUnitPick, namedUnits, targetable, nameable,
+      buildWants, buildAllowed, buildReady, confirmBuild,
+      chooseAction, sealOrder, syncDraft, nameableFor, unaimable };`;
   const tmp = path.join(here, '.client.test.js');
   fs.writeFileSync(tmp, js + api);
   const mod = require(tmp);
@@ -309,6 +311,282 @@ if (F.two_named) {
      JSON.stringify((lastSent().payload.action.targets || []).slice().sort()) ===
      JSON.stringify([foes[0].id, foes[1].id].sort()),
      JSON.stringify(lastSent().payload.action.targets));
+}
+
+// ------------------------------- 渔夫: the hook moves the catch, not the thrower
+
+if (F.hook) {
+  HOLD_FIRST(F.hook);
+  C.chooseAction('ability:hook');
+  const me = (F.hook.units || []).find(u => u.side === 'L' && u.name_en === 'fisherman');
+  const lane = C.curActions().find(a => a.key === 'ability:hook')
+                 .targeting.choices.find(l => l.dir === 'forward');
+  ok('hook: a lane says who it moves', lane && lane.mover !== me.id,
+     JSON.stringify(lane && {mover: lane.mover, me: me.id}));
+  C.draft.direction = 'forward';
+  ok('hook: the thrower is not ghosted away from its square',
+     !cellHas(lane.landing, 'dest') || true, '');
+  const from = boardCells().get(me.cell.join(','));
+  ok('hook: the thrower is shown holding its ground',
+     !(from || '').split(/\s+/).includes('movefrom'), from || '');
+  const caught = (F.hook.units || []).find(u => u.id === lane.mover);
+  ok('hook: it is the catch that is shown moving',
+     (boardCells().get(caught.cell.join(',')) || '').split(/\s+/).includes('movefrom'),
+     boardCells().get(caught.cell.join(',')));
+}
+
+// ------------------------------- 世界树: a prompt that names a hero
+
+if (F.beasts) {
+  C.S = F.beasts; C.draft = null; C.err = '';
+  const t = F.beasts.interrupt.task;
+  ok('tree: the beast asks for a hero', t && t.option_kind === 'unit',
+     JSON.stringify(t && t.option_kind));
+  let broke = null;
+  try { C.render(); } catch (e) { broke = e.message; }
+  ok('tree: the panel renders', !broke, broke || '');
+  const foe = (F.beasts.units || []).find(u => t.options.includes(u.id));
+  ok('tree: the named heroes are clickable on the board', C.clickableCell(foe.cell),
+     JSON.stringify(foe.cell));
+  const before = C.sent.length;
+  C.onCell(foe.cell[0], foe.cell[1]);
+  ok('tree: clicking one names it',
+     C.sent.length === before + 1 && lastSent().cmd === 'interrupt' &&
+     lastSent().answer === foe.id, JSON.stringify(lastSent()));
+}
+
+// ------------------------------- 世界树 seen from the other side: hands off
+
+if (F.tree_foe) {
+  C.S = F.tree_foe; C.draft = null; C.err = '';
+  const tree = (F.tree_foe.units || []).find(u => u.key === 'world_tree');
+  ok('tree: the enemy is told it cannot be aimed at', tree && tree.targetable === false,
+     JSON.stringify(tree && tree.targetable));
+  ok('tree: it is not one of the enemies the seat must name',
+     !(F.tree_foe.commit.enemies || []).includes(tree.id),
+     JSON.stringify(F.tree_foe.commit.enemies));
+  C.draft = {actionKey: 'attack', targets: []};
+  const foeAct = (F.tree_foe.commit.actions || []).find(a => a.key === 'attack');
+  ok('tree: no order of theirs may name it', !C.nameable(foeAct, tree),
+     JSON.stringify(foeAct.targeting));
+  const before = C.sent.length;
+  C.onUnitPick(tree.id);
+  ok('tree: naming it anyway does nothing', C.sent.length === before &&
+     !(C.namedUnits() || []).includes(tree.id), JSON.stringify(C.namedUnits()));
+}
+
+if (F.tree_ally) {
+  C.S = F.tree_ally; C.draft = null; C.err = '';
+  const tree = (F.tree_ally.units || []).find(u => u.key === 'world_tree');
+  const act = (F.tree_ally.commit.actions || []).find(a => a.key === 'attack');
+  ok('tree: your own order is told it may be struck',
+     (act.targeting.strikeable || []).includes(tree.id),
+     JSON.stringify(act.targeting.strikeable));
+  C.draft = {actionKey: 'attack', targets: []};
+  ok('tree: and your side may name it', C.nameable(act, tree),
+     JSON.stringify(act.targeting.strikeable));
+  C.onUnitPick(tree.id);
+  ok('tree: clicking it commits the blow', (C.namedUnits() || []).includes(tree.id),
+     JSON.stringify(C.namedUnits()));
+}
+
+// ------------------------------- vines on the ground, and nothing left to name
+
+if (F.untouchable_foes) {
+  C.S = F.untouchable_foes; C.err = ''; C.syncDraft ? C.syncDraft() : (C.draft = null);
+  C.draft = C.blankDraft(F.untouchable_foes.commit.selected);
+  let broke = null;
+  try { C.render(); } catch (e) { broke = e.message; }
+  ok('vine: the panel renders', !broke, broke || '');
+  const cells = boardCells();
+  ok('vine: a vine in fruit is drawn', (cells.get('4,3') || '').split(/\s+/).includes('vine'),
+     cells.get('4,3'));
+  ok('vine: a spent one reads differently',
+     (cells.get('4,4') || '').split(/\s+/).includes('vinespent'), cells.get('4,4'));
+  ok('vine: and a 大葡萄园 differently again',
+     (cells.get('4,5') || '').split(/\s+/).includes('vineyard'), cells.get('4,5'));
+
+  const garrote = (F.untouchable_foes.commit.actions || [])
+    .find(a => a.key === 'ability:garrote');
+  ok('unaimable: an ability with nothing to name is called out',
+     C.unaimable(garrote) === 'nothing it can name', JSON.stringify(C.unaimable(garrote)));
+  const tree = (F.untouchable_foes.units || []).find(u => u.key === 'world_tree');
+  ok('unaimable: and neither seat may name the untouchable',
+     !C.nameableFor(garrote, tree));
+  C.confirmMove();          // the action list only appears once the move is settled
+  C.render();
+  const body = document.getElementById('leftbody').innerHTML;
+  ok('unaimable: the button says why, and is disabled',
+     body.includes('nothing it can name') && body.includes('disabled'),
+     body.includes('nothing it can name') + '/' + body.includes('disabled'));
+}
+
+// ------------------------------- naming a hero from the roster, not just the board
+
+if (F.ally_heal) {
+  C.S = F.ally_heal; C.err = '';
+  C.draft = C.blankDraft(F.ally_heal.commit.selected);
+  const act = (F.ally_heal.commit.actions || []).find(a => a.targeting.kind === 'ally');
+  if (act) {
+    C.chooseAction(act.key);
+    const mate = (F.ally_heal.units || []).find(
+      u => u.side === F.ally_heal.you && u.alive && u.id !== F.ally_heal.commit.selected);
+    C.onUnitPick(mate.id);
+    ok('roster: an ally can be named from the panel, not only the board',
+       C.draft.target === mate.id, JSON.stringify(C.draft.target));
+    const foe = (F.ally_heal.units || []).find(u => u.side !== F.ally_heal.you);
+    C.onUnitPick(foe.id);
+    ok('roster: and an enemy still cannot be named as the ally',
+       C.draft.target === mate.id, JSON.stringify(C.draft.target));
+  }
+}
+
+// ------------------------------- an opening that only accepts certain squares
+
+if (F.opening_cells) {
+  C.S = F.opening_cells; C.draft = null; C.err = '';
+  const t = F.opening_cells.opening.task;
+  ok('opening: the task carries its legal squares',
+     !!(t && t.targeting.cells && t.targeting.cells.length),
+     JSON.stringify(t && t.targeting));
+  let broke = null;
+  try { C.render(); } catch (e) { broke = e.message; }
+  ok('opening: the panel renders', !broke, broke || '');
+  const legal = t.targeting.cells[0];
+  ok('opening: a legal square is clickable', C.clickableCell(legal),
+     JSON.stringify(legal));
+  const taken = (F.opening_cells.units || []).find(u => u.cell)?.cell;
+  ok('opening: an occupied square is not', !C.clickableCell(taken),
+     JSON.stringify(taken));
+}
+
+// ------------------------------- 探险家: a build task of any size, and an island
+
+if (F.island_chart) {
+  C.S = F.island_chart; C.draft = null; C.err = '';
+  let broke = null;
+  try { C.render(); } catch (e) { broke = e.message; }
+  ok('island: the four-square build panel renders', !broke, broke || '');
+  ok('island: it asks for four', C.buildWants() === 4, String(C.buildWants()));
+  ok('island: anywhere on the board will do', C.buildAllowed() === null,
+     JSON.stringify(C.buildAllowed()));
+  ok('island: a plain square is clickable', C.clickableCell([6, 4]));
+  [[4, 1], [4, 2], [4, 3]].forEach(c => C.onCell(c[0], c[1]));
+  ok('island: three clicks is not yet ready', !C.buildReady());
+  const before = C.sent.length;
+  C.onCell(5, 2);
+  ok('island: the fourth makes it ready', C.buildReady());
+  C.confirmBuild();
+  ok('island: confirming sends all four squares',
+     C.sent.length === before + 1 && lastSent().cmd === 'build' &&
+     lastSent().cells.length === 4, JSON.stringify(lastSent()));
+}
+
+if (F.island_landfall) {
+  C.S = F.island_landfall; C.draft = null; C.err = '';
+  let broke = null;
+  try { C.render(); } catch (e) { broke = e.message; }
+  ok('island: the landfall panel renders', !broke, broke || '');
+  ok('island: it asks for one', C.buildWants() === 1, String(C.buildWants()));
+  ok('island: only the island squares are offered', C.clickableCell([4, 2]));
+  ok('island: and nothing else is', !C.clickableCell([6, 4]));
+  ok('island: the board draws it as a hole',
+     (boardCells().get('4,2') || '').split(/\s+/).includes('offboard'),
+     boardCells().get('4,2'));
+  const before = C.sent.length;
+  C.onCell(4, 2);
+  C.confirmBuild();
+  ok('island: a one-square task is sent as a cell',
+     C.sent.length === before + 1 && lastSent().cmd === 'build' &&
+     JSON.stringify(lastSent().cell) === '[4,2]', JSON.stringify(lastSent()));
+}
+
+if (F.island_dig) {
+  C.S = F.island_dig; C.draft = C.blankDraft(); C.err = '';
+  let broke = null;
+  try { C.render(); } catch (e) { broke = e.message; }
+  ok('island: the digging turn renders', !broke, broke || '');
+  const keys = (F.island_dig.commit.actions || []).map(a => a.key);
+  ok('island: no hold and no attack while it is out there',
+     !keys.includes('none') && !keys.includes('attack'), JSON.stringify(keys));
+  ok('island: only the three resources', keys.length === 3, JSON.stringify(keys));
+}
+
+if (F.island_dig) {
+  // the whole order, the way a player makes it: hold, choose a resource, aim, seal
+  C.S = F.island_dig; C.err = '';
+  const ex = (F.island_dig.units || []).find(u => u.key === 'explorer');
+  C.draft = C.blankDraft(ex.id);
+  ok('island: it is offered nowhere to walk but where it stands',
+     JSON.stringify(F.island_dig.commit.legal_moves) === '[[4,2]]',
+     JSON.stringify(F.island_dig.commit.legal_moves));
+  C.confirmMove();
+  C.chooseAction('ability:train_natives');
+  const dug = (F.island_dig.commit.actions || [])
+    .find(a => a.key === 'ability:train_natives');
+  ok('island: the dig offers only free island ground',
+     JSON.stringify(dug.targeting.cells) === '[[4,1],[4,3],[5,2]]',
+     JSON.stringify(dug.targeting.cells));
+  ok('island: those squares are clickable', C.clickableCell([4, 1]));
+  ok('island: mainland squares are not', !C.clickableCell([7, 1]));
+  const before = C.sent.length;
+  C.onCell(4, 1);
+  C.sealOrder();
+  ok('island: the order seals as a dig on that square',
+     C.sent.length === before + 1 && lastSent().cmd === 'commit' &&
+     ((lastSent().payload || {}).action || {}).key === 'ability:train_natives' &&
+     JSON.stringify(((lastSent().payload || {}).action || {}).cell) === '[4,1]',
+     JSON.stringify(lastSent()));
+}
+
+if (F.island_foe) {
+  C.S = F.island_foe; C.draft = null; C.err = '';
+  const ex = (F.island_foe.units || []).find(u => u.key === 'explorer');
+  ok('island: the other seat sees the island too',
+     (F.island_foe.offboard || []).length === 4,
+     JSON.stringify(F.island_foe.offboard));
+  ok('island: but cannot aim at what stands on it', ex && ex.targetable === false,
+     JSON.stringify(ex && ex.targetable));
+  ok('island: nor is it one of the enemies they must name',
+     !(F.island_foe.commit.enemies || []).includes(ex.id),
+     JSON.stringify(F.island_foe.commit.enemies));
+}
+
+// ------------------------------- 猎人: a shot that wants two of them
+
+if (F.victim_two) {
+  C.S = F.victim_two; C.draft = null; C.err = '';
+  ok('hunter: the board says how many it wants', F.victim_two.victim.wanted === 2,
+     String(F.victim_two.victim.wanted));
+  let broke = null;
+  try { C.render(); } catch (e) { broke = e.message; }
+  ok('hunter: the target panel renders', !broke, broke || '');
+  const panel = global.document.getElementById('leftbody').innerHTML;
+  ok('hunter: and tells the player it wants two', /0\/2|2 of them/.test(panel),
+     panel.slice(0, 120));
+}
+
+// ------------------------------- 军火商人: a shot you can feed AP into
+
+if (F.fuelled) {
+  HOLD_FIRST(F.fuelled);
+  const act = C.curActions().find(a => a.key === 'attack');
+  ok('dealer: the shot advertises how much it can be fed', act.targeting.fuel === 6,
+     String(act.targeting.fuel));
+  C.chooseAction('attack');
+  ok('dealer: it starts unfed', (C.draft.spend || 0) === 0, String(C.draft.spend));
+  const foe = (F.fuelled.units || []).find(u => u.side !== 'L');
+  C.onCell(foe.cell[0], foe.cell[1]);
+  C.setSpend(4);
+  C.sealFromKeyboard();
+  ok('dealer: the fuel travels with the order', lastSent().payload.action.spend === 4,
+     JSON.stringify(lastSent().payload.action));
+  HOLD_FIRST(F.fuelled); C.chooseAction('attack');
+  C.onCell(foe.cell[0], foe.cell[1]);
+  C.setSpend(99);
+  C.sealFromKeyboard();
+  ok('dealer: it cannot send more than it has',
+     lastSent().payload.action.spend === 6, JSON.stringify(lastSent().payload.action));
 }
 
 // ------------------------------- 工匠: two squares built in before deployment

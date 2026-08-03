@@ -14,8 +14,9 @@ import attacks as ATK
 import damage as DMG
 import events as EV
 import heroes as HEROES
-from board import Board, Minefield
-from entities import Entity, Modifier, UNTIL_OWNER_NEXT_TURN, UNTIL_TURN_END
+from board import Board, Minefield, Vineyard
+from entities import (Entity, Modifier, UNTIL_OWNER_NEXT_TURN, UNTIL_ROUND_END,
+                      UNTIL_TURN_END)
 from topology import LEFT, RIGHT, Topology, other_side
 
 
@@ -61,12 +62,17 @@ class Match:
         self.mode = mode  # "pvp" or "self" (solo hotseat: normal attacks auto-aim)
         self.topology = Topology()
         self.board = Board(self.topology)
+        # Sub-maps built before deployment, by side: {"cells": [...], "stand": cell}.
+        self.islands = {}
+        # What to do when the interrupt queue drains. None means a resolution is in
+        # flight and waiting for it, which is the ordinary case.
+        self.interrupt_resume = None
         self.bus = EV.EventBus(self)
         self.global_rules = [DMG.SharedPool(), DMG.AbilityImmunity(), DMG.Blessing(),
                              DMG.OutgoingShift(),
                              DMG.Vulnerability(), DMG.FlatReduction(), DMG.CurseTrap(),
                              DMG.Poison(), DMG.HalvingRule(), DMG.Ledger(),
-                             DMG.Verdict(), Minefield()]
+                             DMG.Verdict(), Minefield(), Vineyard()]
         # Damage from the board itself, banked as it is triggered so a whole
         # exchange's worth lands in one instant (mines under two movers).
         self.pending_hazards = []
@@ -174,6 +180,15 @@ class Match:
             out.append(e)
         return out
 
+    def strikeable_allies(self, cells, side):
+        """Friends in these squares that may be picked as a target on purpose. Only
+        世界树 offers itself this way, and no blow ever lands — the striking is what
+        counts. Nothing else in the game has friendly fire."""
+        cells = {tuple(c) for c in cells}
+        return [e for e in self.living(side)
+                if (e.cells & cells)
+                and any(getattr(p, "struck_by_allies", False) for p in e.passives)]
+
     def occupant(self, cell):
         for e in self.entities:
             if e.alive and e.flags["blocks_movement"] and e.occupies(cell):
@@ -183,6 +198,15 @@ class Match:
     def unacted(self, side):
         return [e for e in self.living(side)
                 if not e.has_acted and e.flags["takes_turns"] and not self.frozen(e)]
+
+    def on_map(self, side=None):
+        """Living units standing on the board proper. Anything on a sub-map (探险家's
+        island, until round four) is out of the game entirely, so no hero skill of
+        either side reaches it — not a blessing of its own, nor a curse of theirs.
+        A hero with no square at all (鬼魂 between bodies) is still on the map.
+        """
+        return [e for e in self.living(side)
+                if not e.cells or self.topology.region(e.cell) is None]
 
     def root(self, e):
         """Take the movement out of this unit's next turn. It still fights — only
@@ -364,6 +388,15 @@ class Match:
         self.log_line("The board is being made ready.")
         self.bump()
 
+    def build_targeting(self, side, ab):
+        """The build task's targeting, plus any option list only the engine can work
+        out (探险家's island squares). Mirrors `ability_targeting` for the turn."""
+        t = dict(ab.targeting)
+        fn = getattr(ab, "build_cells", None)
+        if fn is not None:
+            t["cells"] = [list(c) for c in fn(self, side)]
+        return t
+
     def build_ability(self, side):
         """The build task this side owes, as (hero key, ability), or (None, None)."""
         pend = self.build["pending"][side] if self.build else []
@@ -404,15 +437,32 @@ class Match:
 
     # -------------------------------------------------------------- setup
 
+    def board_places(self, how):
+        """True if anybody drafted a card the board itself puts down this way
+        (世界树 at the middle). Lets a build-time choice know what ground is
+        already spoken for, before any of it is an entity."""
+        return any(HEROES.BY_KEY[k].deploys == how
+                   for s in (LEFT, RIGHT) for k in self.drafted[s])
+
     def deploy_bodies(self, side):
         """Every body the side must put on the board. A normal card contributes
         itself; a squad card (哥布林团伙) contributes its members, duplicates and
-        all — so the force is 4 cards but can be 6 units."""
+        all — so the force is 4 cards but can be 6 units. A card the board places
+        itself (世界树) contributes nothing: its owner never positions it."""
         out = []
         for k in self.drafted[side]:
             hero = HEROES.BY_KEY[k]
+            if hero.deploys:
+                continue
             out.extend(hero.squad or [k])
         return out
+
+    def spawn(self, hero, side, cell):
+        """Put a new body on the board mid-match (洛基 arriving, and the board's own
+        placements at the start). Returns the entity."""
+        e = Entity(next(self._ids), hero, side, tuple(cell) if cell else None)
+        self.entities.append(e)
+        return e
 
     def bodies_needed(self, side):
         return len(self.deploy_bodies(side))
@@ -484,6 +534,16 @@ class Match:
                 hero = HEROES.BY_KEY[p["key"]]
                 e = Entity(next(self._ids), hero, side, tuple(p["cell"]))
                 self.entities.append(e)
+        for side in (LEFT, RIGHT):
+            for k in self.drafted[side]:
+                hero = HEROES.BY_KEY[k]
+                if hero.deploys == "centre":
+                    mid = ((self.topology.cols + 1) // 2, (self.topology.rows + 1) // 2)
+                    self.spawn(hero, side, mid)
+                elif hero.deploys == "island":
+                    isl = self.islands.get(side)
+                    if isl:
+                        self.spawn(hero, side, isl["stand"])
         self.log_line("Forces deployed. The board is live.")
         self.bus.emit(EV.MATCH_START, {})
         self.begin_opening()
@@ -558,13 +618,17 @@ class Match:
             cell = params.get("cell")
             if not cell or not self.topology.in_bounds(tuple(cell)):
                 return "Choose a cell on the board."
+            # A hero only ever reaches squares on its own map: 潜水者 cannot bury a
+            # charge on an island, and 探险家 digs nowhere else.
+            if e.cells and not self.topology.same_region(tuple(cell), e.cell):
+                return "That square is not part of your map."
             legal = t.get("cells")
             if legal is not None and list(cell) not in legal:
                 return "Not a square this can be used on."
 
         elif kind == "two_units":
             a, b = params.get("first"), params.get("second")
-            live = {x.id for x in self.living() if x.cells}
+            live = {x.id for x in self.living() if x.cells and x.flags["targetable"]}
             if a not in live or b not in live or a == b:
                 return "Choose two different units, both on the board."
 
@@ -577,6 +641,10 @@ class Match:
             want_ally = kind == "ally"
             tt = self.entity(params.get("target"))
             ok = tt is not None and tt.alive and ((tt.side == e.side) == want_ally)
+            # Something the board says cannot be touched (世界树) is no target for
+            # anybody's ability, however it is aimed.
+            if ok and not want_ally and not tt.flags["targetable"]:
+                ok = False
             if not ok:
                 return "Choose a living ally." if want_ally else "Choose a living enemy."
             allowed = t.get("options")
@@ -629,6 +697,11 @@ class Match:
         self.detonate_due()
         if self.check_victory():
             return
+        if self.interrupts:
+            # A round-start hook wants an answer before anybody acts (探险家's
+            # island arriving with one of every resource).
+            self.pause_for_interrupts()
+            return
         self.start_exchange()
 
     def detonate_due(self):
@@ -647,6 +720,8 @@ class Match:
 
     def end_round(self):
         self.bus.emit(EV.ROUND_END, {})
+        for e in self.entities:
+            e.expire_modifiers(UNTIL_ROUND_END, self.round)
         self.start_round()
 
     def start_exchange(self):
@@ -711,6 +786,10 @@ class Match:
             return "Not one of your heroes."
         if e.has_acted:
             return "That hero has already acted this round."
+        if not e.flags["takes_turns"]:
+            # Scenery (世界树) and anything still off the board (探险家's 土著 before
+            # its island lands) never spends one of your exchanges.
+            return f"{e.name} does not take turns."
         if self.frozen(e):
             return f"{e.name} cannot act for another {self.frozen_rounds_left(e)} round(s)."
         # Tentative: picking a hero is reversible — you can switch to another (or
@@ -878,6 +957,20 @@ class Match:
             frontier = nxt
         return out
 
+    def sole_actions(self, e):
+        """Ability keys that are the *only* thing this hero may do right now, or
+        None for the ordinary case. A passive answers for its own hero (探险家 while
+        its island is still off the board does nothing but dig), so neither holding
+        nor attacking is offered."""
+        for p in e.passives:
+            fn = getattr(p, "sole_actions", None)
+            if fn is None:
+                continue
+            keys = fn(self, e)
+            if keys:
+                return {"ability:" + k for k in keys}
+        return None
+
     def action_menu(self, e):
         """What this hero could commit to, given its AP right now."""
         if not e.alive:
@@ -889,8 +982,8 @@ class Match:
             out.append(mode.menu_entry(self, e))
         uses = e.vars.get("ability_uses", {})
         for ab in e.abilities:
-            if getattr(ab, "opening", False):
-                continue  # opening abilities fire once at game start, not on a turn
+            if getattr(ab, "opening", False) or getattr(ab, "prebuild", False):
+                continue  # these fire before the match, not on a turn
             if ab.use_limit is not None and uses.get(ab.key, 0) >= ab.use_limit:
                 continue  # a spent limited ability disappears from the menu
             if not ab.available(self, e):
@@ -910,6 +1003,9 @@ class Match:
                     "text": ab.blurb,
                 }
             )
+        only = self.sole_actions(e)
+        if only is not None:
+            out = [x for x in out if x["key"] in only]
         return out
 
     def commit(self, side, payload):
@@ -995,7 +1091,9 @@ class Match:
         _zone, dictated = self.move_zone(e, pending)
         if dest != e.cell or dictated:
             if dest not in [tuple(c) for c in self.legal_moves(e, pending)]:
-                return None, ("That square is not beside the rest of you."
+                # A dictated zone belongs to whichever passive published it, so the
+                # refusal names the squares on offer rather than guessing why.
+                return None, ("That is not one of the squares this hero may hold."
                               if dictated else "That cell is not an open adjacent square.")
 
         action = payload.get("action") or {"key": "none"}
@@ -1069,7 +1167,8 @@ class Match:
         out — 冲撞's chargeable lanes, with landing square and who gets trampled."""
         t = dict(ab.targeting)
         if t.get("kind") == "two_units":
-            t["options"] = [e.id for e in self.living() if e.cells]
+            t["options"] = [e.id for e in self.living()
+                            if e.cells and e.flags["targetable"]]
         if hasattr(ab, "lanes"):
             t["choices"] = ab.lanes(self, e)
         if hasattr(ab, "shapes"):
@@ -1143,6 +1242,7 @@ class Match:
             (c + dc, r + dr)
             for dc in (-1, 0, 1) for dr in (-1, 0, 1)
             if (dc or dr) and self.topology.in_bounds((c + dc, r + dr))
+            and self.topology.same_region((c + dc, r + dr), cell)
         ]
 
     def shape_cells(self, origin, shape):
@@ -1617,10 +1717,13 @@ class Match:
         """Queue a decision for every hero about to fall to an attack or an active
         ability while somebody able to stop it is still standing. Returns True if
         anything is owed."""
+        # Anything already queued by the instant itself (世界树's beasts, 洛基
+        # arriving) holds the board up just as a save would, so this always ends by
+        # asking whether *anything* is owed rather than only about Popes.
         st = self.instant
         popes = self.savers()
         if st is None or not popes:
-            return False
+            return bool(self.interrupts)
         doomed = {}
         for ev, dealt in st["applied"]:
             if dealt <= 0 or ev.source is None:
@@ -1679,10 +1782,33 @@ class Match:
                 self.interrupts.insert(0, {
                     "kind": "pick", "key": "reward", "side": src.side, "source": src.id,
                     "options": list(self.REWARDS),
+                    "option_kind": "stat",
                     "name": "补偿 Recompense",
                     "text": f"{self.label(src)} was denied a kill. Choose what it gains, "
                             f"for the rest of the match.",
                 })
+        elif task["key"] == "beast":
+            tgt = self.entity(answer)
+            if tgt is not None and tgt.alive:
+                self.entity(task["tree"]).vars.setdefault("bitten", []).append(tgt.id)
+                self.log_line(f"{task['beast']} takes {self.label(tgt)} for {task['amount']}.")
+                DMG.apply_batch(self, [DMG.DamageEvent(
+                    source=self.entity(task["tree"]), target=tgt,
+                    amount=task["amount"], category=DMG.ABILITY)])
+        elif task["key"] == "loki":
+            hero = HEROES.BY_KEY[task["hero"]]
+            e = self.spawn(hero, side, tuple(answer))
+            self.log_line(f"{self.label(e)} steps out of the wreck.")
+            self.bus.emit(EV.MATCH_START, {"entity": e})
+        elif task["key"] == "dig":
+            owner = self.entity(task["explorer"])
+            cell = tuple(answer)
+            if owner is not None and self.occupant(cell) is None:
+                HEROES.apply_resource(self, owner, task["resource"], cell)
+            # Whatever just took that square is no longer on offer to the rest.
+            for t in self.interrupts:
+                if t.get("key") == "dig":
+                    t["options"] = [c for c in t["options"] if tuple(c) != cell]
         elif task["key"] == "reward":
             src = self.entity(task["source"])
             if src is not None:
@@ -1693,8 +1819,27 @@ class Match:
         if self.interrupts:
             return None
         self.phase = COMMIT              # transient; the instant moves it on
+        resume, self.interrupt_resume = self.interrupt_resume, None
+        if resume is not None:
+            # The queue was raised outside a resolution (探险家's island arriving at
+            # the top of a round), so there is no instant to finish — pick the round
+            # back up where it was interrupted.
+            return self.resume_round_start()
         if not self.finish_instant():
             self.advance_resolution()
+        return None
+
+    def pause_for_interrupts(self):
+        """Hold the board on the queue that was just raised, with no resolution
+        behind it. The caller must return straight after."""
+        self.interrupt_resume = "round_start"
+        self.phase = INTERRUPT
+        self.bump()
+
+    def resume_round_start(self):
+        if self.check_victory():
+            return None
+        self.start_exchange()
         return None
 
     def sweep_deaths(self):

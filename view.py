@@ -155,6 +155,10 @@ def unit_payload(m, e, live, viewer=None):
         "move": e.move_allowance,
         "shots": e.hero.attacks_per_turn,
         "attack": e.hero.attack,
+        # False = the other side may not aim anything at it (世界树, a bodiless 鬼魂).
+        "targetable": e.flags["targetable"],
+        # False = it never spends one of your exchanges (世界树, a sealed 土著).
+        "acts": e.flags["takes_turns"],
     }
 
 
@@ -181,6 +185,9 @@ def state_for(m, side):
         "tiles": m.board.serialise(side),
         # Doors are built into the board before anyone deploys, so both seats see
         # them. Sent with the side that may walk through, for the client to mark.
+        # Squares cut out of the board into a sub-map of their own (探险家's 岛屿).
+        # Both seats see them: the island is public from the moment it is charted.
+        "offboard": [list(c) for c in m.topology.regions],
         "doors": [{"cells": [list(a), list(b)], "owner": owner}
                   for a, b, owner in m.topology.links],
         "units": units,
@@ -223,7 +230,8 @@ def state_for(m, side):
         out["build"] = {
             "task": None if ab is None else {
                 "hero": hero.name, "hero_en": hero.name_en,
-                "ability": ab.name, "text": ab.blurb, "targeting": ab.targeting,
+                "ability": ab.name, "text": ab.blurb,
+                "targeting": m.build_targeting(side, ab),
             },
             "waiting_on_opponent": ab is None and bool(m.build),
         }
@@ -235,8 +243,12 @@ def state_for(m, side):
         if pend:
             e = m.entity(pend[0]["entity"])
             ab = next(a for a in e.abilities if a.key == pend[0]["ability_key"])
+            # The enriched targeting, not the bare class attribute: the validator
+            # uses `ability_targeting`, so anything less and the client cannot know
+            # which squares are legal (鸟嘴医生's plague, 潜水者's charge).
             task = {"entity": e.id, "hero": e.name, "hero_en": e.name_en,
-                    "ability": ab.name, "text": ab.blurb, "targeting": ab.targeting}
+                    "ability": ab.name, "text": ab.blurb,
+                    "targeting": m.ability_targeting(e, ab)}
         out["opening"] = {
             "task": task,
             "waiting_on_opponent": (not pend) and bool(m.opening["pending"][foe]),
@@ -256,7 +268,7 @@ def state_for(m, side):
             e = m.entity(eid)
             c["legal_moves"] = m.legal_moves(e)
             c["actions"] = m.action_menu(e)
-            c["enemies"] = [x.id for x in m.living(foe)]
+            c["enemies"] = [x.id for x in m.living(foe) if x.flags["targetable"]]
             c["ap"] = e.ap
             c["choices"] = m.turn_choices(e)
             # Picking up a goblin picks up the gang: the client needs every
