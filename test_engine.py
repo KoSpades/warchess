@@ -7,6 +7,7 @@ just the target's own cell (1 cell) and fire from close range, so cell-count and
 range tweaks can't break these either.
 """
 
+import collections
 import damage as DMG
 import view
 from heroes import Sweep
@@ -1500,7 +1501,7 @@ ok("the replacement curse freezes whoever springs it",
 ok("and the cycle can begin again",
    "ability:recurse" in [a["key"] for a in m.action_menu(doll)])
 
-# 48 — 大力士: seize an adjacent enemy and hurl it to the square opposite
+# 48 — 大力士: take hold on your turn, throw once the exchange has settled
 def strong_arena():
     m = arena([("strongman", (3, 3)), ("cannoneer", (3, 1))],
               [("gatekeeper", (7, 3)), ("dummy", (7, 1))])
@@ -1508,57 +1509,104 @@ def strong_arena():
     return m, st, unit(m, RIGHT, "gatekeeper"), unit(m, RIGHT, "dummy")
 
 slam = lambda t: {"destination": None, "action": {"key": "ability:slam", "target": t.id}}
+SLAM = HEROES.Slam.DAMAGE       # read, not repeated: this number gets rebalanced
+REACH = HEROES.Slam.REACH
 
-# straight in front: thrown straight behind
+def slam_task(m, side=LEFT):
+    return next((t for t in m.followups[side] if t["key"] == HEROES.Slam.THROW), None)
+
+# the grab itself does nothing at all
 m, st, gk, d = strong_arena()
 gk.set_cell((4, 3))                                  # east of the strongman at C3
-before = gk.hp
+before, where = gk.hp, gk.cell
 turn(m, st.id, slam(gk), d.id, hold)
-SLAM = HEROES.Slam.DAMAGE       # read, not repeated: this number gets rebalanced
-ok("the victim takes the slam", before - gk.hp == SLAM, f"took {before - gk.hp}")
-ok("and lands on the square opposite, through the thrower", gk.cell == (2, 3), str(gk.cell))
+ok("the grab takes nothing off", gk.hp == before, f"took {before - gk.hp}")
+ok("...and moves nobody yet", gk.cell == where, str(gk.cell))
+ok("the throw is asked for once the exchange has settled",
+   m.phase == "resolved" and slam_task(m) is not None, m.phase)
 
-# on the diagonal: reflected through the thrower just the same
+task = slam_task(m)
+ok("...offering every square within reach of where it ended up, and only free ones",
+   all(m.topology.distance(tuple(c), st.cell) <= REACH for c in task["options"])
+   and all(m.occupant(tuple(c)) in (None, gk) for c in task["options"]),
+   str(len(task["options"])))
+ok("...including one a full three squares away",
+   any(m.topology.distance(tuple(c), st.cell) == REACH for c in task["options"]))
+far = max(task["options"], key=lambda c: m.topology.distance(tuple(c), st.cell))
+ok("the throw is accepted", m.choose_followup(LEFT, far) is None)
+ok("...and lands the enemy where you put it", gk.cell == tuple(far), str(gk.cell))
+ok("...for its damage", before - gk.hp == SLAM, f"took {before - gk.hp}")
+
+# one of your own may be seized, and takes nothing for it
 m, st, gk, d = strong_arena()
-gk.set_cell((4, 2))                                  # north-east of C3
-turn(m, st.id, slam(gk), d.id, hold)
-ok("a diagonal grab is reflected too", gk.cell == (2, 4), str(gk.cell))
+can = unit(m, LEFT, "cannoneer")
+can.set_cell((3, 2))                                 # right beside the strongman
+hp0 = can.hp
+turn(m, st.id, slam(can), d.id, hold)
+task = slam_task(m)
+ok("it may take hold of one of its own", task is not None)
+m.choose_followup(LEFT, task["options"][-1])
+ok("...and sets it down unhurt", can.hp == hp0, f"took {hp0 - can.hp}")
 
 # two squares away is out of reach
 m, st, gk, d = strong_arena()
 gk.set_cell((5, 3))
 m.select_hero(LEFT, st.id)
 ok("it cannot reach past the squares around it", m.commit(LEFT, slam(gk)) is not None)
-ok("...and that enemy is not offered",
+ok("...and that hero is not offered",
    gk.id not in m.ability_targeting(st, st.abilities[0])["options"])
 
-# the landing square must be clear
-m, st, gk, d = strong_arena()
-gk.set_cell((4, 3)); d.set_cell((2, 3))              # somebody already stands behind
-m.select_hero(LEFT, st.id)
-ok("a blocked landing square forbids the throw", m.commit(LEFT, slam(gk)) is not None)
-ok("...and it is not offered either",
-   gk.id not in m.ability_targeting(st, st.abilities[0])["options"])
-
-# nor off the board
-m = arena([("strongman", (1, 1)), ("cannoneer", (3, 1))], [("gatekeeper", (7, 3)), ("dummy", (7, 1))])
-st = unit(m, LEFT, "strongman"); st.ap = st.max_ap
-gk = unit(m, RIGHT, "gatekeeper"); gk.set_cell((2, 1))
-m.select_hero(LEFT, st.id)
-ok("it cannot throw somebody off the board", m.commit(LEFT, slam(gk)) is not None)
-
-# the throw lands after everything else resolves: the victim still gets its swing
-# in, fired from where it was standing when the exchange began
+# the grip holds wherever the target walks off to
 m, st, gk, d = strong_arena()
 gk.set_cell((4, 3))
-before_st, before_gk = st.hp, gk.hp
+turn(m, st.id, slam(gk), gk.id, {"destination": [5, 3], "action": {"key": "none"}})
+ok("walking away does not shake the grip", gk.cell == (5, 3) and slam_task(m) is not None,
+   f"{gk.cell} {slam_task(m) is not None}")
+task = slam_task(m)
+ok("...and the reach is measured from the thrower, not the caught",
+   all(m.topology.distance(tuple(c), st.cell) <= REACH for c in task["options"]))
+m.choose_followup(LEFT, task["options"][0])
+ok("...so it is still thrown", gk.cell == tuple(task["options"][0]), str(gk.cell))
+
+# a death between the grab and the throw ends it
+m, st, gk, d = strong_arena()
+gk.set_cell((4, 3)); gk.hp = 1
 turn(m, st.id, slam(gk),
-     gk.id, {"destination": None, "action": {"key": "attack", "shots": [[[3, 3]]]}})
-ok("the victim's own attack still lands, from where it stood",
-   before_st - st.hp == gk.atk, f"大力士 took {before_st - st.hp}")
-ok("...and it is thrown all the same",
-   before_gk - gk.hp == HEROES.Slam.DAMAGE and gk.cell == (2, 3),
-   f"took {before_gk - gk.hp}, at {gk.cell}")
+     d.id, {"destination": None, "action": {"key": "none"}})
+DMG.apply_batch(m, [DMG.DamageEvent(source=None, target=gk, amount=9,
+                                    category=DMG.ABILITY)])
+ok("a target that dies first is simply let go", not gk.alive)
+
+# the throw lands after the exchange, but 教皇 still gets to step in front of it
+m = arena([("strongman", (3, 3)), ("cannoneer", (3, 1))],
+          [("pope", (7, 3)), ("dummy", (7, 1))])
+st = unit(m, LEFT, "strongman"); st.ap = st.max_ap
+pope, d = unit(m, RIGHT, "pope"), unit(m, RIGHT, "dummy")
+d.set_cell((4, 3)); d.hp = 2                         # the throw would finish it
+turn(m, st.id, slam(d), pope.id, hold)
+task = slam_task(m)
+m.choose_followup(LEFT, task["options"][0])
+ok("a killing throw stops the board for a save",
+   m.phase == "interrupt"
+   and any(t["key"] == "death_save" for t in m.interrupts), m.phase)
+m.choose_interrupt(RIGHT, True)
+guard = 0
+while m.phase == "interrupt" and m.interrupts and guard < 8:
+    guard += 1
+    t = m.interrupts[0]
+    m.choose_interrupt(t["side"], t["options"][0] if t.get("options") else True)
+ok("...and 教皇 saves it from a throw as from anything else", d.alive, f"{d.hp}")
+ok("...then the board carries on", m.phase == "commit", m.phase)
+
+# without one, it simply falls
+m = arena([("strongman", (3, 3)), ("cannoneer", (3, 1))],
+          [("gatekeeper", (7, 3)), ("dummy", (7, 1))])
+st = unit(m, LEFT, "strongman"); st.ap = st.max_ap
+gk, d = unit(m, RIGHT, "gatekeeper"), unit(m, RIGHT, "dummy")
+gk.set_cell((4, 3)); gk.hp = 2
+turn(m, st.id, slam(gk), d.id, hold)
+m.choose_followup(LEFT, slam_task(m)["options"][0])
+ok("with nobody to step in, the throw finishes it", not gk.alive)
 
 # 49 — 长老: one blow turned aside, and swifter until it is
 def elder_arena():
@@ -1882,35 +1930,42 @@ ok("...and both squares are cleared", not hd.cells and not tl.cells)
 m.check_victory()
 ok("it counted as one hero, so that is the match", m.phase == "gameover", m.phase)
 
-# the bite poisons, and poison ticks at the end of the round
+# the bite leaves venom, which slows the victim's next turn and then is done
 m, hd, tl, gate, d = snake_arena()
 gate.set_cell((4, 3))                                  # in reach of the head (rng 1)
-hp0 = gate.hp
+hp0, move0 = gate.hp, gate.move_allowance
 snake_turn(m, hd, tl, bite((3, 3), [[4, 3]]), stay((3, 4)), d.id, hold)
 ok("the bite lands", hp0 - gate.hp == 3, f"took {hp0 - gate.hp}")
-ok("...and leaves venom for two rounds", gate.vars.get("poison_rounds") == 2,
-   str(gate.vars.get("poison_rounds")))
-before = gate.hp
-r0 = m.round
-while m.round == r0:                                   # close the round out
-    left = [e.id for e in m.unacted(LEFT)]
-    right = [e.id for e in m.unacted(RIGHT)]
-    if left:
-        snake_turn(m, hd, tl, stay(hd.cell), stay(tl.cell),
-                   right[0] if right else None, hold)
-    else:
-        turn(m, None, None, right[0] if right else None, hold)
-ok("venom bites at the end of the round", before - gate.hp == 1, f"took {before - gate.hp}")
-ok("...and one dose is spent", gate.vars.get("poison_rounds") == 1,
-   str(gate.vars.get("poison_rounds")))
+ok("...and leaves venom", gate.vars.get("rooted_tag") == "venom",
+   str(gate.vars.get("rooted_tag")))
+ok("...which costs no health of its own", gate.hp == hp0 - 3, f"{gate.hp}")
 
-# only an unpoisoned hero can be poisoned — no refresh
+# it has not taken its turn yet this round, so that turn is the slowed one
+ok("the venom is already in force for the turn it has coming",
+   m.move_budget(gate) == move0 - 1, f"{move0} -> {m.move_budget(gate)}")
+ok("...without touching the stat itself — it is the walk that is short",
+   gate.move_allowance == move0, f"{gate.move_allowance}")
+before = gate.hp
+assert m.select_hero(RIGHT, gate.id) is None
+ok("...so its walk is a square shorter when it is picked up",
+   m.move_budget(gate) == move0 - 1, f"budget {m.move_budget(gate)}")
+m.commit(RIGHT, hold)
+for e in m.unacted(LEFT)[:1]:
+    m.select_hero(LEFT, e.id); m.commit(LEFT, hold)
+ok("venom takes nothing off in health", before == gate.hp, f"took {before - gate.hp}")
+ok("...and once that turn is over it is spent", m.move_budget(gate) == move0,
+   f"{m.move_budget(gate)}")
+ok("...leaving no mark behind", gate.vars.get("rooted_at") is None,
+   str(gate.vars.get("rooted_tag")))
+
+# only an unvenomed hero can be given a dose — no refresh
 m, hd, tl, gate, d = snake_arena()
 gate.set_cell((4, 3))
-gate.vars["poison_rounds"] = 1
+m.root(gate, squares=1, tag="venom")
+stamp0 = gate.vars["rooted_at"]
 snake_turn(m, hd, tl, bite((3, 3), [[4, 3]]), stay((3, 4)), d.id, hold)
-ok("a hero already poisoned takes no second dose", gate.vars.get("poison_rounds") == 1,
-   str(gate.vars.get("poison_rounds")))
+ok("a hero already envenomed takes no second dose",
+   gate.vars.get("rooted_at") == stamp0, str(gate.vars.get("rooted_at")))
 
 # the pincer: head and tail on the same victim, +1 on the tail's blow
 m, hd, tl, gate, d = snake_arena()
@@ -1954,22 +2009,13 @@ ok("the tail cannot act before the head",
    m.commit(LEFT, {"orders": [dict(stay((3, 4)), entity=tl.id),
                               dict(stay((3, 3)), entity=hd.id)]}) is not None)
 
-# venom is STATUS: 圣骑士's shield neither stops it nor is spent on it
+# the venom is not damage, so nothing that turns damage aside touches it
 m, hd, tl, pal, d = snake_arena(right=(("paladin", (7, 3)), ("dummy", (7, 1))))
 pal.set_cell((4, 3))
 snake_turn(m, hd, tl, bite((3, 3), [[4, 3]]), stay((3, 4)), d.id, hold)
 ok("the bite trips the holy shield", pal.vars.get("aegis_spent") is True)
-hp0 = pal.hp
-r0 = m.round
-while m.round == r0:
-    left = [e.id for e in m.unacted(LEFT)]
-    right = [e.id for e in m.unacted(RIGHT)]
-    if left:
-        snake_turn(m, hd, tl, stay(hd.cell), stay(tl.cell),
-                   right[0] if right else None, hold)
-    else:
-        turn(m, None, None, right[0] if right else None, hold)
-ok("but venom still bites through it", hp0 - pal.hp == 1, f"took {hp0 - pal.hp}")
+ok("...and the venom still takes hold behind it",
+   pal.vars.get("rooted_tag") == "venom", str(pal.vars.get("rooted_tag")))
 
 # 53 — 潜水者: mines the ground, and only your side can see them
 import board as BOARD
@@ -2070,6 +2116,9 @@ m.board.add_effect((2, 3), BOARD.SmallBomb(LEFT))
 hp0 = gk.hp
 turn(m, st.id, {"destination": None, "action": {"key": "ability:slam", "target": gk.id}},
      gk.id, hold)
+throw = next(t for t in m.followups[LEFT] if t["key"] == HEROES.Slam.THROW)
+assert [2, 3] in throw["options"], throw["options"]
+m.choose_followup(LEFT, [2, 3])
 slam, mine = HEROES.Slam.DAMAGE, BOARD.SmallBomb.DAMAGE
 ok("a hero hurled onto a mine sets it off", hp0 - gk.hp == slam + mine,
    f"took {hp0 - gk.hp} ({slam} slam + {mine} mine)")
@@ -2445,10 +2494,22 @@ def close_round(m):
 
 m, fb, ally, gk, d, bers = beast_arena()
 cells = HEROES.FourBeasts.shrines(m, fb)
-ok("the four squares are where the board says",
-   sorted(cells.items(), key=lambda kv: kv[1]) ==
-   sorted({(2, 3): "dragon", (5, 1): "turtle", (5, 5): "phoenix", (8, 3): "tiger"}.items(),
-          key=lambda kv: kv[1]), str(cells))
+def shrine_of(where, beast):
+    return sorted(c for c, b in where.items() if b == beast)
+
+W = HEROES.FourBeasts.WIDTH
+ok("every shrine is a run of squares, not one",
+   sorted(collections.Counter(cells.values()).values()) == [W] * 4,
+   str(collections.Counter(cells.values())))
+ok("玄武 lies across the middle of the top row",
+   shrine_of(cells, "turtle") == [(4, 1), (5, 1), (6, 1)], str(shrine_of(cells, "turtle")))
+ok("朱雀 across the middle of the bottom row",
+   shrine_of(cells, "phoenix") == [(4, 5), (5, 5), (6, 5)], str(shrine_of(cells, "phoenix")))
+ok("青龙 down the middle of your own back line",
+   shrine_of(cells, "dragon") == [(2, 2), (2, 3), (2, 4)], str(shrine_of(cells, "dragon")))
+ok("白虎 down the middle of theirs",
+   shrine_of(cells, "tiger") == [(8, 2), (8, 3), (8, 4)], str(shrine_of(cells, "tiger")))
+ok("...and no square serves two beasts", len(cells) == 4 * W, str(len(cells)))
 
 # 青龙 — deployed straight onto it, so it counts without moving
 m, fb, ally, gk, d, bers = beast_arena(start=(2, 3))
@@ -2526,14 +2587,28 @@ ok("walking back onto a square gives nothing more", fb.max_hp == after,
 m2 = arena([("gatekeeper", (1, 1))], [("four_beasts", (9, 1))])
 fb2 = unit(m2, RIGHT, "four_beasts")
 right_cells = HEROES.FourBeasts.shrines(m2, fb2)
-ok("the Right hero's 青龙 is on its own back line",
-   next(c for c, b in right_cells.items() if b == "dragon") == (8, 3),
-   str(right_cells))
-ok("...and its 白虎 is on the Left's", 
-   next(c for c, b in right_cells.items() if b == "tiger") == (2, 3), str(right_cells))
+ok("the Right hero's 青龙 is down its own back line",
+   shrine_of(right_cells, "dragon") == [(8, 2), (8, 3), (8, 4)],
+   str(shrine_of(right_cells, "dragon")))
+ok("...and its 白虎 down the Left's",
+   shrine_of(right_cells, "tiger") == [(2, 2), (2, 3), (2, 4)],
+   str(shrine_of(right_cells, "tiger")))
 ok("...while 玄武 and 朱雀 stay where they are",
-   {c for c, b in right_cells.items() if b in ("turtle", "phoenix")} == {(5, 1), (5, 5)},
-   str(right_cells))
+   shrine_of(right_cells, "turtle") + shrine_of(right_cells, "phoenix")
+   == [(4, 1), (5, 1), (6, 1), (4, 5), (5, 5), (6, 5)], str(right_cells))
+
+# one shrine is one blessing, however much of it you walk over
+m_w, fb_w, *_ = beast_arena(start=(2, 2))
+ok("a shrine wakes its beast from any of its squares",
+   "dragon" in fb_w.vars.get("beasts", set()), str(fb_w.vars.get("beasts")))
+hp_w, mods_w = fb_w.max_hp, len(fb_w.modifiers)
+for step in ((2, 3), (2, 4)):
+    fb_w.set_cell(step)
+    fb_w.passives[0].on_after_move(m_w, fb_w, {"entity": fb_w})
+ok("...and walking the rest of it grants nothing further",
+   fb_w.vars["beasts"] == {"dragon"} and fb_w.max_hp == hp_w
+   and len(fb_w.modifiers) == mods_w,
+   f"{fb_w.vars['beasts']} {fb_w.max_hp} {len(fb_w.modifiers)}")
 
 # 58 — regressions found hunting through the newest heroes
 
@@ -3784,7 +3859,7 @@ ok("an island is part of nobody's row", (4, 2) not in m5.topology.row(2), str(m5
 ok("...nor of any column", (4, 2) not in m5.topology.column(4), str(m5.topology.column(4)))
 ok("...nor of the whole board", not [c for c in ((4, 1), (4, 2)) if c in m5.shape_cells((3, 3), "board")])
 ok("...nor of what surrounds the square beside it",
-   (4, 2) not in m5._surround8((3, 2)), str(sorted(m5._surround8((3, 2)))))
+   (4, 2) not in m5.surround8((3, 2)), str(sorted(m5.surround8((3, 2)))))
 
 # --- the island is out of the game: no skill of either side reaches it
 m6 = Match()
@@ -4102,6 +4177,334 @@ for e in m74.unacted(RIGHT)[:1]:
     m74.select_hero(RIGHT, e.id); m74.commit(RIGHT, hold)
 ok("...and dying on the way in costs the swing rather than the match",
    not wm74.alive and m74.phase != "gameover", f"{wm74.alive}/{m74.phase}")
+
+# 75 — anything positional is judged from where the hero will be, not where it is
+def aim_arena(hero, hero_cell, mates, foes):
+    m = Match()
+    L = [hero] + [k for k, _ in mates]
+    R = [k for k, _ in foes]
+    while len(L) < 3:
+        L.append("gatekeeper" if "gatekeeper" not in L else "paladin")
+    while len(R) < 3:
+        R.append("berserker" if "berserker" not in R else "paladin")
+    m.assign_draft(L, R)
+    assert m.place(LEFT, hero, hero_cell) is None
+    for k, c in mates:
+        assert m.place(LEFT, k, c) is None, (k, c)
+    spare = [(1, 5), (2, 5), (1, 4)]
+    for k in L[1 + len(mates):]:
+        assert m.place(LEFT, k, spare.pop()) is None, k
+    for k, c in foes:
+        assert m.place(RIGHT, k, c) is None, (k, c)
+    spare = [(9, 5), (8, 5), (9, 4)]
+    for k in R[len(foes):]:
+        assert m.place(RIGHT, k, spare.pop()) is None, k
+    assert m.lock_force(LEFT) is None
+    assert m.lock_force(RIGHT) is None
+    h = unit(m, LEFT, hero)
+    h.ap = h.max_ap
+    return m, h
+
+# 渔夫: a lane blocked by your own now, clear from the square you are walking to
+m75, fm75 = aim_arena("fisherman", (2, 2), [("cannoneer", (3, 2))], [("dummy", (7, 3))])
+hook75 = fm75.abilities[0]
+ok("a lane its own body blocks is not offered from where it stands",
+   not hook75.lanes(m75, fm75), str(hook75.lanes(m75, fm75)))
+ok("...but is offered from the square it is walking to",
+   [l["dir"] for l in hook75.lanes(m75, fm75, origin=(2, 3))] == ["forward"],
+   str(hook75.lanes(m75, fm75, origin=(2, 3))))
+m75.select_hero(LEFT, fm75.id)
+ok("...and the throw is accepted",
+   m75.commit(LEFT, {"destination": [2, 3],
+                     "action": {"key": "ability:hook", "direction": "forward"}}) is None)
+
+# the previewed landing square is the one the catch really ends up on
+m76, fm76 = aim_arena("fisherman", (3, 3), [], [("cannoneer", (7, 3))])
+hook76 = fm76.abilities[0]
+here = hook76.lanes(m76, fm76)[0]["landing"]
+there = hook76.lanes(m76, fm76, origin=(4, 3))[0]["landing"]
+ok("the haul lands beside wherever the thrower ends up", here != there,
+   f"{here} vs {there}")
+m76.select_hero(LEFT, fm76.id)
+assert m76.commit(LEFT, {"destination": [4, 3],
+                         "action": {"key": "ability:hook", "direction": "forward"}}) is None
+for e in m76.unacted(RIGHT)[:1]:
+    m76.select_hero(RIGHT, e.id); m76.commit(RIGHT, hold)
+ok("...and that is what the preview promised",
+   list(unit(m76, RIGHT, "cannoneer").cell) == list(there),
+   f"{unit(m76, RIGHT, 'cannoneer').cell} vs {there}")
+
+# 大力士: step in beside somebody and throw them in the same turn
+m77, st77 = aim_arena("strongman", (3, 3), [], [("dummy", (7, 3))])
+unit(m77, RIGHT, "dummy").set_cell((5, 3))      # two squares away: out of reach
+slam77 = st77.abilities[0]
+ok("nobody is within reach from where it stands", not slam77.throwable(m77, st77))
+ok("...but the enemy is, from one square closer",
+   [unit(m77, RIGHT, "dummy").id] == slam77.throwable(m77, st77, origin=(4, 3)))
+m77.select_hero(LEFT, st77.id)
+ok("...so stepping in and throwing is one legal turn",
+   m77.commit(LEFT, {"destination": [4, 3],
+                     "action": {"key": "ability:slam",
+                                "target": unit(m77, RIGHT, "dummy").id}}) is None)
+for e in m77.unacted(RIGHT)[:1]:
+    m77.select_hero(RIGHT, e.id); m77.commit(RIGHT, hold)
+t77 = next(t for t in m77.followups[LEFT] if t["key"] == HEROES.Slam.THROW)
+ok("...and the throw is measured from the square it stepped into",
+   all(m77.topology.distance(tuple(c), (4, 3)) <= HEROES.Slam.REACH
+       for c in t77["options"]),
+   f"from {st77.cell}")
+
+# the menu carries an option list for every square it could throw from
+m78, fm78 = aim_arena("fisherman", (2, 2), [("cannoneer", (3, 2))], [("dummy", (7, 3))])
+m78.select_hero(LEFT, fm78.id)
+menu78 = next(a for a in view.state_for(m78, LEFT)["commit"]["actions"]
+              if a["key"] == "ability:hook")["targeting"]
+ok("the menu ships a lane list per square the hero could reach",
+   set(menu78["at"]) == {"2,2", "1,2", "2,1", "2,3"}, str(sorted(menu78["at"])))
+ok("...empty where the throw is blocked", not menu78["at"]["2,2"]["choices"])
+ok("...and live where it is not",
+   [c["dir"] for c in menu78["at"]["2,3"]["choices"]] == ["forward"])
+
+# 76 — 工匠's doors are wall to the other side, however they try to arrive
+def door_arena(cells, owner=LEFT, left=(), right=()):
+    m = Match()
+    L = [k for k, _ in left]
+    R = [k for k, _ in right]
+    owned = L if owner == LEFT else R
+    if "artisan" not in owned:
+        owned.insert(0, "artisan")
+    while len(L) < 3:
+        L.append(next(k for k in ("cannoneer", "gatekeeper", "paladin") if k not in L))
+    while len(R) < 3:
+        R.append(next(k for k in ("berserker", "magician", "paladin") if k not in R))
+    m.assign_draft(L, R)
+    assert m.build_choose(owner, {"cells": [list(c) for c in cells]}) is None
+    spare = {LEFT: [(1, 1), (1, 2), (1, 4), (1, 5), (2, 5)],
+             RIGHT: [(9, 1), (9, 2), (9, 4), (9, 5), (8, 5)]}
+    for side, keys, fixed in ((LEFT, L, left), (RIGHT, R, right)):
+        placed = set()
+        for k, c in fixed:
+            assert m.place(side, k, c) is None, (k, c)
+            placed.add(k)
+        for k in keys:
+            if k in placed:
+                continue
+            assert m.place(side, k, spare[side].pop()) is None, (k, side)
+    assert m.lock_force(LEFT) is None
+    assert m.lock_force(RIGHT) is None
+    return m
+
+# a door square is simply not part of the other side's zone
+m76 = Match()
+m76.assign_draft(["artisan", "cannoneer", "gatekeeper"], ["berserker", "magician", "paladin"])
+assert m76.build_choose(LEFT, {"cells": [[8, 3], [5, 3]]}) is None
+ok("a door shuts its square against the other side",
+   m76.topology.closed_to((8, 3), RIGHT) and m76.topology.closed_to((5, 3), RIGHT))
+ok("...and never against its own", not m76.topology.closed_to((8, 3), LEFT))
+ok("...so it leaves their deployment zone",
+   (8, 3) not in m76.topology.deployment_zone(RIGHT))
+ok("...while theirs is untouched",
+   len(m76.topology.deployment_zone(LEFT)) == 15,
+   str(len(m76.topology.deployment_zone(LEFT))))
+ok("...and they cannot deploy onto it",
+   m76.place(RIGHT, "berserker", (8, 3)) is not None,
+   repr(m76.place(RIGHT, "berserker", (8, 3))))
+
+# walking, both ways round
+m77b = door_arena([(5, 3), (2, 3)], LEFT,
+                  left=[("artisan", (2, 3))], right=[("berserker", (7, 3))])
+art77 = unit(m77b, LEFT, "artisan")
+ber77 = unit(m77b, RIGHT, "berserker")
+ber77.set_cell((6, 3))          # right up against the door, once the board is live
+ok("the enemy cannot walk onto a door square",
+   [5, 3] not in m77b.legal_moves(ber77), str(m77b.legal_moves(ber77)))
+ok("...and with one square of movement cannot reach past it",
+   [4, 3] not in m77b.legal_moves(ber77), str(m77b.legal_moves(ber77)))
+ber77.add_modifier(Modifier("move", "add", 1))
+ok("...crossing it with a move of 2 to the square beyond",
+   [4, 3] in m77b.legal_moves(ber77) and [5, 3] not in m77b.legal_moves(ber77),
+   str(m77b.legal_moves(ber77)))
+ok("...while a body in the way still stops the walk dead",
+   not m77b.can_cross(ber77, art77.cell) and m77b.can_cross(ber77, (5, 3)))
+ok("its own may still step between the pair",
+   [5, 3] in m77b.legal_moves(art77), str(m77b.legal_moves(art77)))
+
+# thrown, hauled and swapped are all arrivals
+m78b = door_arena([(5, 3), (8, 3)], RIGHT,
+                  left=[("strongman", (3, 3)), ("gatekeeper", (1, 2))],
+                  right=[("artisan", (8, 3)), ("fisherman", (9, 5)),
+                         ("magician", (9, 1))])
+st78 = unit(m78b, LEFT, "strongman")
+gk78 = unit(m78b, LEFT, "gatekeeper")
+fm78b = unit(m78b, RIGHT, "fisherman")
+st78.set_cell((6, 3)); gk78.set_cell((7, 3))
+ok("nobody may be hurled onto a square shut against them",
+   HEROES.Slam.landing(m78b, st78, gk78) is None,
+   str(HEROES.Slam.landing(m78b, st78, gk78)))
+fm78b.set_cell((4, 3))
+ok("...nor hauled onto one", HEROES.Hook.cast(m78b, fm78b, "backward") is None,
+   str(HEROES.Hook.cast(m78b, fm78b, "backward")))
+mg78 = unit(m78b, RIGHT, "magician")
+ar78 = unit(m78b, RIGHT, "artisan")
+mg78.ap = mg78.max_ap
+ok("...nor swapped into one",
+   mg78.abilities[0].validate(m78b, mg78, {"first": ar78.id, "second": gk78.id})
+   is not None,
+   repr(mg78.abilities[0].validate(m78b, mg78, {"first": ar78.id, "second": gk78.id})))
+
+# the square is still ordinary ground for the side that built it
+m79b = door_arena([(5, 3), (2, 3)], LEFT,
+                  left=[("artisan", (2, 3)), ("gatekeeper", (1, 4))],
+                  right=[("fisherman", (7, 3))])
+gk79 = unit(m79b, LEFT, "gatekeeper")
+fm79 = unit(m79b, RIGHT, "fisherman")
+gk79.set_cell((6, 3)); fm79.set_cell((4, 3))
+ok("the owner's own may still be put on its door by anybody",
+   HEROES.Hook.cast(m79b, fm79, "backward") == (gk79, (5, 3)),
+   str(HEROES.Hook.cast(m79b, fm79, "backward")))
+ok("...and a door is shut only to the far side, never to both",
+   m79b.topology.closed_to((5, 3), RIGHT)
+   and not m79b.topology.closed_to((5, 3), LEFT))
+
+# 77 — the island reads square by square, to both seats, until it lands
+m80, ex80 = island_arena()
+def isle_marks(m, side):
+    return {tuple(mk["cell"]): mk for mk in view.state_for(m, side)["marks"]}
+
+for seat in (LEFT, RIGHT):
+    got = isle_marks(m80, seat)
+    ok(f"every island square is accounted for to {'its own' if seat == LEFT else 'the other'} seat",
+       sorted(got) == [(4, 1), (4, 2), (4, 3), (5, 2)], str(sorted(got)))
+    ok("...and an undug one says so",
+       all(mk["key"] == "bare" and mk["spent"] for mk in got.values()))
+
+island_round(m80, ex80, "mine_ore", (4, 1))
+for seat in (LEFT, RIGHT):
+    got = isle_marks(m80, seat)
+    ok(f"ore leaves a record even though it leaves no ground, seen by {seat}",
+       got[(4, 1)]["key"] == "mineral" and not got[(4, 1)]["spent"],
+       str(got[(4, 1)]))
+ok("...and the square itself is still bare",
+   m80.occupant((4, 1)) is None and not m80.board.effects_at((4, 1)),
+   str(m80.board.effects_at((4, 1))))
+ok("...while the squares beside it are still untouched",
+   isle_marks(m80, LEFT)[(4, 3)]["key"] == "bare")
+
+island_round(m80, ex80, "dig_grapes", (4, 3))
+# The third dig ends the round, and the island lands the moment it does — so read
+# the record while that round is still running.
+m80.select_hero(LEFT, ex80.id)
+assert m80.commit(LEFT, {"destination": None,
+                         "action": {"key": "ability:train_natives",
+                                    "cell": [5, 2]}}) is None
+foe80 = m80.unacted(RIGHT)[0]
+m80.select_hero(RIGHT, foe80.id); m80.commit(RIGHT, hold)
+got = isle_marks(m80, LEFT)
+ok("each resource is told apart from the others",
+   [got[c]["key"] for c in ((4, 1), (4, 3), (5, 2))] == ["mineral", "grape", "slave"],
+   str([got[c]["key"] for c in ((4, 1), (4, 3), (5, 2))]))
+ok("...each with its own glyph",
+   len({got[c]["glyph"] for c in ((4, 1), (4, 3), (5, 2))}) == 3,
+   str([got[c]["glyph"] for c in ((4, 1), (4, 3), (5, 2))]))
+guard80 = 0
+while m80.round < 4 and m80.phase == "commit" and guard80 < 20:
+    guard80 += 1
+    for side in (LEFT, RIGHT):
+        if m80.commits[side] is not None:
+            continue
+        un = m80.unacted(side)
+        if un:
+            m80.select_hero(side, un[0].id); m80.commit(side, hold)
+ok("the island has landed by now", m80.round >= 4 and m80.topology.region((4, 1)) is None,
+   f"round {m80.round}")
+ok("...so the record stops — the vines and 土著 speak for themselves",
+   not [mk for mk in view.state_for(m80, LEFT)["marks"] if mk["kind"] == "dig"],
+   str(view.state_for(m80, LEFT)["marks"]))
+
+# 78 — 半人马 charges as well as walking, and runs from where the walk ended
+m81, cen81 = aim_arena("centaur", (3, 3), [], [("dummy", (7, 3))])
+foe81 = unit(m81, RIGHT, "dummy")
+foe81.set_cell((6, 3))
+ch81 = cen81.abilities[0]
+ok("冲撞 no longer takes the place of the move", not ch81.self_move)
+ok("...though it still carries the hero, so a root stops it", ch81.carries_self)
+ok("nothing worth charging from where it stands", not ch81.lanes(m81, cen81),
+   str(ch81.lanes(m81, cen81)))
+ok("...but a lane opens from one square forward",
+   [l["dir"] for l in ch81.lanes(m81, cen81, origin=(4, 3))] == ["forward", "backward"],
+   str([l["dir"] for l in ch81.lanes(m81, cen81, origin=(4, 3))]))
+m81.select_hero(LEFT, cen81.id)
+ok("walking and then charging is one legal turn",
+   m81.commit(LEFT, {"destination": [4, 3],
+                     "action": {"key": "ability:charge",
+                                "direction": "forward"}}) is None)
+hp81 = foe81.hp
+for e in m81.unacted(RIGHT)[:1]:
+    m81.select_hero(RIGHT, e.id); m81.commit(RIGHT, hold)
+ok("...and it covers its walk and its run together",
+   cen81.cell == (7, 3), str(cen81.cell))
+ok("...trampling what it passes over on the way",
+   hp81 - foe81.hp == HEROES.Charge.DAMAGE, f"{hp81} -> {foe81.hp}")
+
+# a root still stops the whole thing
+m82, cen82 = aim_arena("centaur", (3, 3), [], [("dummy", (7, 3))])
+unit(m82, RIGHT, "dummy").set_cell((6, 3))
+m82.root(cen82)
+ok("a rooted 半人马 is offered no charge",
+   not [a for a in m82.action_menu(cen82) if a["key"] == "ability:charge"],
+   str([a["key"] for a in m82.action_menu(cen82)]))
+m82.select_hero(LEFT, cen82.id)
+ok("...and is refused one if it asks anyway",
+   m82.commit(LEFT, {"destination": None,
+                     "action": {"key": "ability:charge",
+                                "direction": "forward"}}) is not None)
+
+# 刺客's blink still replaces its walk — only the centaur changed
+ok("刺客's 封喉 still stands in for the move", HEROES.Garrote.self_move)
+ok("...and still counts as carrying itself", HEROES.Garrote.carries_self)
+
+# 79 — venom that lands during its victim's own turn bites on the turn after
+m83, hd83, tl83, gate83, d83 = snake_arena()
+gate83.set_cell((4, 3))
+move83 = gate83.move_allowance
+# the gatekeeper commits in the very exchange the snake bites it
+snake_turn(m83, hd83, tl83, bite((3, 3), [[4, 3]]), stay((3, 4)), gate83.id, hold)
+ok("the bite lands while its victim is taking its turn",
+   gate83.vars.get("rooted_tag") == "venom", str(gate83.vars.get("rooted_tag")))
+ok("...and that turn does not spend it", m83.move_budget(gate83) == move83 - 1,
+   f"{move83} -> {m83.move_budget(gate83)}")
+
+# close the round out, exactly the way the block above does
+r83 = m83.round
+while m83.round == r83:
+    left83 = [e.id for e in m83.unacted(LEFT)]
+    right83 = [e.id for e in m83.unacted(RIGHT)]
+    if left83:
+        snake_turn(m83, hd83, tl83, stay(hd83.cell), stay(tl83.cell),
+                   right83[0] if right83 else None, hold)
+    else:
+        turn(m83, None, None, right83[0] if right83 else None, hold)
+ok("...it is still slowed when its next turn comes round",
+   m83.move_budget(gate83) == move83 - 1, f"{m83.move_budget(gate83)}")
+
+# and that turn spends it — both sides have to commit for the exchange to resolve
+snake_turn(m83, hd83, tl83, stay(hd83.cell), stay(tl83.cell), gate83.id, hold)
+ok("...and only then is it spent", m83.move_budget(gate83) == move83,
+   f"{m83.move_budget(gate83)}")
+ok("...with nothing left on the sheet", gate83.vars.get("rooted_at") is None,
+   str(gate83.vars.get("rooted_at")))
+
+# a slow never loosens a pin, whichever lands first
+m84, hd84, tl84, gate84, d84 = snake_arena()
+m84.root(gate84)                                   # 剑齿虎's pin: every square
+m84.root(gate84, squares=1, tag="venom")           # venom on top of it
+ok("a slow landing on a pin leaves the pin standing", m84.rooted(gate84))
+ok("...and the walk is still nothing", m84.move_budget(gate84) == 0,
+   str(m84.move_budget(gate84)))
+m85, hd85, tl85, gate85, d85 = snake_arena()
+m85.root(gate85, squares=1, tag="venom")
+m85.root(gate85)                                   # the pin lands second
+ok("...and a pin landing on a slow overrides it", m85.rooted(gate85))
 
 print("\nlog tail:")
 for line in m.log[-5:]:

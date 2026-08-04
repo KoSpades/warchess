@@ -166,6 +166,47 @@ def build():
     m.select_hero(LEFT, td.id)
     out["tree_ally"] = view.state_for(m, LEFT)
 
+    # --- 探险家's island part-dug: one of each, and one square still bare -------
+    m = Match()
+    m.assign_draft(["explorer", "cannoneer", "gatekeeper"],
+                   ["cannoneer", "dummy", "berserker"])
+    m.build_choose(LEFT, {"cells": [[4, 1], [4, 2], [4, 3], [5, 2]]})
+    m.build_choose(LEFT, {"cell": [4, 2]})
+    for k, c in (("cannoneer", (3, 3)), ("gatekeeper", (3, 1))):
+        m.place(LEFT, k, c)
+    for k, c in (("cannoneer", (7, 2)), ("dummy", (7, 3)), ("berserker", (7, 4))):
+        m.place(RIGHT, k, c)
+    m.lock_force(LEFT); m.lock_force(RIGHT)
+    ex = next(e for e in m.entities if e.key == "explorer")
+    for res, cell in (("dig_grapes", (4, 1)), ("mine_ore", (4, 3))):
+        todo, guard = res, 0
+        r0 = m.round
+        while m.round == r0 and m.phase == "commit" and guard < 20:
+            guard += 1
+            for side in (LEFT, RIGHT):
+                if m.commits[side] is not None:
+                    continue
+                un = m.unacted(side)
+                if not un:
+                    continue
+                pick = next((e for e in un if e is ex), un[0])
+                m.select_hero(side, pick.id)
+                if pick is ex and todo:
+                    assert m.commit(side, {"destination": None,
+                                           "action": {"key": "ability:" + todo,
+                                                      "cell": list(cell)}}) is None, todo
+                    todo = None
+                else:
+                    m.commit(side, HOLD)
+    out["island_worked"] = view.state_for(m, LEFT)
+    out["island_worked_foe"] = view.state_for(m, RIGHT)
+
+    # --- 四圣兽's shrines, some woken and some not ------------------------------
+    m = arena([("four_beasts", (2, 3)), ("gatekeeper", (1, 1))],
+              [("dummy", (7, 3)), ("berserker", (9, 5))])
+    fb = unit(m, LEFT, "four_beasts")
+    snap("shrines", m, select=fb.id, full_ap=[fb])
+
     # --- a vine on the ground, and an enemy side nothing may be named on --------
     m = Match()
     m.assign_draft(["assassin", "elder", "magician"], ["world_tree", "explorer", "gatekeeper"])

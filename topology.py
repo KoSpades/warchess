@@ -3,7 +3,7 @@
 Per spec 7.6, nothing outside this module may compute neighbours or distance
 with raw arithmetic. Every adjacency, distance, and legality question routes
 through a Topology instance so that later heroes can rewrite the board's shape
-(diagonal adjacency, linked cells, removed columns, attached sub-maps) without
+(diagonal adjacency, linked cells, attached sub-maps) without
 touching the rest of the engine.
 """
 
@@ -19,7 +19,6 @@ class Topology:
     def __init__(self, cols=9, rows=5):
         self.cols = cols
         self.rows = rows
-        self.removed = set()
         # Squares that belong to a sub-map rather than the board proper (探险家's
         # 岛屿): cell -> region name. A cell with no entry is the main map. Two
         # squares in different regions are never neighbours, never within reach of
@@ -34,7 +33,7 @@ class Topology:
 
     def in_bounds(self, cell):
         c, r = cell
-        return 1 <= c <= self.cols and 1 <= r <= self.rows and cell not in self.removed
+        return 1 <= c <= self.cols and 1 <= r <= self.rows
 
     def region(self, cell):
         """Which sub-map this square belongs to. None is the board proper."""
@@ -64,13 +63,21 @@ class Topology:
             (c, r)
             for c in range(1, self.cols + 1)
             for r in range(1, self.rows + 1)
-            if (c, r) not in self.removed and (c, r) not in self.regions
+            if (c, r) not in self.regions
         ]
 
     def link(self, a, b, side):
         """Join two squares for one side. They are neighbours for that side and
         nobody else, and the board is otherwise unchanged."""
         self.links.append((tuple(a), tuple(b), side))
+
+    def closed_to(self, cell, side):
+        """True if that side may not stand on this square at all. A door is already
+        a per-side property of the board — one side may step between its two squares
+        and nobody else — and this is the same fact read the other way round: to the
+        other side those two squares are wall."""
+        cell = tuple(cell)
+        return any(cell in (a, b) and owner != side for a, b, owner in self.links)
 
     def linked_from(self, cell, entity):
         """The far side of any door this unit may walk through from here."""
@@ -124,6 +131,13 @@ class Topology:
         return [(c, row) for c in range(1, self.cols + 1)
                 if self.in_bounds((c, row)) and self.region((c, row)) is None]
 
+    def lane(self, origin, step):
+        """The squares a straight line crosses from `origin`, leaving out any that
+        belong to another map — a line passes clean over a sub-map rather than
+        stopping at it. Every lane walk reads this (狙击手's shot, 渔夫's hook), so
+        none of them can disagree about what a line crosses."""
+        return [c for c in self.ray(origin, step) if self.same_region(c, origin)]
+
     def connected(self, cells):
         """True if the group is one piece — every square touching at least one other
         through the rest of the set. Used by squad placement (哥布林团伙 must go down
@@ -145,7 +159,8 @@ class Topology:
 
     def deployment_zone(self, side):
         cols = (1, 2, 3) if side == LEFT else (7, 8, 9)
-        return [c for col in cols for c in self.column(col) if self.region(c) is None]
+        return [c for col in cols for c in self.column(col)
+                if self.region(c) is None and not self.closed_to(c, side)]
 
     def forward_step(self, side):
         """+1 column is 'forward' for Left, -1 for Right."""

@@ -152,7 +152,7 @@ def unit_payload(m, e, live, viewer=None):
         "atk": e.atk,
         "rng": e.rng,
         "grid": e.grid,
-        "move": e.move_allowance,
+        "move": m.move_budget(e),
         "shots": e.hero.attacks_per_turn,
         "attack": e.hero.attack,
         # False = the other side may not aim anything at it (世界树, a bodiless 鬼魂).
@@ -188,6 +188,9 @@ def state_for(m, side):
         # Squares cut out of the board into a sub-map of their own (探险家's 岛屿).
         # Both seats see them: the island is public from the moment it is charted.
         "offboard": [list(c) for c in m.topology.regions],
+        # Squares a hero's passive wants drawn (四圣兽's shrines). Both seats see
+        # them: where they are follows from the rules, so there is nothing to hide.
+        "marks": HEROES.board_marks(m),
         "doors": [{"cells": [list(a), list(b)], "owner": owner}
                   for a, b, owner in m.topology.links],
         "units": units,

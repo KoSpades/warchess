@@ -54,7 +54,8 @@ function loadClient(side = 'L') {
       sweepPreview, linkedOrder, linkedMoves, isLinked, confirmMove, confirmOpening, onKey, setSpend,
       confirmStep, onUnitPick, namedUnits, targetable, nameable,
       buildWants, buildAllowed, buildReady, confirmBuild,
-      chooseAction, sealOrder, syncDraft, nameableFor, unaimable };`;
+      chooseAction, sealOrder, syncDraft, nameableFor, unaimable,
+      shotsWanted, onLastShot, linkedOrder, linkedMoves, isLinked };`;
   const tmp = path.join(here, '.client.test.js');
   fs.writeFileSync(tmp, js + api);
   const mod = require(tmp);
@@ -127,9 +128,14 @@ if (F.sniper_one_lane) {
 
 if (F.mammoth) {
   HOLD_FIRST(F.mammoth);
+  // Highlighted, not clickable: the swing catches whatever is beside it, so once
+  // it is the chosen action there is nothing for a click on those squares to do.
+  const swept = [...boardCells().entries()]
+    .filter(([, cls]) => cls.split(/\s+/).includes('preview')).length;
+  ok('mammoth: the squares it sweeps are highlighted', swept === 8, `${swept} squares`);
   let lit = 0;
   for (let c = 1; c <= 9; c++) for (let r = 1; r <= 5; r++) if (C.clickableCell([c, r])) lit++;
-  ok('mammoth: the squares it sweeps are highlighted', lit === 8, `${lit} squares`);
+  ok('mammoth: ...but offer no click once the swing is chosen', lit === 0, `${lit} clickable`);
   C.chooseAction('none');
   C.onCell(...F.mammoth.commit.actions.find(a => a.targeting.kind === 'area').targeting.cells[0]);
   ok('mammoth: clicking a covered square chooses the swing', C.draft.actionKey === 'attack',
@@ -388,6 +394,157 @@ if (F.tree_ally) {
   C.onUnitPick(tree.id);
   ok('tree: clicking it commits the blow', (C.namedUnits() || []).includes(tree.id),
      JSON.stringify(C.namedUnits()));
+}
+
+// ------------------------------- a disabled control has to say what it wants
+
+if (F.ally_heal) {
+  C.S = F.ally_heal; C.err = '';
+  C.draft = C.blankDraft(F.ally_heal.commit.selected);
+  C.confirmMove();
+  const need = (F.ally_heal.commit.actions || []).find(a => a.targeting.kind === 'ally');
+  if (need) {
+    C.chooseAction(need.key);
+    C.render();
+    const body = document.getElementById('leftbody').innerHTML;
+    const seal = (body.match(/<button[^>]*primary[^>]*>[\s\S]*?<\/button>/) || [''])[0];
+    ok('waiting: the seal button is disabled while the order is unfinished',
+       /disabled/.test(seal), seal.slice(0, 80));
+    ok('waiting: ...and says what it is waiting for',
+       /<small>/.test(seal) && /Choose an ally/.test(seal),
+       seal.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 90));
+    const mate = (F.ally_heal.units || []).find(
+      u => u.side === F.ally_heal.you && u.alive && u.id !== F.ally_heal.commit.selected);
+    C.onUnitPick(mate.id);
+    C.render();
+    const done = (document.getElementById('leftbody').innerHTML
+                  .match(/<button[^>]*primary[^>]*>[\s\S]*?<\/button>/) || [''])[0];
+    ok('waiting: once it is answered the button goes live and drops the note',
+       !/disabled/.test(done) && !/<small>/.test(done),
+       done.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60));
+  }
+}
+
+// ------------------------------- 双枪手: move, then one shot, then the other
+
+if (F.two_shots) {
+  C.S = F.two_shots; C.err = ''; C.draft = null; C.syncDraft();
+  C.draft = C.blankDraft(F.two_shots.commit.selected);
+  C.confirmMove();
+  C.chooseAction('attack');
+  C.render();
+  const panel = () => document.getElementById('leftbody').innerHTML;
+  ok('twoshot: only the first shot is offered to begin with',
+     panel().includes('Shot 1') && !panel().includes('Shot 2'), 'both shown at once');
+  ok('twoshot: and the panel says which one it is asking for',
+     panel().includes('Shot 1 of 2'), 'no progress shown');
+  ok('twoshot: Enter registers it rather than sealing the order',
+     panel().includes('Register shot 1'), 'button still says seal');
+
+  const cells = F.two_shots.commit.actions.find(a => a.key === 'attack');
+  const near = [];
+  for (let x = 1; x <= F.two_shots.board.cols && near.length < 2; x++)
+    for (let y = 1; y <= F.two_shots.board.rows && near.length < 2; y++)
+      if (C.clickableCell([x, y])) near.push([x, y]);
+  C.onCell(near[0][0], near[0][1]);
+  ok('twoshot: a click marks the shot in hand',
+     (C.draft.shots[0] || []).length === 1 && !(C.draft.shots[1] || []).length,
+     JSON.stringify(C.draft.shots));
+
+  const before = C.sent.length;
+  C.sealFromKeyboard();
+  ok('twoshot: Enter sends nothing yet', C.sent.length === before, JSON.stringify(C.sent.slice(-1)));
+  ok('twoshot: it moves on to the second', C.draft.shotIndex === 1, String(C.draft.shotIndex));
+  C.render();
+  ok('twoshot: which is now offered', panel().includes('Shot 2 of 2'), 'second never appeared');
+  ok('twoshot: with the first still there to go back to', panel().includes('Shot 1'));
+  ok('twoshot: and Enter now seals', panel().includes('Seal order'), 'still asking for a shot');
+
+  C.onCell(near[1][0], near[1][1]);
+  ok('twoshot: clicks now land on the second shot',
+     (C.draft.shots[1] || []).length === 1, JSON.stringify(C.draft.shots));
+  C.sealFromKeyboard();
+  const sent = lastSent();
+  ok('twoshot: the sealed order carries both shots',
+     C.sent.length === before + 1 && sent.cmd === 'commit' &&
+     (sent.payload.action.shots || []).length === 2 &&
+     sent.payload.action.shots[0].length === 1 && sent.payload.action.shots[1].length === 1,
+     JSON.stringify(sent.payload.action));
+}
+
+// ------------------------------- 探险家's island, square by square, both seats
+
+for (const [name, seat] of [['island_worked', 'own'], ['island_worked_foe', 'other']]) {
+  const F_ = F[name];
+  if (!F_) continue;
+  C.S = F_; C.err = ''; C.draft = null; C.syncDraft();
+  let broke = null;
+  try { C.render(); } catch (e) { broke = e.message; }
+  ok(`island(${seat}): the board renders`, !broke, broke || '');
+  const cells = boardCells();
+  const cls = c => (cells.get(c) || '').split(/\s+/);
+  const html = document.getElementById('rows').innerHTML;
+  ok(`island(${seat}): every island square is marked`,
+     ['4,1', '4,2', '4,3', '5,2'].every(c => cls(c).includes('mk-dig')),
+     ['4,1', '4,2', '4,3', '5,2'].map(c => cells.get(c)).join(' | '));
+  ok(`island(${seat}): the mined square is not blank any more`,
+     html.includes('矿'), 'no 矿 glyph drawn');
+  ok(`island(${seat}): the planted one says so too`, html.includes('葡'));
+  ok(`island(${seat}): an untouched square reads as untouched`,
+     cls('4,2').includes('mk-spent') && cls('5,2').includes('mk-spent'),
+     cells.get('5,2'));
+  ok(`island(${seat}): a dug square does not`,
+     !cls('4,3').includes('mk-spent'), cells.get('4,3'));
+  ok(`island(${seat}): mainland ground carries no mark`,
+     !cls('7,3').includes('mk-dig'), cells.get('7,3'));
+  ok(`island(${seat}): and the island still reads as off the board`,
+     cls('4,3').includes('offboard'), cells.get('4,3'));
+}
+
+// ------------------------------- 蛇帝: only offer a click that undoes something
+
+if (F.linked) {
+  C.S = F.linked; C.err = ''; C.draft = null; C.syncDraft();
+  const heads = (F.linked.commit.gang || {}).members || [];
+  if (heads.length === 2 && C.isLinked()) {
+    const first = C.linkedOrder()[0], second = C.linkedOrder()[1];
+    ok('linked: the half waiting to be placed offers no click on itself',
+       !C.clickableCell(second.cell), JSON.stringify(second.cell));
+    const spot = (C.linkedMoves(0) || [])[0];
+    if (spot) {
+      C.onCell(spot[0], spot[1]);                    // place the first half
+      ok('linked: once placed, its square can be clicked to go back',
+         C.clickableCell(spot) || C.clickableCell(first.cell),
+         JSON.stringify([spot, first.cell]));
+    }
+  }
+}
+
+// ------------------------------- 四圣兽's shrines, drawn on the board
+
+if (F.shrines) {
+  C.S = F.shrines; C.err = ''; C.draft = null; C.syncDraft();
+  let broke = null;
+  try { C.render(); } catch (e) { broke = e.message; }
+  ok('shrine: the board renders with them', !broke, broke || '');
+  const cells = boardCells();
+  const cls = c => (cells.get(c) || '').split(/\s+/);
+  ok('shrine: 玄武 is marked across the top row',
+     [ '4,1', '5,1', '6,1' ].every(c => cls(c).includes('mk-shrine')),
+     ['4,1', '5,1', '6,1'].map(c => cells.get(c)).join(' | '));
+  ok('shrine: 朱雀 across the bottom row',
+     ['4,5', '5,5', '6,5'].every(c => cls(c).includes('mk-shrine')));
+  ok('shrine: 白虎 down the enemy back line',
+     ['8,2', '8,3', '8,4'].every(c => cls(c).includes('mk-shrine')),
+     ['8,2', '8,3', '8,4'].map(c => cells.get(c)).join(' | '));
+  ok('shrine: a woken one reads differently',
+     ['2,2', '2,3', '2,4'].every(c => cls(c).includes('mk-spent')),
+     ['2,2', '2,3', '2,4'].map(c => cells.get(c)).join(' | '));
+  ok('shrine: ordinary ground is left alone',
+     !cls('3,3').includes('mk-shrine') && !cls('3,3').includes('mk-dig'),
+     cells.get('3,3'));
+  const drawn = (document.getElementById('rows').innerHTML.match(/markglyph/g) || []).length;
+  ok('shrine: every one of the twelve carries its name', drawn === 12, String(drawn));
 }
 
 // ------------------------------- vines on the ground, and nothing left to name

@@ -111,6 +111,20 @@ main{display:grid;grid-template-columns:minmax(0,1fr) var(--rpanel);
 .cell.vine{box-shadow:inset 0 0 0 1px rgba(122,168,96,.55)}
 .cell.vineyard{box-shadow:inset 0 0 0 2px rgba(122,168,96,.75)}
 .cell.vinespent{box-shadow:inset 0 0 0 1px rgba(122,168,96,.22)}
+/* Ground a passive has claimed or worked. One rule for all of them: an outline on
+   the square and a glyph in the corner, dimmed once it is spent or when it is not
+   yours. 四圣兽's shrines are gold; 探险家's island squares read as its own record
+   of what came out of each one. */
+.cell.mk-shrine{box-shadow:inset 0 0 0 1px rgba(196,150,84,.60)}
+.cell.mk-dig{box-shadow:inset 0 0 0 1px rgba(140,164,190,.50)}
+.cell.mk-spent{box-shadow:inset 0 0 0 1px rgba(196,150,84,.18)}
+.cell.mk-dig.mk-spent{box-shadow:inset 0 0 0 1px rgba(140,164,190,.16)}
+.cell.mk-foe{box-shadow:inset 0 0 0 1px rgba(150,120,120,.28)}
+/* bottom-right: the door has top-left, a charge top-right, a vine bottom-left */
+.markglyph{position:absolute;bottom:3px;right:4px;font-size:9px;color:#C49654}
+.cell.mk-dig .markglyph{color:#8CA4BE}
+.cell.mk-spent .markglyph{opacity:.35}
+.cell.mk-foe .markglyph{color:#8A7676;opacity:.6}
 .vine{position:absolute;bottom:3px;left:4px;font-size:9px;color:#7AA860}
 .vine.R{color:#C98F5A}
 

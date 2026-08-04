@@ -127,9 +127,9 @@ class LineShot(ActionInstance):
         origin = tuple(origin) if origin else actor.cell
         if step is None or not origin:
             return None
-        for dist, cell in enumerate(match.topology.ray(origin, step), start=1):
-            if not match.topology.same_region(cell, origin):
-                continue             # the shot passes clean over a sub-map
+        # Distance counts the squares the shot actually crosses, so a sub-map it
+        # passes over neither blocks it nor lengthens it.
+        for dist, cell in enumerate(match.topology.lane(origin, step), start=1):
             occ = match.occupant(cell)
             # Its own body doesn't block it: when the lane is scanned from a square
             # it is moving to, the sniper is still standing in the old one, and that

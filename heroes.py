@@ -23,8 +23,12 @@ class Ability:
     ap_cost = 0
     use_limit = None  # None = unlimited; an int caps total uses per match
     opening = False   # True = fires once at game start (the opening phase), not on a turn
-    # True = the ability moves the hero itself (半人马's 冲撞), so the turn's normal
-    # movement is not used: the commit must hold position.
+    # True = the ability carries the hero itself (半人马's 冲撞, 刺客's 封喉). A hero
+    # whose feet are stopped cannot use one.
+    carries_self = False
+    # True = it carries the hero *instead of* its ordinary move, so the commit must
+    # hold position. Implies `carries_self`; an ability that merely moves you as
+    # well as your walk sets only that.
     self_move = False
     targeting = {"kind": "none"}
     blurb = ""
@@ -35,9 +39,14 @@ class Ability:
     def side_effects(self, match, actor, params):
         return None
 
-    def validate(self, match, actor, params):
+    def validate(self, match, actor, params, origin=None):
         """Legality beyond the generic targeting checks — e.g. whether a chosen
-        direction can actually be charged. None means fine."""
+        direction can actually be charged. None means fine.
+
+        `origin` is the square the hero will be standing on when this resolves,
+        which is not where it is standing now: movement is applied first. Anything
+        whose legality depends on position must measure from there, or it will
+        refuse orders that turn out to be legal and allow ones that do not."""
         return None
 
     def available(self, match, actor):
@@ -80,48 +89,52 @@ class Charge(Ability):
     key = "charge"
     name = "冲撞 Charge"
     ap_cost = 2
-    self_move = True
+    carries_self = True          # but not instead of its walk: it does both
     targeting = {"kind": "direction", "options": ["forward", "backward", "up", "down"]}
     blurb = ("Charge 3 squares down one lane, dealing 3 to each enemy in the two squares "
              "crossed on the way (at most two). If the third square is taken or off the "
-             "board it still tramples, but holds its ground. Takes the place of your move.")
+             "board it still tramples, but holds its ground. You may move first — the "
+             "run starts from wherever your move ends.")
     DAMAGE = 3
     DISTANCE = 3
 
     @classmethod
-    def path(cls, match, actor, direction):
+    def path(cls, match, actor, direction, origin=None):
         """(landing cell or None when it can't land, [enemies in the crossed squares]).
         The run is always exactly DISTANCE squares: the ones in between are trampled,
         the last one is where it ends up — if anybody is standing there, or it is off
         the board, the charge still lands its damage but the centaur doesn't move.
-        Whole thing is None only if the direction itself is nonsense."""
+        Whole thing is None only if the direction itself is nonsense.
+
+        Run from `origin` — where the centaur will be standing when it puts its head
+        down, which is the end of its walk, not the start."""
         d = match.topology.direction_step(actor.side, direction)
-        if d is None or not actor.cells:
+        origin = tuple(origin) if origin else (actor.cell if actor.cells else None)
+        if d is None or origin is None:
             return None
-        c0, r0 = actor.cell
+        c0, r0 = origin
         lane = [(c0 + d[0] * i, r0 + d[1] * i) for i in range(1, cls.DISTANCE + 1)]
         victims = []
         for cell in lane[:-1]:
             if not match.topology.in_bounds(cell):
                 continue
-            if not match.topology.same_region(cell, actor.cell):
+            if not match.topology.same_region(cell, origin):
                 continue          # a sub-map in the lane is simply run over
             occ = match.occupant(cell)
             if occ is not None and occ.side != actor.side and occ.flags["targetable"]:
                 victims.append(occ)   # allies, and things that cannot be touched,
                                       # are simply ridden past
         end = lane[-1]
-        blocked = (not match.topology.in_bounds(end)
-                   or not match.topology.same_region(end, actor.cell)
-                   or match.occupant(end) is not None)
+        blocked = (not match.topology.same_region(end, origin)
+                   or not match.can_enter(actor, end))
         return (None if blocked else end), victims
 
-    def lanes(self, match, actor):
+    def lanes(self, match, actor, origin=None):
         """Every lane worth charging, for the client to offer and preview. A lane
         that would neither move nor trample anyone is left out."""
         out = []
         for d in self.targeting["options"]:
-            p = self.path(match, actor, d)
+            p = self.path(match, actor, d, origin)
             if p is None:
                 continue
             landing, victims = p
@@ -141,8 +154,8 @@ class Charge(Ability):
                         + ("" if landing else " · the third square is taken")})
         return out
 
-    def validate(self, match, actor, params):
-        p = self.path(match, actor, params.get("direction"))
+    def validate(self, match, actor, params, origin=None):
+        p = self.path(match, actor, params.get("direction"), origin)
         if p is None:
             return "Choose a direction."
         if p[0] is None and not p[1]:
@@ -267,7 +280,7 @@ class Shotgun:
         if not owner.alive or not owner.cells or match.rooted(owner):
             return None
         free = [c for c in match.topology.neighbours(owner.cell)
-                if match.occupant(c) is None]
+                if match.can_enter(owner, c)]
         if not free:
             return None
         return {
@@ -284,7 +297,7 @@ class Shotgun:
         if key != "reposition" or not choice:
             return
         cell = tuple(choice)
-        if match.occupant(cell) is not None or not owner.alive:
+        if not owner.alive or not match.can_enter(owner, cell):
             return
         frm = owner.cell
         owner.set_cell(cell)
@@ -342,7 +355,7 @@ class GhostForm:
         if host is None or not host.alive or not host.cells:
             return []
         return [c for c in match.topology.neighbours(host.cell)
-                if match.occupant(c) is None]
+                if match.can_enter(owner, c)]
 
     def on_after_move(self, match, owner, ctx):
         """It only ever "moves" from nowhere once — that is the moment it takes flesh."""
@@ -423,13 +436,18 @@ class Transfer(Ability):
         b = match.entity(params.get("second"))
         return a, b
 
-    def validate(self, match, actor, params):
+    def validate(self, match, actor, params, origin=None):
         a, b = self.pair(match, params)
         for x in (a, b):
             if x is None or not x.alive or not x.cells:
                 return "Choose two units that are on the board."
         if a is b:
             return "Choose two different units."
+        # Each has to be able to stand where the other is. A square shut against
+        # one of them (工匠's doors) is no place to be swapped into either.
+        if not match.can_enter(a, b.cell, ignore=(b,)) \
+                or not match.can_enter(b, a.cell, ignore=(a,)):
+            return "One of them cannot stand where the other is."
         return None
 
     def move_effects(self, match, actor, params):
@@ -459,10 +477,10 @@ class Bless(Ability):
              "that would hurt it, and give it +1 movement until that happens. One "
              "blessing to a hero.")
 
-    def blessable(self, match, actor):
+    def blessable(self, match, actor, origin=None):
         return [e.id for e in match.on_map(actor.side) if not e.vars.get("blessed")]
 
-    def validate(self, match, actor, params):
+    def validate(self, match, actor, params, origin=None):
         tgt = match.entity(params.get("target"))
         if tgt is not None and tgt.vars.get("blessed"):
             return f"{tgt.name} already carries a blessing."
@@ -483,75 +501,120 @@ class Bless(Ability):
 
 
 class Slam(Ability):
-    """大力士's 摔击. Seize an adjacent enemy and hurl it to the square directly
-    opposite through you — reflected through your own cell. The landing square has
-    to be clear, so the throw is as much about geometry as about the damage."""
+    """大力士's 摔击. Two halves, a whole exchange apart. On its turn it takes hold
+    of somebody beside it and nothing else happens — no damage, no movement, and
+    the grip does not stop them acting. Once the exchange has settled it throws,
+    and only then does it choose where: any empty square within 3 of wherever it
+    ended up standing.
+
+    Either side can be seized. An enemy takes the fall; one of your own is simply
+    put somewhere better, which is what makes the grip worth having when there is
+    nobody to hurt.
+
+    Nothing between the grab and the throw shakes it loose — the target may walk
+    the length of the board and is still thrown from wherever it got to. Only a
+    death ends it, either its own or the strongman's."""
 
     key = "slam"
     name = "摔击 Slam"
     ap_cost = 1
-    targeting = {"kind": "unit"}
-    blurb = ("Seize an enemy in any of the 8 squares around you and hurl it to the "
-             "square directly opposite, dealing 4. The landing square must be empty.")
-    DAMAGE = 4
+    targeting = {"kind": "any_unit"}
+    blurb = ("Take hold of anyone in the 8 squares around you — either side. Nothing "
+             "happens until the exchange has settled; then you throw them to any "
+             "empty square within 3 of where you ended up. An enemy takes 3.")
+    DAMAGE = 3
+    REACH = 3
+    THROW = "slam_throw"
 
-    @staticmethod
-    def landing(match, actor, target):
-        """Where the victim ends up: reflected through the strongman. None if it is
-        not adjacent, or the far square is off the board or already taken."""
-        if not actor.cells or target is None or not target.cells:
-            return None
-        (ac, ar), (tc, tr) = actor.cell, target.cell
-        dc, dr = tc - ac, tr - ar
-        if max(abs(dc), abs(dr)) != 1:      # the 8 around it, diagonals included
-            return None
-        cell = (ac - dc, ar - dr)
-        if not match.topology.in_bounds(cell) or match.occupant(cell) is not None:
-            return None
-        return cell
+    def throwable(self, match, actor, origin=None):
+        """Everyone it could take hold of, for the client to offer — from wherever
+        it will be standing when it grabs, not where it is leaving."""
+        origin = tuple(origin) if origin else (actor.cell if actor.cells else None)
+        if origin is None:
+            return []
+        beside = match.surround8(origin)
+        return [e.id for e in match.living()
+                if e is not actor and e.cells and e.flags["targetable"]
+                and e.cell in beside]
 
-    def throwable(self, match, actor):
-        """Every enemy it could actually seize right now, for the client to offer."""
-        return [e.id for e in match.living(other_side(actor.side))
-                if e.flags["targetable"] and self.landing(match, actor, e)]
-
-    def validate(self, match, actor, params):
+    def validate(self, match, actor, params, origin=None):
         tgt = match.entity(params.get("target"))
-        if tgt is None or not tgt.alive or tgt.side == actor.side:
-            return "Choose a living enemy."
-        if not actor.cells:
-            return f"{actor.name} has nothing to throw with."
-        (ac, ar), (tc, tr) = actor.cell, tgt.cell
-        if max(abs(tc - ac), abs(tr - ar)) != 1:
-            return "It can only seize somebody right beside it."
-        if self.landing(match, actor, tgt) is None:
-            return "Nowhere to throw it — the square behind is taken or off the board."
+        if tgt is None or not tgt.alive:
+            return "Choose anyone still standing."
+        if not actor.cells and origin is None:
+            return f"{actor.name} has nothing to grab with."
+        if tgt.id not in self.throwable(match, actor, origin):
+            return "It can only take hold of somebody right beside it."
         return None
 
     def build_damage(self, match, actor, params):
-        tgt = match.entity(params.get("target"))
-        if tgt is None or not tgt.alive or tgt.side == actor.side:
-            return []
-        # Remembered now, while both are still where the order was given: the throw
-        # itself happens after the damage, once everything has landed.
-        actor.vars["slam_target"] = tgt.id
-        return [DMG.DamageEvent(source=actor, target=tgt, amount=self.DAMAGE,
-                                category=DMG.ABILITY)]
+        return []               # the grab is not a blow — nothing lands yet
 
     def side_effects(self, match, actor, params):
-        tgt = match.entity(actor.vars.pop("slam_target", None))
-        if tgt is None or not tgt.alive or not actor.alive:
+        tgt = match.entity(params.get("target"))
+        if tgt is None or not tgt.alive:
             return
-        cell = self.landing(match, actor, tgt)
-        if cell is None:
-            match.log_line(f"{match.label(actor)} loses its grip — nowhere to throw.")
+        actor.vars["slam_grab"] = tgt.id
+        match.log_line(f"{match.label(actor)} takes hold of {match.label(tgt)}.")
+
+    # --- the throw, once the exchange has settled -------------------------
+
+    def squares(self, match, actor, target):
+        """Where it could put them: empty ground within reach of where it ended up,
+        judged for the one being thrown — a square shut against their side is no
+        landing for them."""
+        if not actor.cells:
+            return []
+        return [c for c in match.topology.cells_within(actor.cell, self.REACH)
+                if match.can_enter(target, c, ignore=(target,))]
+
+    def followup(self, match, owner, ctx):
+        tgt = match.entity(owner.vars.get("slam_grab"))
+        if tgt is None or not tgt.alive or not owner.alive:
+            owner.vars.pop("slam_grab", None)   # a death ends it, either one's
+            return None
+        cells = self.squares(match, owner, tgt)
+        if not cells:
+            owner.vars.pop("slam_grab", None)
+            match.log_line(f"{match.label(owner)} has nowhere to put "
+                           f"{match.label(tgt)}, and lets go.")
+            return None
+        return {
+            "key": self.THROW,
+            "name": self.name,
+            "text": (f"You have hold of {tgt.name}. Throw it to any empty square "
+                     f"within {self.REACH}"
+                     + (f" — it takes {self.DAMAGE}." if tgt.side != owner.side
+                        else ", putting it somewhere better.")),
+            "kind": "cell",
+            "anchor": list(owner.cell),
+            "options": [list(c) for c in cells],
+        }
+
+    def apply_followup(self, match, owner, key, choice):
+        if key != self.THROW or not choice:
+            return
+        tgt = match.entity(owner.vars.pop("slam_grab", None))
+        cell = tuple(choice)
+        if tgt is None or not tgt.alive or not match.can_enter(tgt, cell, ignore=(tgt,)):
             return
         frm = tgt.cell
         tgt.set_cell(cell)
         match.bus.emit(EV.AFTER_MOVE, {"entity": tgt, "from": frm, "to": cell})
-        match.log_line(
-            f"{match.label(actor)} hurls {match.label(tgt)} clean over its shoulder."
-        )
+        if tgt.side == owner.side:
+            match.log_line(f"{match.label(owner)} sets {match.label(tgt)} down "
+                           f"where it is wanted.")
+            hurt = []
+        else:
+            match.log_line(f"{match.label(owner)} hurls {match.label(tgt)} clean "
+                           f"over its shoulder.")
+            hurt = [DMG.DamageEvent(source=owner, target=tgt, amount=self.DAMAGE,
+                                    category=DMG.ABILITY)]
+        # Through the same door as any other ability damage, so 教皇 may step in
+        # front of it — landing after the exchange does not put it out of reach of
+        # a save. Called even for an ally, because the ground it was put on may
+        # have banked something of its own.
+        match.deal_after_exchange(hurt)
 
 
 class ShapeAbility(Ability):
@@ -573,7 +636,7 @@ class ShapeAbility(Ability):
     def victims(self, match, actor, which):
         return match.enemies_in(self.cells_of(match, actor, which), actor.side)
 
-    def shapes(self, match, actor):
+    def shapes(self, match, actor, origin=None):
         """Every option with the squares it covers, so the client can show one
         before it is chosen. A preview only — the real one is drawn at resolution."""
         out = []
@@ -780,7 +843,8 @@ class Garrote(Ability):
     key = "garrote"
     name = "封喉 Garrote"
     ap_cost = 2
-    self_move = True
+    self_move = True             # its blink replaces the walk
+    carries_self = True
     targeting = {"kind": "unit"}
     blurb = ("Blink to a square beside any one enemy, anywhere on the board, and cut "
              "it. It resolves after everyone has moved, so the mark cannot dodge — but "
@@ -794,7 +858,7 @@ class Garrote(Ability):
         if tgt is None or not tgt.alive or not tgt.cells:
             return []
         return [c for c in match.topology.neighbours(tgt.cell)
-                if match.occupant(c) is None]
+                if match.can_enter(actor, c)]
 
     def move_choice(self, match, actor, params):
         """Offered mid-resolution: movement is over, so these squares are real."""
@@ -813,7 +877,7 @@ class Garrote(Ability):
             "options": [list(c) for c in free],
         }
 
-    def validate(self, match, actor, params):
+    def validate(self, match, actor, params, origin=None):
         t = match.entity(params.get("target"))
         if t is None or not t.alive or t.side == actor.side:
             return "Choose a living enemy."
@@ -872,7 +936,7 @@ class Soak(Ability):
              "damage, and the mage mends for half of everything that actually landed.")
     DAMAGE = 3
 
-    def validate(self, match, actor, params):
+    def validate(self, match, actor, params, origin=None):
         cells = (params.get("shots") or [[]])[0]
         if not match.topology.connected(cells):
             return "The four squares must touch — one shape, not scattered."
@@ -1037,33 +1101,38 @@ class Hook(Ability):
              "your own is first, or if that square is taken.")
 
     @staticmethod
-    def cast(match, actor, name):
+    def cast(match, actor, name, origin=None):
         """(catch, landing) for this lane, or None if the throw would come to
-        nothing. The landing square is the one beside the thrower down that lane."""
+        nothing. The landing square is the one beside the thrower down that lane.
+
+        Thrown from `origin` — where the fisherman will be standing when the hook
+        goes out, which is its destination, not the square it is leaving. Its own
+        body never blocks the lane: by the time the line is drawn it has left."""
         step = match.topology.direction_step(actor.side, name)
-        if step is None or not actor.cells:
+        origin = tuple(origin) if origin else actor.cell
+        if step is None or origin is None:
             return None
-        landing = (actor.cell[0] + step[0], actor.cell[1] + step[1])
-        if not match.topology.same_region(landing, actor.cell):
+        landing = (origin[0] + step[0], origin[1] + step[1])
+        if not match.topology.same_region(landing, origin):
             return None              # the square beside you is not on your map
-        for cell in match.topology.ray(actor.cell, step):
-            if not match.topology.same_region(cell, actor.cell):
-                continue             # the line passes clean over a sub-map
+        if match.occupant(landing) not in (None, actor) and landing != origin:
+            pass                     # checked per catch below, once one is found
+        for cell in match.topology.lane(origin, step):
             occ = match.occupant(cell)
-            if occ is None:
-                continue
+            if occ is None or occ is actor:
+                continue             # its own square is vacated by the time it throws
             if occ.side == actor.side or not occ.flags["targetable"]:
                 return None          # one of your own is in the way
-            if match.occupant(landing) is not None and landing != occ.cell:
+            if not match.can_enter(occ, landing, ignore=(actor, occ)):
                 return None          # nowhere to haul it to
             return occ, landing
         return None
 
-    def lanes(self, match, actor):
+    def lanes(self, match, actor, origin=None):
         """Every throw worth making, for the client to offer and preview."""
         out = []
         for name in match.topology.DIRECTIONS8:
-            got = self.cast(match, actor, name)
+            got = self.cast(match, actor, name, origin)
             if got is None:
                 continue
             catch, landing = got
@@ -1075,10 +1144,10 @@ class Hook(Ability):
                         "label": f"catches {catch.name} and drags it beside you"})
         return out
 
-    def validate(self, match, actor, params):
+    def validate(self, match, actor, params, origin=None):
         if params.get("direction") not in match.topology.DIRECTIONS8:
             return "Choose a lane to throw down."
-        if self.cast(match, actor, params["direction"]) is None:
+        if self.cast(match, actor, params["direction"], origin) is None:
             return "Nothing to catch that way — an empty lane, one of your own, or no room to haul it in."
         return None
 
@@ -1091,7 +1160,7 @@ class Hook(Ability):
             match.log_line(f"{match.label(actor)} throws and comes up empty.")
             return
         catch, landing = got
-        if match.occupant(landing) is not None and landing != catch.cell:
+        if not match.can_enter(catch, landing, ignore=(catch,)):
             match.log_line(f"{match.label(actor)} has nowhere to haul it in to.")
             return
         frm = catch.cell
@@ -1114,7 +1183,7 @@ class Recurse(Ability):
     def available(self, match, actor):
         return not actor.vars.get("curse_live")
 
-    def validate(self, match, actor, params):
+    def validate(self, match, actor, params, origin=None):
         if actor.vars.get("curse_live"):
             return "The curse it already laid has not been sprung yet."
         return None
@@ -1174,9 +1243,7 @@ class GreatFog(Ability):
 
     def side_effects(self, match, actor, params):
         fogged = []
-        for e in match.on_map():
-            if e.side == actor.side:
-                continue
+        for e in match.on_map(other_side(actor.side)):
             # No finite range to shorten (雷霆龙 reaches the whole board), and never
             # push anyone below the floor — a range-1 attacker just shrugs it off.
             if e.rng is None or e.rng <= self.FLOOR:
@@ -1207,33 +1274,37 @@ class Ray(Ability):
         ]
 
 
-class Inspire(Ability):
+class RallyTheLine(Ability):
+    """One permanent point of something to everyone still on the board, on your own
+    side. 鼓舞 and 激励 are the same ability pointed at different stats, so they say
+    so rather than each carrying its own copy of the loop."""
+
+    ap_cost = 2
+    targeting = {"kind": "none"}
+    STAT = None
+    VERB = "rallies"
+
+    def side_effects(self, match, actor, params):
+        for e in match.on_map(actor.side):
+            e.add_modifier(Modifier(self.STAT, "add", 1))
+        match.log_line(f"{match.label(actor)} {self.VERB} the line — "
+                       f"+1 {self.STAT} to all allies.")
+
+
+class Inspire(RallyTheLine):
     key = "inspire"
     name = "鼓舞 Inspire"
-    ap_cost = 2
-    targeting = {"kind": "none"}
+    STAT = "atk"
+    VERB = "inspires"
     blurb = "Every ally gains +1 attack, permanently. Casts stack."
 
-    def side_effects(self, match, actor, params):
-        for e in match.on_map():
-            if e.side == actor.side:
-                e.add_modifier(Modifier("atk", "add", 1))
-        match.log_line(f"{match.label(actor)} inspires the line — +1 attack to all allies.")
 
-
-class Incite(Ability):
+class Incite(RallyTheLine):
     key = "incite"
     name = "激励 Incite"
-    ap_cost = 2
     use_limit = 1
-    targeting = {"kind": "none"}
+    STAT = "move"
     blurb = "Once per match: every ally gains +1 movement, permanently."
-
-    def side_effects(self, match, actor, params):
-        for e in match.on_map():
-            if e.side == actor.side:
-                e.add_modifier(Modifier("move", "add", 1))
-        match.log_line(f"{match.label(actor)} rallies the line — +1 movement to all allies.")
 
 
 class Pierce(Ability):
@@ -1729,21 +1800,24 @@ class SerpentBody:
         if head is None or not head.cells:
             return None
         dest = pending.get(head.id) or head.cell
-        free = {owner.id, head.id}
+        # Neither half blocks the other: both are moving in the same instant.
         return [c for c in match.topology.neighbours(dest)
-                if match.occupant(c) is None or match.occupant(c).id in free]
+                if match.can_enter(owner, c, ignore=(head,))]
 
 
 class VenomFangs:
-    """蛇帝's head. Anything its bite draws blood from carries venom for two rounds.
-    A hero already poisoned cannot take a second dose — no stacking and no
-    refreshing — so a fresh victim is always worth more than the same one twice.
+    """蛇帝's head. Anything its bite draws blood from is slowed by a square on its
+    next turn, and then the venom is spent. A hero already carrying a dose cannot
+    take a second — no stacking and no refreshing — so a fresh victim is always
+    worth more than the same one twice.
 
     It also notes what it bit this turn, which is what the tail closes on."""
 
-    describe = ("Its bite poisons for 2 rounds — 1 damage at each round's end. Only a "
-                "hero not already poisoned can be poisoned.")
-    ROUNDS = 2
+    describe = ("Its bite leaves venom: the hero it wounds moves one square less on "
+                "its next turn, and then it wears off. Only a hero not already "
+                "carrying a dose can be given one.")
+    SQUARES = 1
+    TAG = "venom"
 
     def on_turn_start(self, match, owner, ctx):
         if ctx.get("entity") is owner:
@@ -1756,13 +1830,11 @@ class VenomFangs:
         if ev.target.side == owner.side:
             return
         owner.vars.setdefault("bit_this_turn", set()).add(ev.target.id)
-        if ev.target.vars.get("poison_rounds", 0) > 0:
+        if ev.target.vars.get("rooted_tag") == self.TAG:
             return      # 只有未中毒的才能中毒 — no second dose, no refresh
-        ev.target.vars["poison_rounds"] = self.ROUNDS
-        ev.target.vars["poison_source"] = owner.id
+        match.root(ev.target, squares=self.SQUARES, tag=self.TAG)
         match.log_line(
-            f"{match.label(ev.target)} is poisoned — 1 at the end of each of the "
-            f"next {self.ROUNDS} rounds."
+            f"{match.label(ev.target)} is envenomed — a square slower on its next turn."
         )
 
 
@@ -1913,14 +1985,16 @@ class TakeThePlague(Ability):
     blurb = ("Once both forces are down and in view, step onto any empty square on "
              "the board. It is infected the moment you arrive.")
 
-    def cells(self, match, actor):
-        """Any empty square — it may open inside the enemy formation."""
-        return [c for c in match.topology.all_cells() if match.occupant(c) is None]
+    def cells(self, match, actor, origin=None):
+        """Any square it may stand on — it may open inside the enemy formation, but
+        not on ground shut against it."""
+        return [c for c in match.topology.all_cells() if match.can_enter(actor, c)]
 
     def side_effects(self, match, actor, params):
         cell = tuple(params["cell"])
-        if match.occupant(cell) is not None:
-            cell = next((c for c in self.cells(match, actor)), None)
+        if not match.can_enter(actor, cell):
+            # Somebody took it while the order was sealed: walk in somewhere else.
+            cell = next(iter(self.cells(match, actor)), None)
             if cell is None:
                 return
         actor.set_cell(cell)
@@ -2166,13 +2240,6 @@ class ArmsDealer:
         }
 
 
-class ArmedWith:
-    """Shown on whoever is carrying bought hardware, so both seats can read what it
-    is holding now rather than what it was built with."""
-
-    describe = "Carrying a weapon bought from 军火商人."
-
-
 class WorldTree:
     """世界树. It stands in the middle of the board and never acts. Its own side may
     strike it with an ordinary attack — no blow lands, because the tree has nothing
@@ -2251,7 +2318,8 @@ class WorldTree:
             match.log_line(f"The wreck takes light — {len(lit)} square(s) burning.")
         owner.alive = False
         owner.cells = set()
-        free = [list(c) for c in match.topology.all_cells() if match.occupant(c) is None]
+        free = [list(c) for c in match.topology.all_cells()
+                if match.can_enter(owner, c)]
         match.interrupts.append({
             "kind": "pick", "key": "loki", "side": owner.side, "hero": "loki",
             "options": free,
@@ -2279,36 +2347,65 @@ class FourBeasts:
 
     Two are fixed to the board (the middle of the top and bottom rows) and two are
     side-relative (the middle of your own back line, and of theirs) — so the Tiger
-    is always the hardest of the four to reach."""
+    is always the hardest of the four to reach.
 
-    describe = ("Four squares bless it, once each and for good. 青龙, the middle of "
-                "your own back line: heal 1 at the start of every turn. 玄武, the "
-                "middle of the top row: heal 3, +3 maximum health, and −1 to all "
-                "damage taken. 朱雀, the middle of the bottom row: its attacks set "
-                "the ground under the target alight. 白虎, the middle of the enemy "
-                "back line: +2 attack, and it strikes two enemies instead of one.")
+    Each shrine is three squares across the middle of its edge, not one. Reaching
+    any of the three wakes that beast; the other two do nothing more, because a
+    shrine is one blessing however much of it you walk over."""
+
+    describe = ("Four shrines bless it, once each and for good — three squares apiece, "
+                "across the middle of their edge. 青龙, your own back line: heal 1 at "
+                "the start of every turn. 玄武, the top row: heal 3, +3 maximum "
+                "health, and −1 to all damage taken. 朱雀, the bottom row: its attacks "
+                "set the ground under the target alight. 白虎, the enemy back line: "
+                "+2 attack, and it strikes two enemies instead of one.")
     NAMES = {"dragon": "青龙 Dragon", "turtle": "玄武 Turtle",
              "phoenix": "朱雀 Phoenix", "tiger": "白虎 Tiger"}
+    WIDTH = 3            # squares per shrine, centred on its edge
 
     @staticmethod
-    def shrines(match, owner):
-        """cell -> beast, from this hero's point of view."""
+    def _span(centre, limit, width):
+        """`width` squares centred on `centre`, clipped to 1..limit — so a board
+        too short for the full span still gets as much of it as fits."""
+        half = width // 2
+        lo = max(1, min(centre - half, limit - width + 1))
+        return list(range(lo, min(limit, lo + width - 1) + 1))
+
+    @classmethod
+    def shrines(cls, match, owner):
+        """cell -> beast, from this hero's point of view. Each shrine is a run of
+        squares across the middle of its own edge: the top and bottom ones run along
+        their row, the two back lines run down their column."""
         t = match.topology
         mid_row, mid_col = (t.rows + 1) // 2, (t.cols + 1) // 2
         own = sorted({c for c, _ in t.deployment_zone(owner.side)})
         foe = sorted({c for c, _ in t.deployment_zone(other_side(owner.side))})
-        return {
-            (own[len(own) // 2], mid_row): "dragon",
-            (mid_col, 1): "turtle",
-            (mid_col, t.rows): "phoenix",
-            (foe[len(foe) // 2], mid_row): "tiger",
-        }
+        cols = cls._span(mid_col, t.cols, cls.WIDTH)
+        rows = cls._span(mid_row, t.rows, cls.WIDTH)
+        out = {}
+        for c in cols:
+            out[(c, 1)] = "turtle"
+            out[(c, t.rows)] = "phoenix"
+        for r in rows:
+            out[(own[len(own) // 2], r)] = "dragon"
+            out[(foe[len(foe) // 2], r)] = "tiger"
+        return out
 
     def held(self, owner):
         return owner.vars.setdefault("beasts", set())
 
-    # Standing on one is enough, so a hero deployed straight onto its own back
-    # line has the Dragon from the first exchange.
+    def marks(self, match, owner):
+        """The shrines, for the board to draw. Twelve squares is too many to expect
+        anyone to work out from the hero's description, and a shrine already woken
+        has to read differently from one still worth walking to."""
+        held = self.held(owner)
+        return [{"cell": list(cell), "kind": "shrine", "key": beast,
+                 "name": self.NAMES[beast], "glyph": self.NAMES[beast][0],
+                 "owner": owner.side, "spent": beast in held}
+                for cell, beast in self.shrines(match, owner).items()]
+
+    # Standing on any one square of a shrine is enough, so a hero deployed straight
+    # onto its own back line has the Dragon from the first exchange.
     def on_match_start(self, match, owner, ctx):
         self._touch(match, owner)
 
@@ -2670,10 +2767,10 @@ class Dig(Ability):
     def available(self, match, actor):
         return bool(Explorer.free_cells(match, actor))
 
-    def cells(self, match, actor):
+    def cells(self, match, actor, origin=None):
         return Explorer.free_cells(match, actor)
 
-    def validate(self, match, actor, params):
+    def validate(self, match, actor, params, origin=None):
         cell = tuple(params.get("cell") or ())
         if cell not in Explorer.free_cells(match, actor):
             return "That square is not free island ground."
@@ -2682,6 +2779,10 @@ class Dig(Ability):
     def side_effects(self, match, actor, params):
         cell = tuple(params["cell"])
         actor.vars.setdefault("dug", []).append(self.resource)
+        # Which square went to what, so the island can be read at a glance by both
+        # seats. Ore leaves nothing behind on its own, and an unrecorded square is
+        # indistinguishable from one nobody has touched.
+        actor.vars.setdefault("worked", {})[cell] = self.resource
         apply_resource(match, actor, self.resource, cell)
 
 
@@ -2787,6 +2888,29 @@ class Explorer:
             return None
         return [owner.cell]
 
+    GLYPHS = {"grape": "葡", "slave": "奴", "mineral": "矿", None: "·"}
+    WORKED = {"grape": "葡萄树 a vine planted here",
+              "slave": "土著 trained here",
+              "mineral": "矿物 dug out here — the ground keeps nothing",
+              None: "not dug yet"}
+
+    def marks(self, match, owner):
+        """What each island square was used for, while the island is still off the
+        board. Both seats see it: the island is public from the moment it is
+        charted, and ore leaves nothing on the ground to show for itself. Once the
+        island lands, the vines and the 土著 speak for themselves and this stops."""
+        cells = self.sealed_cells(match, owner)
+        if not cells:
+            return []
+        worked = owner.vars.get("worked") or {}
+        out = []
+        for cell in cells:
+            res = worked.get(tuple(cell))
+            out.append({"cell": list(cell), "kind": "dig", "key": res or "bare",
+                        "name": self.WORKED[res], "glyph": self.GLYPHS[res],
+                        "owner": owner.side, "spent": res is None})
+        return out
+
     def sole_actions(self, match, owner):
         """While the island is still its own map there is nothing else to do: no
         hold, no attack — the whole turn is one spadeful. If there were somehow no
@@ -2852,7 +2976,7 @@ class Explorer:
 
     def _all_different(self, match, owner):
         free = [list(c) for c in match.topology.all_cells()
-                if match.occupant(c) is None
+                if match.can_enter(owner, c)
                 and not match.board.has_kind(c, BOARD.GrapeVine.kind)]
         if not free:
             return
@@ -3718,6 +3842,20 @@ TARGETING_KINDS = {
 }
 
 
+def board_marks(match):
+    """Squares a living hero's passive wants shown on the board (四圣兽's shrines).
+    General on purpose: a passive publishes its own marks and the view asks for all
+    of them without knowing whose they are, so a future hero with special ground
+    needs no new plumbing."""
+    out = []
+    for e in match.living():
+        for p in e.passives:
+            fn = getattr(p, "marks", None)
+            if fn is not None:
+                out.extend(fn(match, e))
+    return out
+
+
 def check_roster():
     """Structural checks on the hero data itself. Cheap enough to run at import in
     tests, and it catches the mistakes that are otherwise found only in play: a
@@ -3819,14 +3957,6 @@ def status_of(match, entity):
                      "At the end of its next turn it takes everything it dealt "
                      "during that turn, back on itself."),
         })
-    if entity.vars.get("poison_rounds"):
-        n = entity.vars["poison_rounds"]
-        out.append({
-            "key": "poisoned", "badge": "毒", "label": "中毒 POISONED",
-            "text": f"Loses 1 at the end of each of the next {n} round"
-                    f"{'' if n == 1 else 's'}. It cannot be poisoned again until "
-                    f"this wears off.",
-        })
     if entity.vars.get("vulnerable"):
         n = entity.vars["vulnerable"]
         out.append({
@@ -3844,6 +3974,18 @@ def status_of(match, entity):
         out.append({
             "key": "rooted", "badge": "钉", "label": "定身 PINNED",
             "text": "Cannot move on its next turn — it can still attack and cast.",
+        })
+    elif entity.vars.get("rooted_at") is not None:
+        n = entity.vars.get("rooted_squares", 0)
+        venom = entity.vars.get("rooted_tag") == "venom"
+        out.append({
+            "key": "poisoned" if venom else "slowed",
+            "badge": "毒" if venom else "慢",
+            "label": "中毒 ENVENOMED" if venom else "减速 SLOWED",
+            "text": (f"Moves {n} square{'' if n == 1 else 's'} less on its next turn, "
+                     f"and then it wears off."
+                     + (" It cannot be given a second dose until this one is spent."
+                        if venom else "")),
         })
     if match.frozen(entity):
         left = match.frozen_rounds_left(entity)

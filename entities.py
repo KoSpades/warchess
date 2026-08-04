@@ -23,7 +23,6 @@ class Modifier:
     value: float
     source: object = None
     duration: str = PERMANENT
-    expires_round: int = None
 
 
 class Entity:
@@ -129,15 +128,8 @@ class Entity:
     def add_modifier(self, mod):
         self.modifiers.append(mod)
 
-    def expire_modifiers(self, when, round_number=None):
-        self.modifiers = [
-            m
-            for m in self.modifiers
-            if not (
-                m.duration == when
-                and (m.expires_round is None or m.expires_round <= round_number)
-            )
-        ]
+    def expire_modifiers(self, when):
+        self.modifiers = [m for m in self.modifiers if m.duration != when]
 
     # --- convenience ---------------------------------------------------
 

@@ -11,15 +11,12 @@ ROUND_START = "round_start"
 ROUND_END = "round_end"
 TURN_START = "turn_start"
 TURN_END = "turn_end"
-BEFORE_MOVE = "before_move"
 AFTER_MOVE = "after_move"
 BEFORE_DAMAGE = "before_damage"
 AFTER_DAMAGE = "after_damage"
 HEAL = "heal"
 BEFORE_DEATH = "before_death"
 DEATH = "death"
-CELL_ENTERED = "cell_entered"
-ABILITY_USED = "ability_used"
 # The exchange is over: every hit has landed, every effect has run and the
 # dead are off the board, but nobody has been picked for the next one yet.
 # Context carries what happened — `landed` is whether that unit's attack got

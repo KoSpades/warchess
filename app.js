@@ -52,6 +52,13 @@ const dirWord = (from, to) => {
   return dr > 0 ? 'below' : 'above';
 };
 const eq = (a,b) => a && b && a[0]===b[0] && a[1]===b[1];
+// How far apart two squares are, the way the board counts it. One definition:
+// four places used to spell it out and could have drifted from the server's.
+const dist = (a,b) => Math.abs(a[0]-b[0]) + Math.abs(a[1]-b[1]);
+// "1 cell", "3 cells" — a hero worn down to a single grid used to be told to mark
+// "up to 1 cells".
+const plural = (n, one, many) => `${n} ${n === 1 ? one : (many || one + 's')}`;
+const within = (a,b,rng) => dist(a,b) <= rng;
 const has = (arr,c) => (arr||[]).some(x => eq(x,c));
 
 async function api(path, body){
@@ -270,7 +277,20 @@ function selectedUnit(){
 }
 function currentAction(){
   if (!draft || !draft.actionKey || !S.commit) return null;
-  return curActions().find(a => a.key === draft.actionKey);
+  return aimedFrom(curActions().find(a => a.key === draft.actionKey));
+}
+
+/* An action's targeting as it will be once this turn's movement has resolved.
+ * The server sends the positional option lists for every square the hero could
+ * be standing on; this picks the one for the square being aimed from, so what
+ * is offered is what will actually be legal. Everything downstream reads
+ * `currentAction()`, so nothing else has to know this happens. */
+function aimedFrom(act){
+  if (!act || !act.targeting || !act.targeting.at) return act;
+  const o = originCell();
+  const swap = o && act.targeting.at[o[0] + ',' + o[1]];
+  if (!swap) return act;
+  return Object.assign({}, act, {targeting: Object.assign({}, act.targeting, swap)});
 }
 // Where a unit will be standing once this turn's movement resolves: its own
 // aim if it is the one being ordered, its already-recorded order if it is a
@@ -365,6 +385,13 @@ function renderBoard(){
       // read differently rather than both being a green square.
       const vine = effs.find(t => t.kind==='vineyard');
       const door = (S.doors||[]).find(dr => dr.cells.some(x => eq(x, cell)));
+      // Ground a hero's passive has claimed or worked (四圣兽's shrines, 探险家's
+      // island squares). Yours first, so a square both sides want reads as the one
+      // you can still use. What it says comes from the server — the client only
+      // decides where to put it.
+      const marks = (S.marks||[]).filter(x => eq(x.cell, cell));
+      const mk = marks.find(x => x.owner===SIDE && !x.spent) || marks.find(x => x.owner===SIDE)
+               || marks[0];
       // Charges pile up without limit, so a marker has to say how many as well as
       // what. A bare count would be ambiguous against a big bomb's countdown, so
       // counts always carry ×, and a fuse always reads "in N".
@@ -382,9 +409,13 @@ function renderBoard(){
       if (plague) cls.push('infected');
       if (vine) cls.push(vine.great ? 'vineyard' : vine.spent ? 'vinespent' : 'vine');
       if (door) cls.push(door.owner==='L' ? 'doorL' : 'doorR');
+      if (mk){
+        cls.push('mk-' + mk.kind);
+        if (mk.spent) cls.push('mk-spent');
+        else if (mk.owner !== SIDE) cls.push('mk-foe');
+      }
       if (mineTxt) cls.push('mined');
-      if (origin && cspec &&
-          Math.abs(origin[0]-c)+Math.abs(origin[1]-r) <= cspec.range) cls.push('inrange');
+      if (origin && cspec && within(origin, cell, cspec.range)) cls.push('inrange');
       const step = stepTask();
       if (step && has(step.options, cell)) cls.push('legal');
       // Cut out of the board entirely until it is joined back on.
@@ -432,6 +463,7 @@ function renderBoard(){
             + (door?`<span class="door ${door.owner}">门</span>`:'')
             + (plague?`<span class="plague">疫</span>`:'')
             + (vine?`<span class="vine ${vine.owner}">${vine.great?'葡':vine.spent?'枝':'萄'}</span>`:'')
+            + (mk?`<span class="markglyph" title="${mk.name}">${mk.glyph}</span>`:'')
             + (mineTxt?`<span class="bomb">${mineTxt}</span>`:'')
             + `</button>`;
     }
@@ -446,7 +478,7 @@ function reachCells(origin, rng){
   if (rng==null) return [];
   const out=[];
   for (let c=1;c<=S.board.cols;c++) for (let r=1;r<=S.board.rows;r++)
-    if (Math.abs(origin[0]-c)+Math.abs(origin[1]-r) <= rng) out.push([c,r]);
+    if (within(origin, [c,r], rng)) out.push([c,r]);
   return out;
 }
 function applyHover(){
@@ -752,11 +784,13 @@ function clickableCell(cell){
   }
   if (S.phase!=='commit' || !draft || S.commit.sealed) return false;
   if (isLinked() && draft.stage!=='act'){
-    // The squares still to be placed, plus either half itself — clicking a body
-    // goes back to positioning it, so it has to stay live once both are down.
+    // The squares still to be placed, plus any half already put down — clicking
+    // one of those goes back to positioning it. A half whose turn it is has
+    // nothing to go back to, so it is not offered: a square that invites a click
+    // and then does nothing reads as a broken board.
     if (has(curMoves(), cell)) return true;
     const u = unitAt(cell);
-    return !!(u && linkedOrder().some(g => g.entity === u.id));
+    return !!(u && placedPos()[u.id]);
   }
   if (!draft.destination && !draft.held) return has(curMoves(),cell);
   const act = currentAction(); if (!act) return false;
@@ -765,13 +799,22 @@ function clickableCell(cell){
     if (S.mode==='self') return false;   // solo mode auto-aims — no manual marking
     const o = originCell();
     if (!o) return false;          // nowhere to fire from yet
-    return Math.abs(o[0]-cell[0])+Math.abs(o[1]-cell[1]) <= cs.range;
+    return within(o, cell, cs.range);
   }
   if (act.targeting.kind==='any_cell')
     return act.targeting.cells ? has(act.targeting.cells, cell) : true;
   if (act.targeting.kind==='lane')
-    return laneShots().some(l => l.target.cell && eq(l.target.cell, cell));
-  if (areaAttack()) return has(areaCells(areaAttack()), cell);
+    // Clicking somebody down a lane picks that lane. The one already picked has
+    // nothing left to offer — a single available lane is aimed for you, so its
+    // target would otherwise sit there looking clickable and doing nothing.
+    return laneShots().some(l => l.target.cell && eq(l.target.cell, cell)
+                                 && l.dir !== draft.direction);
+  // An area attack has nothing to aim: clicking a square it covers chooses the
+  // swing, and once it is chosen there is nothing left for a click to do. The
+  // squares stay drawn as a preview either way — offering a click that cannot
+  // change anything is what reads as a broken board.
+  if (areaAttack())
+    return draft.actionKey !== 'attack' && has(areaCells(areaAttack()), cell);
   if (act.targeting.kind==='cone')
     return coneArcs().some(a => has(a.cells, cell));
   if (act.targeting.kind==='shape')
@@ -903,7 +946,7 @@ function onCell(c,r){
     if (S.mode==='self') return;   // solo mode auto-aims — clicks do nothing here
     const o=originCell();
     if (!o){ err="Take flesh first."; return render(); }
-    if (Math.abs(o[0]-c)+Math.abs(o[1]-r) > cs.range){ err="Out of range."; return render(); }
+    if (!within(o, cell, cs.range)){ err="Out of range."; return render(); }
     const sh = draft.shots[draft.shotIndex] || (draft.shots[draft.shotIndex]=[]);
     const at = sh.findIndex(x=>eq(x,cell));
     if (at>=0) sh.splice(at,1);
@@ -970,7 +1013,8 @@ function nameableFor(act, tu){
     case 'two_units': return (act.targeting.options||[]).includes(tu.id);
     case 'unit':      return nameable(act, tu);
     case 'ally':      return tu.side === SIDE;
-    case 'any_unit':  return tu.targetable !== false;
+    case 'any_unit':  return tu.targetable !== false
+                        && (!act.targeting.options || act.targeting.options.includes(tu.id));
     default:          return false;
   }
 }
@@ -1021,6 +1065,12 @@ function sealFromKeyboard(){
   if (!choicesReady()){ err = "Make the free pick first."; return render(); }
   // Normal attack: any marked grids seal it; nothing marked = hold.
   if (act.key==='attack' && act.targeting.kind==='cells'){
+    // More shots to come: this Enter registers the one in hand and brings up the
+    // next, rather than sealing a half-aimed order.
+    if (S.mode!=='self' && !onLastShot()){
+      draft.shotIndex = (draft.shotIndex||0) + 1;
+      err=""; return render();
+    }
     // Solo mode fires a random attack; otherwise no grids marked = hold.
     if (S.mode!=='self' && !(draft.shots||[]).some(s=>s.length>0)) draft.actionKey='none';
     return sealOrder();
@@ -1182,6 +1232,16 @@ function unaimable(a){
   if (a.targeting.choices && !a.targeting.choices.length) return "nowhere to aim it";
   return "";
 }
+
+/* A hero that fires more than once (双枪手) registers its shots one at a time:
+ * move, then the first, then the second. `draft.shotIndex` is the one being aimed;
+ * everything before it is settled and everything after has not been offered yet. */
+function shotsWanted(){
+  const act = currentAction();
+  if (!act || act.targeting.kind !== 'cells') return 0;
+  return act.targeting.shots || 1;
+}
+function onLastShot(){ return (draft.shotIndex||0) >= shotsWanted() - 1; }
 
 function orderReady(){
   if (!draft || (!draft.destination && !draft.held)) return false;
@@ -1603,10 +1663,16 @@ function renderCommit(){
     }
     if (act) h += targetingHTML(act);
     const last = isGang() && gangPending().length===1;
-    const label = !isGang() ? 'Seal order'
+    const more = act && act.key==='attack' && S.mode!=='self' && !onLastShot();
+    const label = more ? `Register shot ${(draft.shotIndex||0)+1}`
+                : !isGang() ? 'Seal order'
                 : last ? (isLinked() ? 'Seal both attacks' : 'Seal the gang’s orders')
                 : (isLinked() ? `Lock in ${u.name}’s attack` : 'Lock this goblin in');
-    h += `<button class="btn primary" ${orderReady()?'':'disabled'} onclick="sealFromKeyboard()">${label} — <b>Enter</b></button>`;
+    // A disabled button that says nothing reads as a broken one. The panel already
+    // knows what is missing — it just used to wait for Enter before admitting it.
+    const waiting = orderReady() ? '' : (act ? stillNeeded(act) : 'Choose an action first.');
+    h += `<button class="btn primary" ${waiting?'disabled':''} onclick="sealFromKeyboard()">
+            ${label} — <b>Enter</b>${waiting?`<small>${waiting}</small>`:''}</button>`;
   }
   h += `<p class="err">${err}</p>`;
   document.getElementById('leftbody').innerHTML = h;
@@ -1680,7 +1746,7 @@ function targetingHTML(act){
       h += `<div class="step">3 · Target</div>`;
       if (w.mode==='cells'){
         const n = (draft.shots[0]||[]).length;
-        h += `<p class="note">Mark up to ${w.cells} cells within ${w.range}, then <b>Enter</b>. You pick the enemy hit after everyone moves.</p>
+        h += `<p class="note">Mark up to ${plural(w.cells,'cell')} within ${w.range}, then <b>Enter</b>. You pick the enemy hit after everyone moves.</p>
               <button class="btn on">Cells <span class="cost">${n}/${w.cells}</span></button>`;
       } else if (w.mode==='row'){
         h += `<p class="note">Hits every enemy in your row — press <b>Enter</b> to swing.</p>`;
@@ -1695,8 +1761,15 @@ function targetingHTML(act){
     if (S.mode==='self'){
       return `<div class="step">3 · Target</div><p class="note">Solo mode aims for you — grids are chosen at random within range. Press <b>Enter</b> to fire.</p>`;
     }
-    h += `<p class="note">Mark up to ${t.count} cells within ${t.range}, then <b>Enter</b> to register (no marks = hold). You pick which enemy is hit after everyone moves.</p>`;
-    for (let i=0;i<t.shots;i++){
+    const upto = t.shots>1 ? Math.min(draft.shotIndex||0, t.shots-1) : 0;
+    h += t.shots>1
+      ? `<p class="note">Shot ${upto+1} of ${t.shots}. Mark up to ${plural(t.count,'cell')} within
+         ${t.range}, then <b>Enter</b> to register it${upto<t.shots-1?' and bring up the next':''}.
+         You pick which enemy each one hits after everyone moves.</p>`
+      : `<p class="note">Mark up to ${plural(t.count,'cell')} within ${t.range}, then <b>Enter</b> to register (no marks = hold). You pick which enemy is hit after everyone moves.</p>`;
+    // Only as far as the player has got: a later shot has not been offered yet, and
+    // an earlier one stays clickable so it can be re-aimed.
+    for (let i=0;i<=upto;i++){
       const n=(draft.shots[i]||[]).length;
       h += `<button class="btn ${draft.shotIndex===i?'on':''}" onclick="draft.shotIndex=${i};render()">
               ${t.shots>1?`Shot ${i+1}`:'Cells'} <span class="cost">${n}/${t.count}</span>
@@ -1779,7 +1852,7 @@ function targetingHTML(act){
       : `<p class="note">No lane worth using from here.</p>`;
     for (const ch of t.choices){
       h += `<button class="btn ${draft.direction===ch.dir?'on':''}" onclick="draft.direction='${ch.dir}';err='';render()">
-              ${DIRS[ch.dir]||ch.dir}<span class="cost">${ch.where||''}</span>
+              ${DIRS[ch.dir]||ch.dir}${ch.where?`<span class="cost">${ch.where}</span>`:''}
               <small>${ch.label||''}</small></button>`;
     }
   } else if (t.kind==='direction'){
@@ -1842,7 +1915,8 @@ function renderInterrupt(){
       for (const id of t.options){
         const u = (S.units||[]).find(x=>x.id===id) || {};
         h += `<button class="btn" onclick="cmd({cmd:'interrupt', answer:${id}})">
-                ${u.name||('#'+id)} <span class="cost">${u.hp||''}${u.hp?' HP':''}</span></button>`;
+                ${u.name||('#'+id)}
+                ${u.hp==null?'':`<span class="cost">${u.hp}/${u.max_hp} HP</span>`}</button>`;
       }
     } else if (t.option_kind === 'cell'){
       h += `<p class="note">Click any empty square on the board.</p>`;

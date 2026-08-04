@@ -71,7 +71,7 @@ class Match:
         self.global_rules = [DMG.SharedPool(), DMG.AbilityImmunity(), DMG.Blessing(),
                              DMG.OutgoingShift(),
                              DMG.Vulnerability(), DMG.FlatReduction(), DMG.CurseTrap(),
-                             DMG.Poison(), DMG.HalvingRule(), DMG.Ledger(),
+                             DMG.HalvingRule(), DMG.Ledger(),
                              DMG.Verdict(), Minefield(), Vineyard()]
         # Damage from the board itself, banked as it is triggered so a whole
         # exchange's worth lands in one instant (mines under two movers).
@@ -199,6 +199,29 @@ class Match:
         return [e for e in self.living(side)
                 if not e.has_acted and e.flags["takes_turns"] and not self.frozen(e)]
 
+    def can_cross(self, e, cell, ignore=()):
+        """May this unit walk *over* that square? Only a body in the way stops it —
+        a square shut against its side (工匠's doors) may be crossed, just not stood
+        on, so a door costs the other side somewhere to stand and never a step of
+        distance."""
+        cell = tuple(cell)
+        if not self.topology.in_bounds(cell):
+            return False
+        occ = self.occupant(cell)
+        return occ is None or occ is e or occ in ignore
+
+    def can_enter(self, e, cell, ignore=()):
+        """May this unit come to rest on that square? Everything `can_cross` asks,
+        and not shut against its side. Every landing goes through here — walked to,
+        thrown to, hauled to or swapped into — so a square closed to a side is
+        closed however the arrival is arranged.
+
+        `ignore` names units that will have left by the time this resolves.
+        """
+        if e is not None and self.topology.closed_to(cell, e.side):
+            return False
+        return self.can_cross(e, cell, ignore)
+
     def on_map(self, side=None):
         """Living units standing on the board proper. Anything on a sub-map (探险家's
         island, until round four) is out of the game entirely, so no hero skill of
@@ -208,14 +231,45 @@ class Match:
         return [e for e in self.living(side)
                 if not e.cells or self.topology.region(e.cell) is None]
 
-    def root(self, e):
-        """Take the movement out of this unit's next turn. It still fights — only
-        its feet are stopped. Stamped with the exchange it was applied in, so a
-        unit rooted during its own turn is pinned on the turn after, not this one."""
+    # A root that takes every square there is. Held as a number rather than a
+    # special case so "all of it" and "one square of it" are the same rule.
+    ALL_SQUARES = 99
+
+    def root(self, e, squares=None, tag=None):
+        """Take movement out of this unit's next turn — all of it by default
+        (剑齿虎's pin), or just `squares` of it (蛇帝's venom leaves it a square
+        short). It still fights either way; only its feet are affected.
+
+        Stamped with the exchange it was applied in, so one applied during its own
+        turn is served by the turn after, not this one. Two roots on the same turn
+        do not add up: the heavier one stands, so a slow can never loosen a pin.
+
+        `tag` names what did it, for the badge and for any rule that asks whether
+        this particular thing is already on (蛇帝 gives no second dose). It lives in
+        the root's own state, so it is spent by exactly the same turn."""
+        n = self.ALL_SQUARES if squares is None else squares
+        if e.vars.get("rooted_at") is not None:
+            was = e.vars.get("rooted_squares", self.ALL_SQUARES)
+            if was >= n:
+                n, tag = was, e.vars.get("rooted_tag")
         e.vars["rooted_at"] = (self.round, self.exchange)
+        e.vars["rooted_squares"] = n
+        e.vars["rooted_tag"] = tag
 
     def rooted(self, e):
-        return e.vars.get("rooted_at") is not None or self.bound(e)
+        """Stopped outright — which is what an ability that carries the hero asks
+        about. A slow leaves it walking, just less far, so it is not this."""
+        return (e.vars.get("rooted_at") is not None
+                and e.vars.get("rooted_squares", self.ALL_SQUARES) >= self.ALL_SQUARES
+                ) or self.bound(e)
+
+    def move_budget(self, e):
+        """How far this unit may actually walk this turn: its move, less whatever
+        has been taken off its feet."""
+        n = e.move_allowance
+        if e.vars.get("rooted_at") is not None:
+            n -= e.vars.get("rooted_squares", self.ALL_SQUARES)
+        return max(0, n)
 
     def bound(self, e):
         """Held in place for as long as somebody keeps holding it — 占星师's prophecy,
@@ -447,7 +501,7 @@ class Match:
         cell = tuple(cell)
         if self.occupant(cell) is None and self.topology.region(cell) is None:
             return cell
-        free = [c for c in self.topology.all_cells() if self.occupant(c) is None]
+        free = [c for c in self.topology.all_cells() if self.can_enter(None, c)]
         if not free:
             return cell
         return min(free, key=lambda c: (self.topology.distance(cell, c), c))
@@ -615,7 +669,7 @@ class Match:
         """Every targeting kind checked in one place — turn actions and opening
         picks both come through here, so the two can never drift apart. Anything
         beyond targeting belongs in the ability's own `validate`."""
-        t = self.ability_targeting(e, ab)
+        t = self.ability_targeting(e, ab, tuple(dest) if dest else None)
         kind = t.get("kind", "none")
 
         if kind == "direction":
@@ -650,6 +704,9 @@ class Match:
             tt = self.entity(params.get("target"))
             if tt is None or not tt.alive or not tt.flags["targetable"]:
                 return "Choose anyone still standing."
+            allowed = t.get("options")
+            if allowed is not None and tt.id not in allowed:
+                return "That one is out of reach."
 
         elif kind in ("ally", "unit"):
             want_ally = kind == "ally"
@@ -735,7 +792,7 @@ class Match:
     def end_round(self):
         self.bus.emit(EV.ROUND_END, {})
         for e in self.entities:
-            e.expire_modifiers(UNTIL_ROUND_END, self.round)
+            e.expire_modifiers(UNTIL_ROUND_END)
         self.start_round()
 
     def start_exchange(self):
@@ -959,15 +1016,19 @@ class Match:
         seen = {start}
         frontier = [start]
         out = []
-        for _ in range(max(0, e.move_allowance)):
+        for _ in range(self.move_budget(e)):
             nxt = []
             for cell in frontier:
                 for n in self.topology.neighbours(cell, e):
-                    if n in seen or self.occupant(n) is not None:
+                    # Crossed and stood on are different questions: a door may be
+                    # walked over by the far side but not stopped on, so it keeps
+                    # its place in the walk and stays out of the destinations.
+                    if n in seen or not self.can_cross(e, n):
                         continue
                     seen.add(n)
                     nxt.append(n)
-                    out.append(list(n))
+                    if self.can_enter(e, n):
+                        out.append(list(n))
             frontier = nxt
         return out
 
@@ -1002,7 +1063,7 @@ class Match:
                 continue  # a spent limited ability disappears from the menu
             if not ab.available(self, e):
                 continue  # not yet, or no longer, part of this hero\'s kit
-            if ab.self_move and self.rooted(e):
+            if ab.carries_self and self.rooted(e):
                 continue  # rooted: it cannot carry itself anywhere
             warder = self.ability_locked(e.side)
             out.append(
@@ -1010,7 +1071,7 @@ class Match:
                     "key": "ability:" + ab.key,
                     "name": ab.name,
                     "ap_cost": ab.ap_cost,
-                    "targeting": self.ability_targeting(e, ab),
+                    "targeting": self.menu_targeting(e, ab),
                     "self_move": ab.self_move,
                     "affordable": e.ap >= ab.ap_cost and warder is None,
                     "blocked": f"warded by {warder.name}" if warder else None,
@@ -1176,23 +1237,47 @@ class Match:
         self.maybe_resolve()
         return None
 
-    def ability_targeting(self, e, ab):
+    def menu_targeting(self, e, ab):
+        """The ability's targeting for the menu, worked out for every square the
+        hero could be standing on when it goes off — its own, and everywhere it
+        could walk to. Movement resolves before the ability does, so an option
+        list built only from where it stands now offers throws it cannot make and
+        hides ones it can. The client picks the entry for the square it is aiming
+        from; the server judges the order against the same one."""
+        t = self.ability_targeting(e, ab)
+        positional = [k for k in ("choices", "options", "cells") if k in t]
+        if not positional:
+            return t
+        at = {}
+        for cell in [e.cell] + [tuple(c) for c in self.legal_moves(e)]:
+            if cell is None:
+                continue
+            v = self.ability_targeting(e, ab, cell)
+            at[f"{cell[0]},{cell[1]}"] = {k: v[k] for k in positional}
+        t["at"] = at
+        return t
+
+    def ability_targeting(self, e, ab, origin=None):
         """The ability's targeting, plus any live options only the engine can work
-        out — 冲撞's chargeable lanes, with landing square and who gets trampled."""
+        out — 冲撞's chargeable lanes, with landing square and who gets trampled.
+
+        `origin` is the square the hero will be standing on when the ability goes
+        off. Everything positional is measured from there, so an order is offered
+        and judged against where the hero *will* be, not where it is leaving."""
         t = dict(ab.targeting)
         if t.get("kind") == "two_units":
             t["options"] = [e.id for e in self.living()
                             if e.cells and e.flags["targetable"]]
         if hasattr(ab, "lanes"):
-            t["choices"] = ab.lanes(self, e)
+            t["choices"] = ab.lanes(self, e, origin)
         if hasattr(ab, "shapes"):
-            t["choices"] = ab.shapes(self, e)
+            t["choices"] = ab.shapes(self, e, origin)
         if hasattr(ab, "cells"):
-            t["cells"] = [list(c) for c in ab.cells(self, e)]
+            t["cells"] = [list(c) for c in ab.cells(self, e, origin)]
         if hasattr(ab, "throwable"):
-            t["options"] = ab.throwable(self, e)
+            t["options"] = ab.throwable(self, e, origin)
         if hasattr(ab, "blessable"):
-            t["options"] = ab.blessable(self, e)
+            t["options"] = ab.blessable(self, e, origin)
         return t
 
     def validate_action(self, e, dest, action):
@@ -1220,12 +1305,14 @@ class Match:
                 return f"Needs {ab.ap_cost} AP."
             if ab.use_limit is not None and e.vars.get("ability_uses", {}).get(ab.key, 0) >= ab.use_limit:
                 return "That ability is spent for the match."
-            if ab.self_move and self.rooted(e):
+            if ab.carries_self and self.rooted(e):
                 return f"{e.name} cannot move this turn."
             if ab.self_move and e.cells and dest != e.cell:
                 return f"{ab.name} does the moving — leave your movement as hold."
+            # Where it will be standing when this resolves — movement is applied
+            # first, so anything positional must be judged from there.
             return (self.validate_targeting(e, ab, action, dest)
-                    or ab.validate(self, e, action))
+                    or ab.validate(self, e, action, dest or e.cell))
         return "Unknown action."
 
     # ---- 武器大师 weapon stances -------------------------------------------
@@ -1250,7 +1337,10 @@ class Match:
                 return "Cells must be distinct."
         return None
 
-    def _surround8(self, cell):
+    def surround8(self, cell):
+        """The eight squares around this one, diagonals included, on the same map.
+        The one definition of "right beside it" — 大力士 asks it what it can seize,
+        and 武器大师's spread asks it what it catches."""
         c, r = cell
         return [
             (c + dc, r + dr)
@@ -1267,7 +1357,7 @@ class Match:
         if shape == "board":
             return self.topology.all_cells()
         if shape == "surround8":
-            return self._surround8(origin)
+            return self.surround8(origin)
         if shape == "row":
             return self.topology.row(origin[1])
         if shape == "column":
@@ -1312,7 +1402,7 @@ class Match:
         if w["mode"] == "row":
             return [ACT.AreaAttack(e, self.topology.row(e.cell[1]), w["atk"])]
         if w["mode"] == "surround8":
-            return [ACT.CellLockedAttack(e, self._surround8(e.cell), e.cell, amount=w["atk"])]
+            return [ACT.CellLockedAttack(e, self.surround8(e.cell), e.cell, amount=w["atk"])]
         return [ACT.NullAction()]
 
     def maybe_resolve(self):
@@ -1841,26 +1931,62 @@ class Match:
         self.phase = COMMIT              # transient; the instant moves it on
         resume, self.interrupt_resume = self.interrupt_resume, None
         if resume is not None:
-            # The queue was raised outside a resolution (探险家's island arriving at
-            # the top of a round), so there is no instant to finish — pick the round
-            # back up where it was interrupted.
-            return self.resume_round_start()
+            # The queue was raised outside an exchange's own instant (探险家's island
+            # arriving at the top of a round, 大力士's throw once everything has
+            # settled), so there is nothing to finish — pick up where it paused.
+            return self.resume_after_interrupts(resume)
         if not self.finish_instant():
             self.advance_resolution()
         return None
 
-    def pause_for_interrupts(self):
+    def pause_for_interrupts(self, resume="round_start"):
         """Hold the board on the queue that was just raised, with no resolution
         behind it. The caller must return straight after."""
-        self.interrupt_resume = "round_start"
+        self.interrupt_resume = resume
         self.phase = INTERRUPT
         self.bump()
 
-    def resume_round_start(self):
+    def resume_after_interrupts(self, what):
+        """Pick up whatever was paused. Deaths are settled here rather than where
+        the damage landed, so a hero somebody stepped in front of is already back
+        above zero by the time anyone counts the fallen."""
+        self.instant = None
+        self.sweep_deaths()
         if self.check_victory():
+            return None
+        if what == "followup" and any(self.followups.values()):
+            self.phase = RESOLVED        # back to the queue that was interrupted
+            self.bump()
             return None
         self.start_exchange()
         return None
+
+    def deal_after_exchange(self, batch, resume="followup"):
+        """Land damage that happens once an exchange has already settled (大力士's
+        throw). It is still an ability landing on a hero, so 教皇 gets its chance
+        exactly as it would mid-resolution — the only difference is that there is
+        no instant behind it to finish afterwards.
+
+        Anything the board banked on the way — a mine under the square somebody
+        was just put on — lands in the same instant, the way movement hazards do
+        during an exchange.
+
+        Returns True if the board is now waiting on a decision."""
+        batch = list(batch)
+        if self.pending_hazards:
+            batch += self.pending_hazards
+            self.pending_hazards = []
+        if not batch:
+            return False
+        applied = [(ev, DMG.deal(self, ev)) for ev in batch]
+        self.instant = {"batch": [(ev.target.side, None, ev) for ev in batch],
+                        "insts": [], "applied": applied}
+        if self.offer_saves():
+            self.pause_for_interrupts(resume)
+            return True
+        self.instant = None
+        self.sweep_deaths()
+        return False
 
     def sweep_deaths(self):
         for e in self.entities:
@@ -1908,6 +2034,8 @@ class Match:
                 # during this very exchange, drop one that has now been served.
                 if e.vars.get("rooted_at") not in (None, (self.round, self.exchange)):
                     e.vars["rooted_at"] = None
+                    e.vars.pop("rooted_squares", None)
+                    e.vars.pop("rooted_tag", None)
                 # Turns this unit has finished. Read at menu-build time as well as
                 # at commit, so it must not change between the two.
                 e.vars["turns_done"] = e.vars.get("turns_done", 0) + 1
@@ -1950,7 +2078,10 @@ class Match:
                    "died": not e.alive, "acted": acted}
             if acted:
                 self.bus.emit(EV.TURN_RESOLVED, ctx)
-            for p in e.passives:
+            # Abilities are asked as well as passives: an ability whose effect
+            # lands after the exchange (大力士's throw) owns that rule itself
+            # rather than needing a passive kept alongside it to serve it.
+            for p in list(e.passives) + list(e.abilities):
                 fn = getattr(p, "followup", None)
                 got = fn(self, e, ctx) if fn else None
                 # A passive may raise several at once (画师 both blunting and
@@ -1998,12 +2129,16 @@ class Match:
         # asked for it, and a parting shot is asked for precisely by a unit that
         # has just died. Passives that need a body of their own check for one.
         if e is not None:
-            for p in e.passives:
+            for p in list(e.passives) + list(e.abilities):
                 fn = getattr(p, "apply_followup", None)
                 if fn:
                     fn(self, e, task["key"], choice)
         pend.pop(0)
         self.bump()
+        if self.phase == INTERRUPT:
+            # The follow-up raised a decision of its own (somebody may be stepped
+            # in front of). Whatever is left of this queue waits for that.
+            return None
         if not any(self.followups.values()):
             self.phase = COMMIT      # start_exchange sets the real phase
             self.start_exchange()
