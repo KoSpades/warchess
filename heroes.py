@@ -1222,27 +1222,38 @@ class GreatFog(Ability):
     name = "大雾 Great Fog"
     ap_cost = 3
     targeting = {"kind": "none"}
-    blurb = ("Every enemy loses 1 attack range, permanently. Casts stack, but never "
-             "below 1, and heroes who strike any enemy anywhere are unaffected.")
+    blurb = ("Every enemy loses 1 attack range and 1 movement, permanently. Casts "
+             "stack, but neither goes below 1 — heroes already at 1, and those who "
+             "strike any enemy anywhere, shrug off that half of it.")
     FLOOR = 1
 
     def side_effects(self, match, actor, params):
-        fogged = []
+        """Reach and feet are shortened independently: a hero already down to one
+        of them still loses the other. Both are floored here rather than by the
+        engine — `rng` has a floor of its own, `move` has none, and 长冬 is allowed
+        to stop a hero outright, so the limit belongs to the fog."""
+        reach, slowed = [], []
         for e in match.on_map(other_side(actor.side)):
-            # No finite range to shorten (雷霆龙 reaches the whole board), and never
-            # push anyone below the floor — a range-1 attacker just shrugs it off.
-            if e.rng is None or e.rng <= self.FLOOR:
-                continue
-            e.add_modifier(Modifier("rng", "add", -1, source=self))
-            fogged.append(e)
-        if fogged:
-            match.log_line(
-                f"{match.label(actor)} rolls in the fog — "
-                + ", ".join(f"{match.label(e)} to {e.rng}" for e in fogged)
-                + " range."
-            )
+            # No finite range to shorten (雷霆龙 reaches the whole board).
+            if e.rng is not None and e.rng > self.FLOOR:
+                e.add_modifier(Modifier("rng", "add", -1, source=self))
+                reach.append(e)
+            if e.move_allowance > self.FLOOR:
+                e.add_modifier(Modifier("move", "add", -1, source=self))
+                slowed.append(e)
+        parts = []
+        if reach:
+            parts.append(", ".join(f"{match.label(e)} to {e.rng}" for e in reach)
+                         + " range")
+        if slowed:
+            parts.append(", ".join(f"{match.label(e)} to {e.move_allowance}"
+                                   for e in slowed) + " movement")
+        if parts:
+            match.log_line(f"{match.label(actor)} rolls in the fog — "
+                           + "; ".join(parts) + ".")
         else:
-            match.log_line(f"{match.label(actor)} rolls in the fog, but nobody's reach can shorten.")
+            match.log_line(f"{match.label(actor)} rolls in the fog, but nobody's "
+                           f"reach or step can shorten.")
 
 
 class Ray(Ability):
@@ -3164,7 +3175,7 @@ ROSTER = [
         key="robot",
         name="机器人",
         name_en="robot",
-        max_hp=21,
+        max_hp=20,
         atk=2,
         move=1,
         max_ap=0,
@@ -3200,7 +3211,7 @@ ROSTER = [
         key="gunslinger",
         name="双枪手",
         name_en="gunslinger",
-        max_hp=15,
+        max_hp=14,
         atk=4,
         move=1,
         max_ap=0,
@@ -3297,7 +3308,7 @@ ROSTER = [
         key="woodcutter",
         name="樵夫",
         name_en="woodcutter",
-        max_hp=20,
+        max_hp=19,
         atk=2,
         move=1,
         max_ap=0,
@@ -3370,7 +3381,7 @@ ROSTER = [
         key="gatekeeper",
         name="门神",
         name_en="gatekeeper",
-        max_hp=29,
+        max_hp=28,
         atk=3,
         move=1,
         max_ap=0,
@@ -3841,7 +3852,7 @@ ROSTER = [
         atk=3,
         move=3,
         max_ap=0,
-        attack={"mode": CELL, "cells": 2, "range": 2},
+        attack={"mode": CELL, "cells": 2, "range": 1},
         passives=[Vagabond, Reprieve],
         blurb="Fights with whichever arm is worth more, and has one way out of anything.",
     ),

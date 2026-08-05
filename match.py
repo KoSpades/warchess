@@ -1645,7 +1645,14 @@ class Match:
             return built
         if key.startswith("ability:"):
             abkey = key.split(":", 1)[1]
-            ab = next(a for a in e.abilities if a.key == abkey)
+            ab = next((a for a in e.abilities if a.key == abkey), None)
+            if ab is None:
+                # It had this when the order was sealed and does not now: movement
+                # resolves first, and a hero can give an ability up by moving
+                # (鬼魂 surrenders 附身 the moment it takes flesh). The order simply
+                # comes to nothing rather than bringing the exchange down.
+                self.log_line(f"{self.label(e)} no longer has that to give.")
+                return [ACT.NullAction()]
             e.ap = max(0, e.ap - ab.ap_cost)
             if ab.use_limit is not None:
                 uses = e.vars.setdefault("ability_uses", {})

@@ -539,6 +539,42 @@ ok("大雾 never pushes anyone below 1",
 ok("大雾 is repeatable — still on the menu",
    "ability:great_fog" in {a["key"] for a in m.action_menu(fog)})
 
+# it takes the feet as well as the reach, and floors both independently
+m3 = arena([("mist_lady", (3, 3))],
+           [("wanderer", (7, 3)), ("wind_rider", (7, 1)), ("thunder_dragon", (7, 2))])
+fog3 = unit(m3, LEFT, "mist_lady")
+wan, wind, drag3 = (unit(m3, RIGHT, k) for k in
+                    ("wanderer", "wind_rider", "thunder_dragon"))
+mv0 = {e.key: e.move_allowance for e in (wan, wind, drag3)}
+rng0 = {e.key: e.rng for e in (wan, wind, drag3)}
+fog3.ap = fog3.max_ap
+turn(m3, fog3.id, {"destination": None, "action": {"key": "ability:great_fog"}},
+     wan.id, {"destination": None, "action": {"key": "none"}})
+ok("大雾 takes a square off a mobile enemy",
+   mv0["wanderer"] - wan.move_allowance == 1,
+   f"{mv0['wanderer']} -> {wan.move_allowance}")
+ok("...and off a second one at the same time",
+   mv0["wind_rider"] - wind.move_allowance == 1,
+   f"{mv0['wind_rider']} -> {wind.move_allowance}")
+ok("...while a hero already at one square keeps it",
+   drag3.move_allowance == mv0["thunder_dragon"], str(drag3.move_allowance))
+ok("...and the reach still goes with it",
+   rng0["wind_rider"] - wind.rng == 1, f"{rng0['wind_rider']} -> {wind.rng}")
+ok("...and a hero already at range 1 still loses the square",
+   rng0["wanderer"] == wan.rng == 1 and wan.move_allowance < mv0["wanderer"],
+   f"rng {wan.rng} move {wan.move_allowance}")
+# cast until nothing more can be taken
+for _ in range(4):
+    fog3.abilities[0].side_effects(m3, fog3, {})
+ok("no amount of fog drops anyone below one square",
+   all(e.move_allowance >= 1 for e in m3.living(RIGHT)),
+   str([e.move_allowance for e in m3.living(RIGHT)]))
+ok("...nor below one square of reach",
+   all(e.rng is None or e.rng >= 1 for e in m3.living(RIGHT)),
+   str([e.rng for e in m3.living(RIGHT)]))
+ok("...and its own side is never fogged",
+   fog3.move_allowance == 1 and unit(m3, LEFT, "mist_lady").rng is None)
+
 # a second fog next round stacks another step off, and the floor still holds
 m2 = arena([("mist_lady", (3, 3))], [("cannoneer", (7, 3)), ("berserker", (7, 1))])
 fog2 = unit(m2, LEFT, "mist_lady")

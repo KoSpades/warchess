@@ -17,6 +17,7 @@ import random
 import sys
 from itertools import combinations
 
+import ai as AI
 import heroes as H
 import view
 from actions import ConeAttack, LineShot
@@ -245,7 +246,47 @@ def ability_options(m, e, a, origin):
             yield {"amount": max(1, cap // 2)}, 4
 
 
+def candidates(m, e, pending=None):
+    """Every order worth considering, as (dest, action, params, cheap_score). The
+    enumeration both AIs choose from — they differ only in how they judge."""
+    menu = m.action_menu(e)
+    zone, dictated = m.move_zone(e, pending)
+    dests = [tuple(c) for c in zone] if dictated \
+        else [None] + [tuple(c) for c in m.legal_moves(e, pending)]
+    for dest in dests:
+        origin = dest or e.cell
+        f = nearest(m, e, origin)
+        approach = -0.30 * m.topology.distance(origin, f.cell) if (f and origin) else 0.0
+        for a in menu:
+            if a.get("affordable") is False:
+                continue
+            if a["key"] == "none":
+                cand = [({}, 0.0)]
+            elif a["key"] == "attack":
+                cand = list(attack_options(m, e, a, origin))
+            else:
+                cand = list(ability_options(m, e, a, origin))
+            for params, score in cand:
+                yield dest, a, params, score + approach
+
+
+# Which brain is driving. `smart` judges a move by what the board is worth after
+# it; `greedy` by the damage it does now. Both pick from `candidates`, so a
+# mirror match between them is a test of judgement and nothing else.
+POLICY = "smart"
+# Set to {LEFT: "smart", RIGHT: "greedy"} to put a different brain on each side,
+# which is how the two are compared head to head.
+SIDE_POLICY = None
+
+
 def best_order(m, e, pending=None):
+    policy = SIDE_POLICY[e.side] if SIDE_POLICY else POLICY
+    if policy == "smart":
+        return AI.best_order(m, e, pending, candidates)
+    return _greedy_order(m, e, pending)
+
+
+def _greedy_order(m, e, pending=None):
     """The order this hero should give, by a one-ply greedy score. `pending` is the
     destinations already chosen by comrades in the same gang turn, so a body placed
     relative to another (蛇帝's tail) is scored against where that one is going."""
@@ -549,8 +590,13 @@ def play_teams(left, right, seed=0, verbose=False):
         free = sorted((c for c in m.topology.deployment_zone(side)
                        if c in m.topology.all_cells()),
                       key=lambda c: (-c[0] if side == LEFT else c[0], c[1]))
+        bodies = m.deploy_bodies(side)
+        if len(bodies) > len(free):
+            # zip would quietly drop the overflow and field a short side, which
+            # reads as a hero being weak rather than as a hero never arriving.
+            return "unplayable"
         m.setup_state[side]["placements"] = [
-            {"key": k, "cell": list(c)} for k, c in zip(m.deploy_bodies(side), free)
+            {"key": k, "cell": list(c)} for k, c in zip(bodies, free)
         ]
         m.setup_state[side]["ready"] = True
     m.begin()
@@ -586,7 +632,7 @@ def random_tournament(n=3000, team_size=2, seed=0):
     rng = random.Random(seed)
     pool = playable()
     rec = {k: {"games": 0, "score": 0.0, "survived": 0} for k in pool}
-    draws = 0
+    draws = unplayable = 0
     for i in range(n):
         # One draw for both forces. The real draft is a shared pool — a hero taken
         # is off the board for the other side too — so a match is 2×team_size
@@ -594,6 +640,9 @@ def random_tournament(n=3000, team_size=2, seed=0):
         picked = rng.sample(pool, team_size * 2)
         left, right = picked[:team_size], picked[team_size:]
         res = play_teams(left, right, seed=i)
+        if res == "unplayable":
+            unplayable += 1
+            continue          # counted nowhere: a short side is not a result
         if res == "draw":
             draws += 1
         for team, side in ((left, LEFT), (right, RIGHT)):
@@ -601,7 +650,7 @@ def random_tournament(n=3000, team_size=2, seed=0):
             for k in team:
                 rec[k]["games"] += 1
                 rec[k]["score"] += got
-    return rec, draws
+    return rec, draws, unplayable
 
 
 def round_robin(keys, reps=1):
