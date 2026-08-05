@@ -4338,9 +4338,10 @@ st78 = unit(m78b, LEFT, "strongman")
 gk78 = unit(m78b, LEFT, "gatekeeper")
 fm78b = unit(m78b, RIGHT, "fisherman")
 st78.set_cell((6, 3)); gk78.set_cell((7, 3))
+throw78 = HEROES.Slam().squares(m78b, st78, gk78)
 ok("nobody may be hurled onto a square shut against them",
-   HEROES.Slam.landing(m78b, st78, gk78) is None,
-   str(HEROES.Slam.landing(m78b, st78, gk78)))
+   (5, 3) not in throw78 and (8, 3) not in throw78, str(sorted(throw78)))
+ok("...though the rest of the ground is still fair", bool(throw78))
 fm78b.set_cell((4, 3))
 ok("...nor hauled onto one", HEROES.Hook.cast(m78b, fm78b, "backward") is None,
    str(HEROES.Hook.cast(m78b, fm78b, "backward")))
@@ -4505,6 +4506,241 @@ m85, hd85, tl85, gate85, d85 = snake_arena()
 m85.root(gate85, squares=1, tag="venom")
 m85.root(gate85)                                   # the pin lands second
 ok("...and a pin landing on a slow overrides it", m85.rooted(gate85))
+
+# 80 — 牛头: shove whatever its horns reached, once the exchange has settled
+def gore_arena(foe="dummy"):
+    m = arena([("minotaur", (3, 3)), ("cannoneer", (3, 1)), ("gatekeeper", (3, 2))],
+              [(foe, (7, 3)), ("berserker", (7, 4)), ("paladin", (7, 5))])
+    return m, unit(m, LEFT, "minotaur"), unit(m, RIGHT, foe)
+
+def gore_tasks(m):
+    return [t for t in m.followups[LEFT] if t["key"].startswith(HEROES.Gore.KEY + ":")]
+
+def gore_turn(m, mi, at, foe, foe_order=None):
+    m.select_hero(LEFT, mi.id)
+    assert m.commit(LEFT, {"destination": None,
+                           "action": {"key": "attack", "shots": [[list(at)]]}}) is None
+    r = m.unacted(RIGHT)[0]
+    m.select_hero(RIGHT, r.id)
+    m.commit(RIGHT, foe_order or hold)
+    guard = 0
+    while m.phase == "victim" and guard < 6:
+        guard += 1
+        m.choose_victim(LEFT, foe.id)
+
+m, mi, foe = gore_arena()
+foe.set_cell((4, 3))
+hp0 = foe.hp
+gore_turn(m, mi, (4, 3), foe)
+ok("a hit earns a shove", len(gore_tasks(m)) == 1, str(len(gore_tasks(m))))
+task = gore_tasks(m)[0]
+ok("...offered around the enemy, and only where it could stand",
+   sorted(map(tuple, task["options"]))
+   == sorted(c for c in m.topology.neighbours(foe.cell) if m.can_enter(foe, c)),
+   str(task["options"]))
+ok("...four squares, never the diagonals",
+   all(abs(c[0] - foe.cell[0]) + abs(c[1] - foe.cell[1]) == 1 for c in task["options"]),
+   str(task["options"]))
+ok("...and it is a choice, not a duty", task["optional"] is True)
+ok("the blow itself still landed", hp0 - foe.hp == mi.atk, f"took {hp0 - foe.hp}")
+m.choose_followup(LEFT, task["options"][0])
+ok("shoving puts it where you said", foe.cell == tuple(task["options"][0]), str(foe.cell))
+
+# declining leaves it exactly where it stood
+m, mi, foe = gore_arena()
+foe.set_cell((4, 3))
+gore_turn(m, mi, (4, 3), foe)
+ok("the shove can be declined", m.choose_followup(LEFT, None) is None)
+ok("...and nobody moves", foe.cell == (4, 3), str(foe.cell))
+
+# a swing that reaches nobody earns nothing
+m, mi, foe = gore_arena()
+gore_turn(m, mi, (4, 3), foe)
+ok("a swing that catches nobody offers no shove", not gore_tasks(m))
+
+# a blow turned aside still counts as reaching
+m, mi, foe = gore_arena()
+foe.set_cell((4, 3))
+foe.vars["blessed"] = mi.id                 # the next blow is turned aside entirely
+hp0 = foe.hp
+gore_turn(m, mi, (4, 3), foe)
+ok("a blessing turns the blow aside", foe.hp == hp0, f"took {hp0 - foe.hp}")
+ok("...but the horns still reached it", len(gore_tasks(m)) == 1,
+   str(len(gore_tasks(m))))
+
+# the marked square is where the blow lands, so walking out of it dodges entirely
+m, mi, foe = gore_arena()
+foe.set_cell((4, 3))
+hp0 = foe.hp
+gore_turn(m, mi, (4, 3), foe,
+          foe_order={"destination": [5, 3], "action": {"key": "none"}})
+ok("an enemy that walks out of the marked square is not struck", foe.hp == hp0,
+   f"took {hp0 - foe.hp}")
+ok("...and so is not shoved either", not gore_tasks(m))
+
+# and one that walks into it is caught, and shoved from there
+m, mi, foe = gore_arena()
+foe.set_cell((5, 3))
+gore_turn(m, mi, (4, 3), foe,
+          foe_order={"destination": [4, 3], "action": {"key": "none"}})
+ok("an enemy that walks into it is caught", foe.cell == (4, 3), str(foe.cell))
+ok("...and the squares offered are the ones around where it finished",
+   sorted(map(tuple, gore_tasks(m)[0]["options"]))
+   == sorted(c for c in m.topology.neighbours(foe.cell) if m.can_enter(foe, c)),
+   str(gore_tasks(m)[0]["options"]))
+
+# a shoved hero trips whatever is buried where it lands
+m = arena([("minotaur", (3, 3)), ("diver", (3, 1)), ("gatekeeper", (3, 2))],
+          [("gatekeeper", (7, 3)), ("berserker", (7, 4))])
+mi, gk = unit(m, LEFT, "minotaur"), unit(m, RIGHT, "gatekeeper")
+m.opening_choose(LEFT, {"cell": [1, 1]})
+gk.set_cell((4, 3))
+m.board.add_effect((4, 2), BOARD.SmallBomb(LEFT))
+hp0 = gk.hp
+gore_turn(m, mi, (4, 3), gk)
+m.choose_followup(LEFT, [4, 2])
+ok("a shoved hero sets off what is buried where it lands",
+   hp0 - gk.hp == mi.atk + BOARD.SmallBomb.DAMAGE,
+   f"took {hp0 - gk.hp} ({mi.atk} horns + {BOARD.SmallBomb.DAMAGE} mine)")
+
+# 81 — 教皇 never spends past its cap, however many fall at once
+m = arena([("pope", (3, 3)), ("cannoneer", (3, 1)), ("gatekeeper", (3, 2))],
+          [("mammoth", (7, 3)), ("dummy", (7, 1))])
+pope = unit(m, LEFT, "pope")
+can, gk = unit(m, LEFT, "cannoneer"), unit(m, LEFT, "gatekeeper")
+mam = unit(m, RIGHT, "mammoth")
+POPE_CAP = HEROES.Absolution.SAVE_LIMIT
+ok("教皇 starts with every mercy", m.saves_left(pope) == POPE_CAP,
+   str(m.saves_left(pope)))
+pope.vars["saves_used"] = POPE_CAP - 1                # one left
+can.hp = gk.hp = 1                                    # two about to fall together
+# Applied but not swept, which is exactly the moment a save is offered in.
+evs = [DMG.DamageEvent(source=mam, target=can, amount=5, category=DMG.ABILITY),
+       DMG.DamageEvent(source=mam, target=gk, amount=5, category=DMG.ABILITY)]
+applied = [(ev, DMG.deal(m, ev)) for ev in evs]
+m.instant = {"batch": [], "insts": [], "applied": applied}
+m.offer_saves()
+asked = [t for t in m.interrupts if t["key"] == "death_save"]
+ok("with one mercy left it is asked once, not twice", len(asked) == 1,
+   str(len(asked)))
+ok("...and the cap is what stops it", m.saves_left(pope) == 1, str(m.saves_left(pope)))
+pope.vars["saves_used"] = POPE_CAP
+ok("spent out, it is no longer among the savers", pope not in m.savers())
+m.interrupts = []
+m.offer_saves()
+ok("...and is asked for nothing more",
+   not [t for t in m.interrupts if t["key"] == "death_save"], str(m.interrupts))
+
+# 狙击手's lane cannot touch what the board says is untouchable
+m = Match()
+m.assign_draft(["sniper", "cannoneer", "gatekeeper"], ["world_tree", "dummy", "berserker"])
+for k, c in (("sniper", (1, 3)), ("cannoneer", (1, 1)), ("gatekeeper", (1, 2))):
+    assert m.place(LEFT, k, c) is None, k
+for k, c in (("dummy", (9, 1)), ("berserker", (9, 2))):
+    assert m.place(RIGHT, k, c) is None, k
+assert m.lock_force(LEFT) is None
+assert m.lock_force(RIGHT) is None
+sn = unit(m, LEFT, "sniper")
+tree = next(e for e in m.entities if e.key == "world_tree")
+ok("a lane shot does not find 世界树", LineShot.scan(m, sn, "forward") is None,
+   str(LineShot.scan(m, sn, "forward")))
+unit(m, RIGHT, "dummy").set_cell((8, 3))
+ok("...and does not reach past it either", LineShot.scan(m, sn, "forward") is None,
+   str(LineShot.scan(m, sn, "forward")))
+ok("...so no lane down that row is offered",
+   "forward" not in [l["dir"] for l in LineShot.lanes(m, sn)],
+   str([l["dir"] for l in LineShot.lanes(m, sn)]))
+
+# 82 — 浪子: whichever arm is worth more, and one way out of anything
+def wand_arena(foe="berserker"):
+    m = arena([("wanderer", (3, 3)), ("cannoneer", (3, 1)), ("gatekeeper", (3, 2))],
+              [(foe, (7, 3)), ("dummy", (7, 1)), ("paladin", (7, 5))])
+    return m, unit(m, LEFT, "wanderer"), unit(m, RIGHT, foe)
+
+def blow(m, src, tgt, cat=None):
+    hp0 = tgt.hp
+    DMG.apply_batch(m, [DMG.DamageEvent(source=src, target=tgt, amount=src.atk,
+                                        category=cat or DMG.NORMAL_ATTACK)])
+    return hp0 - tgt.hp
+
+# against a stronger arm
+m, w, ber = wand_arena("berserker")
+ok("the test needs the enemy to hit harder", ber.atk > w.atk, f"{w.atk} vs {ber.atk}")
+ok("swinging at a stronger hero lands for their arm", blow(m, w, ber) == ber.atk,
+   f"{blow(m, w, ber)} vs {ber.atk}")
+m, w, ber = wand_arena("berserker")
+ok("being swung at by one lands for its own", blow(m, ber, w) == w.atk,
+   f"vs atk {w.atk}")
+
+# against a weaker arm it keeps its own on the way out, takes theirs on the way in
+m, w, d = wand_arena("dummy")
+ok("the test needs the enemy to hit softer", d.atk < w.atk, f"{w.atk} vs {d.atk}")
+m, w, d = wand_arena("dummy")
+ok("swinging at a weaker hero still lands for its own", blow(m, w, d) == w.atk,
+   f"vs atk {w.atk}")
+m, w, d = wand_arena("dummy")
+ok("...and a weaker hero's blow lands for theirs", blow(m, d, w) == d.atk,
+   f"vs atk {d.atk}")
+
+# an ability is nobody's arm
+m, w, ber = wand_arena("berserker")
+hp0 = w.hp
+DMG.apply_batch(m, [DMG.DamageEvent(source=ber, target=w, amount=9,
+                                    category=DMG.ABILITY)])
+ok("an ability passes untouched", hp0 - w.hp == 9, f"took {hp0 - w.hp}")
+
+# the passive follows the live number, not the printed one
+m, w, ber = wand_arena("berserker")
+w.add_modifier(Modifier("atk", "add", 5))            # now the stronger of the two
+ok("it trades on what each is worth right now", blow(m, w, ber) == w.atk,
+   f"{w.atk} vs {ber.atk}")
+
+# the reprieve
+m, w, ber = wand_arena("berserker")
+hp0, atk0 = w.hp, w.atk
+paused = m.deal_after_exchange([DMG.DamageEvent(source=ber, target=w, amount=9,
+                                                category=DMG.ABILITY)])
+task = [t for t in m.interrupts if t["key"] == HEROES.Reprieve.KEY]
+ok("a blow that lands offers the way out", paused and len(task) == 1, str(len(task)))
+ok("...and it is asked of its own side", task[0]["side"] == LEFT)
+m.choose_interrupt(LEFT, True)
+ok("taking it gives the damage back", w.hp == hp0, f"{w.hp}/{hp0}")
+ok("...and costs a point of Atk for good", w.atk == atk0 - 1, f"{atk0} -> {w.atk}")
+m.deal_after_exchange([DMG.DamageEvent(source=ber, target=w, amount=3,
+                                       category=DMG.ABILITY)])
+ok("...and is never offered again",
+   not [t for t in m.interrupts if t["key"] == HEROES.Reprieve.KEY])
+
+# declining leaves the blow standing
+m, w, ber = wand_arena("berserker")
+hp0 = w.hp
+m.deal_after_exchange([DMG.DamageEvent(source=ber, target=w, amount=4,
+                                       category=DMG.ABILITY)])
+m.choose_interrupt(LEFT, None)
+ok("declining leaves the damage where it fell", w.hp == hp0 - 4, f"{w.hp}/{hp0}")
+ok("...and keeps the mercy for later", not w.vars.get("reprieve_used"))
+
+# it works on the blow that would have ended it
+m, w, ber = wand_arena("berserker")
+w.hp = 2
+m.deal_after_exchange([DMG.DamageEvent(source=ber, target=w, amount=9,
+                                       category=DMG.ABILITY)])
+ok("a killing blow raises it too",
+   [t for t in m.interrupts if t["key"] == HEROES.Reprieve.KEY] != [])
+m.choose_interrupt(LEFT, True)
+guard = 0
+while m.phase == "interrupt" and m.interrupts and guard < 6:
+    guard += 1
+    t = m.interrupts[0]
+    m.choose_interrupt(t["side"], t["options"][0] if t.get("options") else True)
+ok("...and it survives", w.alive and w.hp == 2, f"{w.alive} {w.hp}")
+
+# the Atk it gave up feeds back into what blows against it are worth
+m, w, ber = wand_arena("berserker")
+w.vars["reprieve_used"] = True
+w.add_modifier(Modifier("atk", "add", -1))
+ok("a lowered arm means it takes less from a stronger hero",
+   blow(m, ber, w) == w.atk, f"{blow(m, ber, w)} vs atk {w.atk}")
 
 print("\nlog tail:")
 for line in m.log[-5:]:

@@ -122,10 +122,12 @@ class LineShot(ActionInstance):
     @staticmethod
     def scan(match, actor, direction, origin=None):
         """(target, distance) down this lane, or None if it cannot be fired: no
-        enemy in it, or one of your own standing in the way."""
-        step = match.topology.direction_step(actor.side, direction)
-        origin = tuple(origin) if origin else actor.cell
-        if step is None or not origin:
+        enemy in it, or something standing in the way — one of your own, or a body
+        the shot cannot touch at all (世界树). An untouchable thing is not a target
+        and does not stop being in the way for that, so it blocks the lane, which
+        is what 渔夫's line already does with it."""
+        step, origin = match.aim(actor, direction, origin)
+        if step is None:
             return None
         # Distance counts the squares the shot actually crosses, so a sub-map it
         # passes over neither blocks it nor lengthens it.
@@ -136,7 +138,9 @@ class LineShot(ActionInstance):
             # square will be empty by the time the shot goes off.
             if occ is None or occ is actor:
                 continue
-            return None if occ.side == actor.side else (occ, dist)
+            if occ.side == actor.side or not occ.flags["targetable"]:
+                return None
+            return occ, dist
         return None
 
     @classmethod
@@ -212,9 +216,8 @@ class ConeAttack(ActionInstance):
 
     @staticmethod
     def cells(match, actor, direction, origin=None):
-        step = match.topology.direction_step(actor.side, direction)
-        origin = tuple(origin) if origin else actor.cell
-        if step is None or origin is None:
+        step, origin = match.aim(actor, direction, origin)
+        if step is None:
             return []
         return match.topology.cone(origin, step)
 

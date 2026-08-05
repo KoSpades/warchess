@@ -73,17 +73,7 @@ class Match:
                              DMG.Vulnerability(), DMG.FlatReduction(), DMG.CurseTrap(),
                              DMG.HalvingRule(), DMG.Ledger(),
                              DMG.Verdict(), Minefield(), Vineyard()]
-        # Damage from the board itself, banked as it is triggered so a whole
-        # exchange's worth lands in one instant (mines under two movers).
-        self.pending_hazards = []
-        # Units that died during the exchange being resolved. They are gone from
-        # the board but may still owe the player a parting decision.
-        self.recent_deaths = []
-        self.move_choices = {LEFT: [], RIGHT: []}
-        self.move_picks = {}
-        # Decisions owed mid-damage, and the half-applied instant waiting on them.
-        self.interrupts = []
-        self.instant = None
+        self.clear_exchange()
 
         self.entities = []
         self._ids = itertools.count(1)
@@ -111,14 +101,10 @@ class Match:
         self.opening = None
 
         self.phase = SETUP
-        self.selected = {LEFT: None, RIGHT: None}
-        self.commits = {LEFT: None, RIGHT: None}
-        self.turn_started = {LEFT: False, RIGHT: False}
         # 美梦神's 魔法守护: side -> the id of the caster silencing it. Lazily valid,
         # so the ward dies with its caster without a death hook.
         self.ability_lock = {LEFT: None, RIGHT: None}
         self.snapshot = {}
-        self.res = None
         self.last_reveal = None
 
         # Kicks off draft (pvp/self) or auto-setup (test); must come last so all
@@ -221,6 +207,63 @@ class Match:
         if e is not None and self.topology.closed_to(cell, e.side):
             return False
         return self.can_cross(e, cell, ignore)
+
+    def strike_down(self, e, why=None):
+        """End a unit outright, with no blow behind it — 蛮王 burning out, 蛇尾 going
+        limp when the head falls, 探险家 paying 反动. It is not damage, so nothing
+        that turns damage aside touches it and nobody can be interposed; the
+        ordinary death path still runs, so a passive that prevents death has its
+        say and whatever the unit owed its side is still asked for."""
+        e.hp = 0
+        if why:
+            self.log_line(why)
+        self.sweep_deaths()
+
+    def aim(self, e, direction, origin=None):
+        """(step, origin) for a hero aiming down a named direction: the unit vector
+        from its own side's point of view, and the square it will be aiming from
+        once movement has resolved. Both are None if the direction is nonsense or
+        the hero has no body to aim with — four lane-walkers used to reason about
+        which of the two could be missing, each in its own way."""
+        origin = e.acts_from(origin)
+        step = self.topology.direction_step(e.side, direction)
+        return (step, origin) if (step and origin) else (None, None)
+
+    def place_unit(self, e, cell):
+        """Put a unit on a square and tell the board it has moved. Everything that
+        shifts somebody without walking them goes through here — 半人马's charge,
+        渔夫's haul, 大力士's throw, 男枪's step aside, 鸟嘴医生 walking in. The
+        emit is the part that is easy to forget, and forgetting it is how a mine
+        under the destination quietly stops going off."""
+        cell = tuple(cell)
+        frm = e.cell
+        e.set_cell(cell)
+        self.bus.emit(EV.AFTER_MOVE, {"entity": e, "from": frm, "to": cell})
+
+    def clear_exchange(self):
+        """Everything that lives for exactly one exchange, wiped in one place. It
+        was written out twice — once when a match begins and once when an exchange
+        does — which meant a new field of exchange state had to be remembered in
+        both, or it would arrive stale on the first exchange of a match."""
+        self.selected = {LEFT: None, RIGHT: None}
+        self.commits = {LEFT: None, RIGHT: None}
+        self.turn_started = {LEFT: False, RIGHT: False}
+        self.res = None
+        # Whose attacks connected this exchange, for the turn-resolved hooks.
+        self.landed = set()
+        self.followups = {LEFT: [], RIGHT: []}
+        # Units that died during it. They are gone from the board but may still
+        # owe the player a parting decision.
+        self.recent_deaths = []
+        # Damage from the board itself, banked as it is triggered so a whole
+        # exchange's worth lands in one instant (mines under two movers).
+        self.pending_hazards = []
+        # Squares an ability is waiting on, and the ones already chosen.
+        self.move_choices = {LEFT: [], RIGHT: []}
+        self.move_picks = {}
+        # Decisions owed mid-damage, and the half-applied instant waiting on them.
+        self.interrupts = []
+        self.instant = None
 
     def on_map(self, side=None):
         """Living units standing on the board proper. Anything on a sub-map (探险家's
@@ -804,20 +847,7 @@ class Match:
             return
 
         self.exchange += 1
-        self.selected = {LEFT: None, RIGHT: None}
-        self.commits = {LEFT: None, RIGHT: None}
-        self.turn_started = {LEFT: False, RIGHT: False}
-        self.res = None
-        # Whose attacks connected this exchange, for the turn-resolved hooks.
-        self.landed = set()
-        self.followups = {LEFT: [], RIGHT: []}
-        self.recent_deaths = []
-        self.pending_hazards = []
-        # Squares an ability is waiting on, and the ones already chosen.
-        self.move_choices = {LEFT: [], RIGHT: []}
-        self.move_picks = {}
-        self.interrupts = []
-        self.instant = None
+        self.clear_exchange()
         self.take_snapshot()
 
         # A side with nobody left to act sits the exchange out; the other side
@@ -1808,32 +1838,62 @@ class Match:
 
     REWARDS = ("atk", "grid", "rng")
 
+    def saves_left(self, e):
+        """How many more times this hero may step in front of a killing blow.
+        None means it cannot at all; a large number means no cap."""
+        for p in e.passives:
+            if not getattr(p, "saves_deaths", False):
+                continue
+            cap = getattr(p, "SAVE_LIMIT", None)
+            if cap is None:
+                return 1 << 30
+            return max(0, cap - e.vars.get("saves_used", 0))
+        return None
+
     def savers(self):
         """Heroes able to step in front of a killing blow, either side's — and that
         have mercies left to spend."""
         out = []
         for e in self.living():
-            for p in e.passives:
-                if not getattr(p, "saves_deaths", False):
-                    continue
-                cap = getattr(p, "SAVE_LIMIT", None)
-                if cap is not None and e.vars.get("saves_used", 0) >= cap:
-                    continue
+            left = self.saves_left(e)
+            if left:
                 out.append(e)
-                break
         return out
 
     def offer_saves(self):
-        """Queue a decision for every hero about to fall to an attack or an active
-        ability while somebody able to stop it is still standing. Returns True if
-        anything is owed."""
+        """Queue every decision this instant's damage has raised: a hero about to
+        fall while somebody can step in front of it, and anything else that wants
+        a say once it knows what actually landed (浪子 buying its way out). Returns
+        True if anything is owed."""
         # Anything already queued by the instant itself (世界树's beasts, 洛基
         # arriving) holds the board up just as a save would, so this always ends by
         # asking whether *anything* is owed rather than only about Popes.
         st = self.instant
-        popes = self.savers()
-        if st is None or not popes:
+        if st is None:
             return bool(self.interrupts)
+        self._offer_saves(st)
+        self._offer_reactions(st)
+        return bool(self.interrupts)
+
+    def _offer_reactions(self, st):
+        """Anything that reacts to a blow that has just landed. A passive or an
+        ability says so by defining `damage_prompt(match, owner, applied)`; the
+        answer comes back to its `apply_interrupt`. The same shape as `followup`,
+        one beat earlier — while the damage can still be taken back."""
+        for e in list(self.living()):
+            for p in list(e.passives) + list(e.abilities):
+                fn = getattr(p, "damage_prompt", None)
+                if fn is None:
+                    continue
+                got = fn(self, e, st["applied"])
+                for task in (got if isinstance(got, list) else [got]):
+                    if task:
+                        self.interrupts.append(dict(task, entity=e.id))
+
+    def _offer_saves(self, st):
+        popes = self.savers()
+        if not popes:
+            return
         doomed = {}
         for ev, dealt in st["applied"]:
             if dealt <= 0 or ev.source is None:
@@ -1845,14 +1905,20 @@ class Match:
                 continue
             slot = doomed.setdefault(t.id, {"target": t.id, "restore": 0, "source": ev.source.id})
             slot["restore"] += dealt
+        # Several heroes can be doomed in the same instant, and one hero may be the
+        # only one able to save any of them. Its remaining mercies are counted down
+        # as the prompts are raised, or it would be asked more times than it can
+        # answer and spend past its own cap.
+        budget = {p.id: self.saves_left(p) for p in popes}
         for spec in doomed.values():
             t = self.entity(spec["target"])
             # Nobody steps in front of their own end, but another can step in front
             # of theirs. Its own side answers where it can, otherwise the other.
-            others = [p for p in popes if p is not t]
+            others = [p for p in popes if p is not t and budget.get(p.id, 0) > 0]
             if not others:
                 continue
             pope = next((p for p in others if p.side == t.side), others[0])
+            budget[pope.id] -= 1
             self.interrupts.append({
                 "kind": "confirm", "key": "death_save", "side": pope.side,
                 "pope": pope.id, "target": spec["target"], "source": spec["source"],
@@ -1862,7 +1928,6 @@ class Match:
                         f"{self.label(self.entity(spec['source']))}. Step in front of it? "
                         f"It takes nothing — and whoever swung is sharpened for good.",
             })
-        return bool(self.interrupts)
 
     def choose_interrupt(self, side, answer):
         """Answer the decision holding resolution up. `answer` is truthy/None for a
@@ -1879,6 +1944,9 @@ class Match:
         if task["key"] == "death_save" and answer:
             t, src = self.entity(task["target"]), self.entity(task["source"])
             pope = self.entity(task["pope"])
+            if pope is not None and not self.saves_left(pope):
+                answer = None          # out of mercies since this was raised
+        if task["key"] == "death_save" and answer:
             if pope is not None:
                 pope.vars["saves_used"] = pope.vars.get("saves_used", 0) + 1
             if t is not None and t.alive:
@@ -1924,6 +1992,15 @@ class Match:
             if src is not None:
                 src.add_modifier(Modifier(answer, "add", 1))
                 self.log_line(f"{self.label(src)} is sharpened — +1 {answer}.")
+        elif task.get("entity") is not None:
+            # Raised by a hero's own passive or ability (浪子 buying its way out of
+            # a blow), so it is answered by the same one rather than by a branch
+            # here that has to know what every hero wants.
+            e = self.entity(task["entity"])
+            for p in (list(e.passives) + list(e.abilities)) if e else ():
+                fn = getattr(p, "apply_interrupt", None)
+                if fn:
+                    fn(self, e, task, answer)
 
         self.bump()
         if self.interrupts:
@@ -1979,8 +2056,10 @@ class Match:
         if not batch:
             return False
         applied = [(ev, DMG.deal(self, ev)) for ev in batch]
+        # `insts` is keyed by side wherever a resolution builds one; there is no
+        # instance behind this damage, so it is empty rather than a list.
         self.instant = {"batch": [(ev.target.side, None, ev) for ev in batch],
-                        "insts": [], "applied": applied}
+                        "insts": {}, "applied": applied}
         if self.offer_saves():
             self.pause_for_interrupts(resume)
             return True
@@ -2134,6 +2213,11 @@ class Match:
                 if fn:
                     fn(self, e, task["key"], choice)
         pend.pop(0)
+        # Whatever the board banked while that was applied — a mine under the
+        # square somebody was just shoved onto. Settled here rather than by each
+        # hero, so the ground answers a move the same way whoever made it.
+        if self.pending_hazards and self.phase != INTERRUPT:
+            self.deal_after_exchange([])
         self.bump()
         if self.phase == INTERRUPT:
             # The follow-up raised a decision of its own (somebody may be stepped

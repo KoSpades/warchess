@@ -271,9 +271,14 @@ function canAct(u){
 }
 function myUnits(){ return (S.units||[]).filter(u => u.side === SIDE); }
 function foeUnits(){ return (S.units||[]).filter(u => u.side !== SIDE); }
+// A hero by its id. Ten places wrote this lookup out, half of them falling back
+// to {} and half to null, which is how a panel ends up rendering "undefined".
+function unitById(id, missing = null){
+  return (S.units||[]).find(u => u.id === id) || missing;
+}
 function selectedUnit(){
   const id = (draft && draft.entity) || (S.commit && S.commit.selected);
-  return id ? (S.units||[]).find(u=>u.id===id) : null;
+  return id ? unitById(id) : null;
 }
 function currentAction(){
   if (!draft || !draft.actionKey || !S.commit) return null;
@@ -343,7 +348,7 @@ function renderBoard(){
   // order — all cleared once the move actually resolves on the board.
   let previews = [];
   const ghostFor = (id, to) => {
-    const su = (S.units||[]).find(x=>x.id===id);
+    const su = unitById(id);
     if (su && to && !eq(to, su.cell)) previews.push({u:su, to});
   };
   if (S.phase==='commit' && draft){
@@ -484,7 +489,7 @@ function reachCells(origin, rng){
 function applyHover(){
   document.querySelectorAll('.cell.reachL,.cell.reachR').forEach(el=>el.classList.remove('reachL','reachR'));
   if (hoverId==null) return;
-  const u = (S.units||[]).find(x=>x.id===hoverId);
+  const u = unitById(hoverId);
   if (!u || !u.cell) return;
   const cls = u.side==='L' ? 'reachL' : 'reachR';
   for (const [c,r] of reachCells(plannedCell(u), u.rng)){
@@ -730,7 +735,7 @@ function sweepPreview(){
   if (shot) return shot.target.cell ? [shot.target.cell] : [];
   const lane = chargeLane();
   if (lane) return lane.victims
-    .map(id => (S.units||[]).find(u=>u.id===id))
+    .map(id => unitById(id))
     .filter(u => u && u.cell).map(u => u.cell);
   const o = originCell(); if (!o) return [];
   let step = SIDE==='L' ? 1 : -1;
@@ -1021,11 +1026,11 @@ function nameableFor(act, tu){
 
 function onUnitPick(id){
   if (S.phase==='commit' && !S.commit.selected){
-    const u = (S.units||[]).find(x=>x.id===id);
+    const u = unitById(id);
     return canAct(u) ? cmd({cmd:'select', entity:id}) : null;
   }
   const act = currentAction();
-  if (nameForAction(act, (S.units||[]).find(x=>x.id===id))) render();
+  if (nameForAction(act, unitById(id))) render();
 }
 
 /* ---- keyboard: arrows move the piece, Enter confirms move then registers attack ---- */
@@ -1647,7 +1652,7 @@ function renderCommit(){
         }
       } else {
         for (const id of ch.options){
-          const a = (S.units||[]).find(x=>x.id===id) || {};
+          const a = unitById(id, {});
           h += `<button class="btn ${got===id?'on':''}" onclick="pickChoice('${ch.key}',${id})">
                  ${a.name||('#'+id)} <small>AP ${a.ap}/${a.max_ap}</small></button>`;
         }
@@ -1804,7 +1809,7 @@ function targetingHTML(act){
       ${hit?`<b>${hit}</b> in reach right now.`:'Nothing in reach from there.'}
       Press <b>Enter</b> to swing.</p>`;
   } else if (t.kind==='two_units'){
-    const picked = (draft.pair||[]).map(id => (S.units||[]).find(u=>u.id===id)).filter(Boolean);
+    const picked = (draft.pair||[]).map(id => unitById(id)).filter(Boolean);
     let h = `<div class="step">3 · Swap</div>
       <p class="note">Click two units on the board — either side, anywhere. They trade places as everyone moves, so a hero dragged into a marked square takes what was aimed there.</p>`;
     for (let i = 0; i < 2; i++){
@@ -1833,7 +1838,7 @@ function targetingHTML(act){
     for (const l of shots){
       h += `<button class="btn ${draft.direction===l.dir?'on':''}" onclick="draft.direction='${l.dir}';err='';render()">
               ${DIRS[l.dir]||l.dir}<span class="cost">${l.damage} dmg</span>
-              <small>${l.target.name} · ${l.distance} squares away</small></button>`;
+              <small>${l.target.name} · ${plural(l.distance,'square')} away</small></button>`;
     }
   } else if (t.kind==='shape'){
     h += `<div class="step">3 · Shape</div>`;
@@ -1908,12 +1913,14 @@ function renderInterrupt(){
   if (t){
     h += `<div class="step">${t.name}</div><p class="note">${t.text}</p>`;
     if (t.kind==='confirm'){
-      h += `<button class="btn primary" onclick="cmd({cmd:'interrupt', answer:true})">Step in front of it — <b>Enter</b></button>`;
-      h += `<button class="btn" onclick="cmd({cmd:'interrupt', answer:null})">Let it fall</button>`;
+      // Whoever raised it says what the two answers mean; 教皇's wording is only
+      // the default because it was the first hero to ask anything here.
+      h += `<button class="btn primary" onclick="cmd({cmd:'interrupt', answer:true})">${t.yes||'Step in front of it'} — <b>Enter</b></button>`;
+      h += `<button class="btn" onclick="cmd({cmd:'interrupt', answer:null})">${t.no||'Let it fall'}</button>`;
     } else if (t.option_kind === 'unit'){
       h += `<p class="note">Name a hero — click one on the board or below.</p>`;
       for (const id of t.options){
-        const u = (S.units||[]).find(x=>x.id===id) || {};
+        const u = unitById(id, {});
         h += `<button class="btn" onclick="cmd({cmd:'interrupt', answer:${id}})">
                 ${u.name||('#'+id)}
                 ${u.hp==null?'':`<span class="cost">${u.hp}/${u.max_hp} HP</span>`}</button>`;
@@ -1969,7 +1976,7 @@ function renderFollowup(){
       // Naming a hero is a single click — there is no square to confirm.
       h += `<p class="note">Click one of the highlighted enemies.</p>`;
       for (const id of t.options){
-        const u = (S.units||[]).find(x=>x.id===id) || {};
+        const u = unitById(id, {});
         h += `<button class="btn" onclick="cmd({cmd:'followup', entity:${id}})">
                 ${u.name||('#'+id)}</button>`;
       }
@@ -2001,11 +2008,11 @@ function renderVictim(){
          <b>${got}/${want}</b> so far.</p>`
       : `<p class="note">More than one enemy is standing in your marked cells. Choose which one takes the hit.</p>`;
     for (const id of (S.victim.picked || [])){
-      const u=(S.units||[]).find(x=>x.id===id) || {};
+      const u=unitById(id, {});
       h += `<button class="btn on" disabled>${u.name||''} <small>already named</small></button>`;
     }
     for (const id of S.victim.options){
-      const u=(S.units||[]).find(x=>x.id===id);
+      const u=unitById(id);
       h += `<button class="btn" onclick="cmd({cmd:'victim', entity:${id}})">
               ${u.name} <small>${u.name_en}</small>
               <span class="cost">${u.hp} HP</span></button>`;
@@ -2054,7 +2061,7 @@ function heroDetailHTML(u){
 function renderRHS(){
   const head=document.getElementById('rhshead'), body=document.getElementById('rhsbody');
   if (inspected!=null){
-    const u=(S.units||[]).find(x=>x.id===inspected);
+    const u=unitById(inspected);
     if (u){ head.textContent='Hero'; body.className='body'; body.innerHTML=heroDetailHTML(u); return; }
     inspected=null;
   }

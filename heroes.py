@@ -108,9 +108,8 @@ class Charge(Ability):
 
         Run from `origin` — where the centaur will be standing when it puts its head
         down, which is the end of its walk, not the start."""
-        d = match.topology.direction_step(actor.side, direction)
-        origin = tuple(origin) if origin else (actor.cell if actor.cells else None)
-        if d is None or origin is None:
+        d, origin = match.aim(actor, direction, origin)
+        if d is None:
             return None
         c0, r0 = origin
         lane = [(c0 + d[0] * i, r0 + d[1] * i) for i in range(1, cls.DISTANCE + 1)]
@@ -184,9 +183,7 @@ class Charge(Ability):
         if landing is None:
             match.log_line(f"{match.label(actor)} tramples through but holds its ground.")
             return
-        frm = actor.cell
-        actor.set_cell(landing)
-        match.bus.emit(EV.AFTER_MOVE, {"entity": actor, "from": frm, "to": landing})
+        match.place_unit(actor, landing)
         match.log_line(
             f"{match.label(actor)} charges through the line."
         )
@@ -299,9 +296,7 @@ class Shotgun:
         cell = tuple(choice)
         if not owner.alive or not match.can_enter(owner, cell):
             return
-        frm = owner.cell
-        owner.set_cell(cell)
-        match.bus.emit(EV.AFTER_MOVE, {"entity": owner, "from": frm, "to": cell})
+        match.place_unit(owner, cell)
         match.log_line(f"{match.label(owner)} racks the slide and steps aside.")
 
     def status(self, match, owner):
@@ -392,16 +387,13 @@ class GhostForm:
         }
 
 
-class CursePoison(Ability):
-    key = "curse_poison"
-    name = "咒毒 Curse Poison"
-    ap_cost = 0
-    use_limit = 1
-    opening = True
+class LayCurse(Ability):
+    """诅咒娃娃 baiting one of its own. 咒毒 lays the first at game start and 再咒
+    lays every one after it: the mark itself is identical, so the two say what
+    they cost and what they are worth and share the laying."""
+
     targeting = {"kind": "ally"}
-    blurb = ("At game start, mark one ally (itself included). The first attack or "
-             "ability that damages the marked hero costs its source its next turn. "
-             "Once it springs, 再咒 can lay another.")
+    COST = "loses its next turn"
 
     def side_effects(self, match, actor, params):
         tgt = match.entity(params.get("target"))
@@ -411,10 +403,22 @@ class CursePoison(Ability):
         tgt.vars["curse_mark"] = actor.id
         # Scoped to its own seat: the enemy must not know which hero is baited.
         match.log_line(
-            f"{match.label(actor)} curses {match.label(tgt)} — whoever draws its blood "
-            f"loses two rounds.",
+            f"{match.label(actor)} curses {match.label(tgt)} — whoever draws its "
+            f"blood {self.COST}.",
             side=actor.side,
         )
+
+
+class CursePoison(LayCurse):
+    key = "curse_poison"
+    name = "咒毒 Curse Poison"
+    ap_cost = 0
+    use_limit = 1
+    opening = True
+    COST = "loses two rounds"
+    blurb = ("At game start, mark one ally (itself included). The first attack or "
+             "ability that damages the marked hero costs its source its next turn. "
+             "Once it springs, 再咒 can lay another.")
 
 
 class Transfer(Ability):
@@ -529,7 +533,7 @@ class Slam(Ability):
     def throwable(self, match, actor, origin=None):
         """Everyone it could take hold of, for the client to offer — from wherever
         it will be standing when it grabs, not where it is leaving."""
-        origin = tuple(origin) if origin else (actor.cell if actor.cells else None)
+        origin = actor.acts_from(origin)
         if origin is None:
             return []
         beside = match.surround8(origin)
@@ -541,7 +545,7 @@ class Slam(Ability):
         tgt = match.entity(params.get("target"))
         if tgt is None or not tgt.alive:
             return "Choose anyone still standing."
-        if not actor.cells and origin is None:
+        if actor.acts_from(origin) is None:
             return f"{actor.name} has nothing to grab with."
         if tgt.id not in self.throwable(match, actor, origin):
             return "It can only take hold of somebody right beside it."
@@ -598,9 +602,7 @@ class Slam(Ability):
         cell = tuple(choice)
         if tgt is None or not tgt.alive or not match.can_enter(tgt, cell, ignore=(tgt,)):
             return
-        frm = tgt.cell
-        tgt.set_cell(cell)
-        match.bus.emit(EV.AFTER_MOVE, {"entity": tgt, "from": frm, "to": cell})
+        match.place_unit(tgt, cell)
         if tgt.side == owner.side:
             match.log_line(f"{match.label(owner)} sets {match.label(tgt)} down "
                            f"where it is wanted.")
@@ -902,12 +904,10 @@ class Garrote(Ability):
                 f"hemmed in on every side."
             )
             return
-        frm = actor.cell
-        actor.set_cell(cell)
         actor.vars["garrote_target"] = tgt.id
         # A real move, so anything watching movement sees it — a mine under the
         # square it picks goes off exactly as it would for a hero that walked there.
-        match.bus.emit(EV.AFTER_MOVE, {"entity": actor, "from": frm, "to": cell})
+        match.place_unit(actor, cell)
         match.log_line(
             f"{match.label(actor)} is gone, and standing over {match.label(tgt)}."
         )
@@ -1108,9 +1108,8 @@ class Hook(Ability):
         Thrown from `origin` — where the fisherman will be standing when the hook
         goes out, which is its destination, not the square it is leaving. Its own
         body never blocks the lane: by the time the line is drawn it has left."""
-        step = match.topology.direction_step(actor.side, name)
-        origin = tuple(origin) if origin else actor.cell
-        if step is None or origin is None:
+        step, origin = match.aim(actor, name, origin)
+        if step is None:
             return None
         landing = (origin[0] + step[0], origin[1] + step[1])
         if not match.topology.same_region(landing, origin):
@@ -1163,20 +1162,18 @@ class Hook(Ability):
         if not match.can_enter(catch, landing, ignore=(catch,)):
             match.log_line(f"{match.label(actor)} has nowhere to haul it in to.")
             return
-        frm = catch.cell
-        catch.set_cell(landing)
-        match.bus.emit(EV.AFTER_MOVE, {"entity": catch, "from": frm, "to": landing})
+        match.place_unit(catch, landing)
         match.log_line(f"{match.label(actor)} hauls {match.label(catch)} in.")
 
 
-class Recurse(Ability):
+class Recurse(LayCurse):
     """诅咒娃娃's 再咒. Only available once the mark it laid has actually been
     sprung — a curse still sitting on the board cannot be moved."""
 
     key = "recurse"
     name = "再咒 Curse Again"
     ap_cost = 2
-    targeting = {"kind": "ally"}
+    COST = "loses a turn"
     blurb = ("Lay the curse on another ally, once the last one has been sprung. "
              "The next hero to draw that ally's blood loses its next turn.")
 
@@ -1187,18 +1184,6 @@ class Recurse(Ability):
         if actor.vars.get("curse_live"):
             return "The curse it already laid has not been sprung yet."
         return None
-
-    def side_effects(self, match, actor, params):
-        tgt = match.entity(params.get("target"))
-        if tgt is None or not tgt.alive or tgt.side != actor.side:
-            return
-        actor.vars["curse_live"] = True
-        tgt.vars["curse_mark"] = actor.id
-        match.log_line(
-            f"{match.label(actor)} curses {match.label(tgt)} again — whoever draws "
-            f"its blood loses a turn.",
-            side=actor.side,
-        )
 
 
 class MagicWard(Ability):
@@ -1672,9 +1657,7 @@ class LastStand:
         # Burnout. The rage flag drops first so nothing shields the death, and
         # sweep_deaths runs the normal death path (背水 is spent, so it stands).
         owner.vars["rage"] = False
-        owner.hp = 0
-        match.log_line(f"{match.label(owner)} burns out — the rage takes him.")
-        match.sweep_deaths()
+        match.strike_down(owner, f"{match.label(owner)} burns out — the rage takes him.")
 
 
 class Almsgiving:
@@ -1777,9 +1760,7 @@ class SerpentBody:
             return
         if dead.hero.gang != owner.hero.gang:
             return
-        owner.hp = 0
-        match.log_line(f"{match.label(owner)} goes limp as the head falls.")
-        match.sweep_deaths()
+        match.strike_down(owner, f"{match.label(owner)} goes limp as the head falls.")
 
     def move_anchor(self, match, owner):
         """Who this body is placed against, so the client can offer only the squares
@@ -2642,6 +2623,148 @@ ARMS = [
 ARMS_BY_KEY = {w["key"]: w for w in ARMS}
 
 
+class Vagabond:
+    """浪子 fights with whichever arm is worth more. There is no swap to keep track
+    of and nothing changes hands: when it swings, the blow is worth the better of
+    the two Atks; when it is swung at, the worse of them. Nothing is stored, and
+    it lasts exactly one blow, because it *is* the blow.
+
+    Only ordinary attacks — an ability is nobody's arm, so it passes untouched.
+    Set early in the pipeline so the number everything else works from is the one
+    the pair actually settled on: 增伤 sharpens it, a shield still blunts it, and
+    双枪手's halving still halves it."""
+
+    describe = ("Its normal attacks land for the higher of its own Atk and the "
+                "target's; normal attacks against it land for the lower. Abilities "
+                "are untouched.")
+
+    @EV.hook(priority=10)
+    def on_before_damage(self, match, owner, ev):
+        if ev.cancelled or ev.category != DMG.NORMAL_ATTACK:
+            return
+        if ev.source is owner and ev.target is not owner:
+            ev.amount = max(ev.amount, ev.target.atk or 0)
+        elif ev.target is owner and ev.source is not None and ev.source is not owner:
+            ev.amount = min(ev.amount, owner.atk or 0)
+
+
+class Reprieve:
+    """浪子's one way out. Once in the match, a blow that has just landed on it can
+    be taken back for a point of its own Atk, spent for good.
+
+    Offered after the damage is applied and before deaths are settled — the same
+    window 教皇 answers in — so it can be used on the blow that would end it as
+    readily as on any other. It comes before the arm-for-an-arm passive in the
+    sense that matters: the passive has already chosen a number, and this throws
+    the whole blow away regardless."""
+
+    describe = ("Once in the match, when a blow lands on it, it may give up a point "
+                "of Atk for good to take that damage back — any damage, from any "
+                "source, including one that would have ended it.")
+    KEY = "reprieve"
+
+    def damage_prompt(self, match, owner, applied):
+        if owner.vars.get("reprieve_used") or not owner.alive:
+            return None
+        took = sum(dealt for ev, dealt in applied
+                   if ev.target is owner and dealt > 0)
+        if took <= 0:
+            return None
+        return {
+            "kind": "confirm", "key": self.KEY, "side": owner.side,
+            "restore": took,
+            "name": "金蝉脱壳 Reprieve",
+            "text": (f"{match.label(owner)} has taken {took}. Give up a point of "
+                     f"Atk, for good, and take none of it? It has only the one."),
+            "yes": "Slip it — a point of Atk",
+            "no": "Take the hit",
+        }
+
+    def apply_interrupt(self, match, owner, task, answer):
+        if task.get("key") != self.KEY or not answer:
+            return
+        owner.vars["reprieve_used"] = True
+        owner.hp = min(owner.max_hp, owner.hp + task["restore"])
+        owner.add_modifier(Modifier("atk", "add", -1, source=self))
+        match.log_line(
+            f"{match.label(owner)} slips the blow entirely — and is a point the "
+            f"poorer for it, Atk now {owner.atk}."
+        )
+
+    def status(self, match, owner):
+        if owner.vars.get("reprieve_used"):
+            return None
+        return {
+            "key": "reprieve", "badge": "遁", "label": "金蝉脱壳 REPRIEVE",
+            "text": "Once in the match it can give up a point of Atk to take back "
+                    "a blow that has just landed.",
+        }
+
+
+class Gore:
+    """牛头's horns. Anything its normal attack reaches this turn can be shoved one
+    square once the exchange has settled — and settled is the point, because by
+    then the enemy has finished moving and so has everything that moved it.
+
+    Reaching is enough: a blow turned aside still connected, so 石像鬼 under its
+    stone and 圣骑士 behind its shield are shoved like anybody else. That is why
+    the tally is kept on the way in rather than on the way out — a cancelled blow
+    never reaches the far end of the pipeline at all."""
+
+    describe = ("Anything its normal attack reaches this turn may be shoved one "
+                "square at the end of it, from wherever that hero ended up. A blow "
+                "turned aside still counts. Shoving is a choice, not a duty.")
+    KEY = "gore"
+
+    def on_turn_start(self, match, owner, ctx):
+        if ctx.get("entity") is owner:
+            owner.vars["gored"] = []
+
+    @EV.hook(priority=95)      # late, so any redirection has settled on a target
+    def on_before_damage(self, match, owner, ev):
+        if ev.source is not owner or ev.category != DMG.NORMAL_ATTACK:
+            return
+        if ev.target.side == owner.side:
+            return
+        gored = owner.vars.setdefault("gored", [])
+        if ev.target.id not in gored:
+            gored.append(ev.target.id)
+
+    def followup(self, match, owner, ctx):
+        if ctx.get("entity") is not owner or not owner.alive:
+            return None
+        out = []
+        for tid in owner.vars.get("gored") or []:
+            tgt = match.entity(tid)
+            if tgt is None or not tgt.alive or not tgt.cells:
+                continue
+            free = [c for c in match.topology.neighbours(tgt.cell)
+                    if match.can_enter(tgt, c)]
+            if not free:
+                continue
+            out.append({
+                "key": f"{self.KEY}:{tid}",
+                "name": "牛头 Gore",
+                "text": f"You caught {tgt.name}. Shove it one square, or leave it.",
+                "kind": "cell",
+                "optional": True,
+                "anchor": list(tgt.cell),
+                "options": [list(c) for c in free],
+            })
+        return out
+
+    def apply_followup(self, match, owner, key, choice):
+        if not choice or not key.startswith(self.KEY + ":"):
+            return
+        tgt = match.entity(int(key.split(":", 1)[1]))
+        cell = tuple(choice)
+        if tgt is None or not tgt.alive or not match.can_enter(tgt, cell):
+            return
+        match.place_unit(tgt, cell)
+        match.log_line(f"{match.label(owner)} puts its horns into "
+                       f"{match.label(tgt)} and shoves it aside.")
+
+
 class WeaponMaster:
     describe = "Each turn, choose a weapon: it sets that turn's attack and stance."
 
@@ -2971,8 +3094,7 @@ class Explorer:
                 f"for it."
             )
             # The cost is not damage and nothing can be interposed against it.
-            owner.hp = 0
-            match.sweep_deaths()
+            match.strike_down(owner)
 
     def _all_different(self, match, owner):
         free = [list(c) for c in match.topology.all_cells()
@@ -3711,6 +3833,30 @@ ROSTER = [
         deploys="island",
         blurb="Spends three rounds on an island of its own making, then brings back what it dug up.",
     ),
+    HeroDef(
+        key="wanderer",
+        name="浪子",
+        name_en="wanderer",
+        max_hp=13,
+        atk=3,
+        move=3,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 2, "range": 2},
+        passives=[Vagabond, Reprieve],
+        blurb="Fights with whichever arm is worth more, and has one way out of anything.",
+    ),
+    HeroDef(
+        key="minotaur",
+        name="牛头",
+        name_en="minotaur",
+        max_hp=18,
+        atk=3,
+        move=1,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 3, "range": 1},
+        passives=[Gore],
+        blurb="Gets its horns under whatever it reaches and shoves it a square out of place.",
+    ),
 ]
 
 BY_KEY = {h.key: h for h in ROSTER}
@@ -3828,7 +3974,7 @@ BY_KEY[DUMMY.key] = DUMMY
 # whenever you add heroes; --test fills the rest of your side with dummies.
 # Whoever is newest goes here — --test always deploys the hero just added, so it
 # can be played immediately. Up to two; the rest of the side is padded with dummies.
-TEST_HEROES = ["explorer", "world_tree"]
+TEST_HEROES = ["wanderer", "minotaur"]
 
 
 

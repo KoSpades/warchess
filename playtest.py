@@ -466,9 +466,15 @@ def step(m):
                                              for f in foes))
             m.choose_interrupt(task["side"], pick)
         elif task["kind"] == "confirm":
-            # Save your own; let theirs fall rather than sharpen your enemy.
-            tgt = m.entity(task["target"])
-            m.choose_interrupt(task["side"], bool(tgt) and tgt.side == task["side"])
+            if "target" in task:
+                # Save your own; let theirs fall rather than sharpen your enemy.
+                tgt = m.entity(task["target"])
+                m.choose_interrupt(task["side"],
+                                   bool(tgt) and tgt.side == task["side"])
+            else:
+                # A hero's own reaction to a blow that just landed (浪子 buying its
+                # way out): worth a permanent cost for a real hit, not a scratch.
+                m.choose_interrupt(task["side"], task.get("restore", 0) >= 4)
         else:
             m.choose_interrupt(task["side"], task["options"][0])
     elif m.phase == "move_choice":

@@ -67,6 +67,14 @@ class Entity:
         death must check `alive` rather than assume a position exists."""
         return next(iter(self.cells), None)
 
+    def acts_from(self, origin=None):
+        """The square this unit will be standing on when whatever it committed to
+        goes off: `origin` where the caller knows the destination, otherwise where
+        it stands now, and None for a unit with no body at all. Movement resolves
+        before abilities do, so anything positional has to ask this rather than
+        read `cell` — five places used to spell the same fallback out."""
+        return tuple(origin) if origin else self.cell
+
     def set_cell(self, cell):
         self.cells = {cell}
 
