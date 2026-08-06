@@ -96,6 +96,8 @@ class Match:
 
         # Heroes each side owns after the draft; placement is restricted to these.
         self.drafted = {LEFT: [], RIGHT: []}
+        # Deployment slots per side, filled in once a force is known.
+        self.slots_total = {}
         self.draft = None
         self.build = None
         self.opening = None
@@ -299,6 +301,16 @@ class Match:
         e.vars["rooted_squares"] = n
         e.vars["rooted_tag"] = tag
 
+    def sprint(self, e, squares):
+        """Put squares *into* this unit's next turn — the mirror of `root`, and
+        stamped the same way, so one granted during the unit's own turn is spent
+        by the turn after rather than by the one that granted it (忍者 walks out
+        of the lightning). Two grants do not add up: the longer stride stands."""
+        if e.vars.get("sprint_at") is not None:
+            squares = max(squares, e.vars.get("sprint_squares", 0))
+        e.vars["sprint_at"] = (self.round, self.exchange)
+        e.vars["sprint_squares"] = squares
+
     def rooted(self, e):
         """Stopped outright — which is what an ability that carries the hero asks
         about. A slow leaves it walking, just less far, so it is not this."""
@@ -310,6 +322,8 @@ class Match:
         """How far this unit may actually walk this turn: its move, less whatever
         has been taken off its feet."""
         n = e.move_allowance
+        if e.vars.get("sprint_at") is not None:
+            n += e.vars.get("sprint_squares", 0)
         if e.vars.get("rooted_at") is not None:
             n -= e.vars.get("rooted_squares", self.ALL_SQUARES)
         return max(0, n)
@@ -386,6 +400,8 @@ class Match:
         left += ["dummy"] * (2 - len(left))
         right = ["dummy", "dummy"]   # always dummies: no passives to muddy a test
         self.drafted = {LEFT: left, RIGHT: right}
+        self.slots_total = {s: sum(HEROES.BY_KEY[k].slots for k in self.drafted[s])
+                            for s in (LEFT, RIGHT)}
         self.begin_build()
         if self.phase == BUILD:
             # --test is a playground, not a game: give any builder a sensible pair
@@ -399,7 +415,7 @@ class Match:
             col = 2 if s == LEFT else 8
             free = [(col, r) for r in range(1, self.topology.rows + 1)]
             self.setup_state[s]["placements"] = [
-                {"key": k, "cell": list(c)} for k, c in zip(self.deploy_bodies(s), free)
+                {"key": k, "cell": list(c)} for k, c in zip(self.affordable_bodies(s), free)
             ]
             self.setup_state[s]["ready"] = True
         self.begin()
@@ -460,6 +476,9 @@ class Match:
     def _finish_draft(self):
         self.draft = None
         self.force_size = len(self.drafted[LEFT])
+        # One slot per card picked: field what you drafted, unless something you
+        # drafted is priced at more than one.
+        self.slots_total = {s: len(self.drafted[s]) for s in (LEFT, RIGHT)}
         self.log_line("Draft complete.")
         self.begin_build()
 
@@ -529,6 +548,9 @@ class Match:
         board. Used by headless tests and scripted setups."""
         self.drafted = {LEFT: list(left_keys), RIGHT: list(right_keys)}
         self.force_size = len(left_keys)
+        # Told what to field, not asked to choose: room for every card given.
+        self.slots_total = {s: sum(HEROES.BY_KEY[k].slots for k in self.drafted[s])
+                            for s in (LEFT, RIGHT)}
         self.draft = None
         self.begin_build()
 
@@ -579,6 +601,71 @@ class Match:
     def bodies_needed(self, side):
         return len(self.deploy_bodies(side))
 
+    # --- deployment slots ----------------------------------------------------
+    # A force is a budget, not a list. Almost every card costs one slot, so
+    # "deploy everything you drafted" and "spend your whole budget" are the same
+    # sentence and nothing below changes what a normal game feels like. A card
+    # priced higher (武器大师 at two) makes them different: it fits, but something
+    # else has to stay on the bench, and which one is the player's to decide.
+
+    def card_of(self, body_key):
+        """Which drafted card put this body on the board. A squad member names its
+        squad; everything else is its own card."""
+        for k in (self.drafted[LEFT] + self.drafted[RIGHT]):
+            hero = HEROES.BY_KEY[k]
+            if body_key == k or (hero.squad and body_key in hero.squad):
+                return k
+        return body_key
+
+    def slot_budget(self, side):
+        """Slots to spend.
+
+        A real draft hands you four cards and four slots, so a force of ordinary
+        cards deploys exactly as it always did and a card priced at two costs you
+        one of the others. A force handed over directly instead — `assign_draft`,
+        which headless tests and `--test` use — is not a draft at all but an
+        instruction to field precisely these, so it is given room for all of them."""
+        return self.slots_total.get(side, len(self.drafted[side]))
+
+    def placed_cards(self, side):
+        """The drafted cards this side has committed to, in draft order. A card the
+        board puts down itself (世界树) is committed the moment it is drafted —
+        its owner never places it, so there is nothing to wait for."""
+        down = {self.card_of(p["key"]) for p in self.setup_state[side]["placements"]}
+        return [k for k in self.drafted[side]
+                if k in down or HEROES.BY_KEY[k].deploys]
+
+    def slots_used(self, side):
+        return sum(HEROES.BY_KEY[k].slots for k in self.placed_cards(side))
+
+    def slots_left(self, side):
+        return self.slot_budget(side) - self.slots_used(side)
+
+    def affordable_bodies(self, side):
+        """The bodies of a force that actually fits the budget, taking cards in
+        draft order and skipping any the remaining slots cannot cover. With every
+        card at one slot this is just `deploy_bodies` — which is why nothing that
+        drives a match had to learn about slots to keep working."""
+        out, left = [], self.slot_budget(side)
+        for k in self.drafted[side]:
+            hero = HEROES.BY_KEY[k]
+            if hero.slots > left:
+                continue
+            left -= hero.slots
+            if hero.deploys:
+                continue          # the board stands it up; its owner places nothing
+            out.extend(hero.squad or [k])
+        return out
+
+    def bench(self, side):
+        """Drafted cards with nothing on the board yet that the budget still has
+        room for, and those it no longer does."""
+        left = self.slots_left(side)
+        down = set(self.placed_cards(side))
+        rest = [k for k in self.drafted[side] if k not in down]
+        return ([k for k in rest if HEROES.BY_KEY[k].slots <= left],
+                [k for k in rest if HEROES.BY_KEY[k].slots > left])
+
     def place(self, side, hero_key, cell):
         cell = tuple(cell)
         st = self.setup_state[side]
@@ -598,8 +685,14 @@ class Match:
         # this body do you still owe", not "is it already down".
         if sum(1 for p in st["placements"] if p["key"] == hero_key) >= copies:
             return "That hero is already deployed."
-        if len(st["placements"]) >= len(bodies):
-            return f"Your force is full at {len(bodies)}."
+        # The budget, not the body count: the first body of a card spends its
+        # slots, and the rest of a squad rides along on the same one.
+        card = self.card_of(hero_key)
+        if card not in self.placed_cards(side):
+            cost = HEROES.BY_KEY[card].slots
+            if cost > self.slots_left(side):
+                return (f"{HEROES.BY_KEY[card].name} needs {cost} slots and you have "
+                        f"{self.slots_left(side)} left — take something else off first.")
         st["placements"].append({"key": hero_key, "cell": list(cell)})
         self.bump()
         return None
@@ -628,9 +721,27 @@ class Match:
 
     def lock_force(self, side):
         st = self.setup_state[side]
-        need = self.bodies_needed(side)
-        if len(st["placements"]) != need:
-            return f"Deploy {need} heroes first."
+        # Every card you have committed to has to be all the way down — a squad
+        # with two of its three placed is a half-deployed force, not a choice.
+        for k in self.placed_cards(side):
+            hero = HEROES.BY_KEY[k]
+            if hero.deploys:
+                continue
+            for body in (hero.squad or [k]):
+                want = (hero.squad or [k]).count(body)
+                got = sum(1 for p in st["placements"] if p["key"] == body)
+                if got < want:
+                    return f"Finish deploying {hero.name} — {want - got} still to place."
+        # And you field what you can afford. With every card at one slot this is
+        # exactly the old rule, "deploy all of them"; it only bites when a card
+        # is priced higher and something genuinely has to sit out.
+        fits, _ = self.bench(side)
+        if fits:
+            return (f"You still have room for {HEROES.BY_KEY[fits[0]].name} — "
+                    f"{self.slots_left(side)} slot(s) spare.")
+        if not st["placements"] and not any(HEROES.BY_KEY[k].deploys
+                                            for k in self.drafted[side]):
+            return "Deploy your force first."
         err = self.gang_placement_error(side)
         if err:
             return err
@@ -776,8 +887,15 @@ class Match:
             origin = tuple(dest) if dest else e.cell
             for cells in shots:
                 cells = [tuple(c) for c in cells]
-                if len(cells) != t["count"]:
-                    return f"Mark exactly {t['count']} squares."
+                # A net is a ceiling, not a quota — the same rule an ordinary
+                # cell attack has always had, where a smaller net is the
+                # attacker's own choice. An ability whose shape has to be exactly
+                # so (水法师 painting four connected squares) says `exact`.
+                if t.get("exact"):
+                    if len(cells) != t["count"]:
+                        return f"Mark exactly {t['count']} squares."
+                elif len(cells) > t["count"]:
+                    return f"At most {t['count']} squares."
                 if len(set(cells)) != len(cells):
                     return "Squares must be distinct."
                 for c in cells:
@@ -958,9 +1076,27 @@ class Match:
             if len(keep) != len(e.modifiers):
                 e.modifiers = keep
 
+    #: What a hero charges at the start of each of its own turns.
+    AP_PER_TURN = 1
+
+    def turn_ap(self, e):
+        """The AP this hero will hold once its turn opens — what it has now, plus
+        the charge that turn brings. The menu is built before the turn actually
+        starts, so without this an ability the hero can pay for the moment it
+        acts would be greyed out right up until it acted."""
+        if e.has_acted or not e.alive or self.turn_started.get(e.side):
+            return e.ap
+        return min(e.max_ap, e.ap + self.AP_PER_TURN)
+
     def run_turn_start(self, e):
         """Board effects resolve before the hero decides anything. Returns False
         if the unit died here — it forfeits its action."""
+        # The charge comes at the *start* of a turn, so a hero may spend it on the
+        # turn it arrives rather than banking it for the next one.
+        before = e.ap
+        e.gain_ap(self.AP_PER_TURN)
+        if e.ap != before:
+            self.log_line(f"{self.label(e)} charges to {e.ap}/{e.max_ap} AP.", quiet=True)
         self.expire_owner_modifiers(e)
         for side, eid in self.ability_lock.items():
             if eid == e.id:            # her next turn has come: the ward lifts
@@ -1077,7 +1213,8 @@ class Match:
         return None
 
     def action_menu(self, e):
-        """What this hero could commit to, given its AP right now."""
+        """What this hero could commit to, given the AP its turn will open with —
+        `turn_ap`, not `e.ap`, since the charge lands before it acts."""
         if not e.alive:
             return []
         out = [{"key": "none", "name": "Hold", "ap_cost": 0, "targeting": {"kind": "none"}}]
@@ -1103,7 +1240,7 @@ class Match:
                     "ap_cost": ab.ap_cost,
                     "targeting": self.menu_targeting(e, ab),
                     "self_move": ab.self_move,
-                    "affordable": e.ap >= ab.ap_cost and warder is None,
+                    "affordable": self.turn_ap(e) >= ab.ap_cost and warder is None,
                     "blocked": f"warded by {warder.name}" if warder else None,
                     "text": ab.blurb,
                 }
@@ -1144,7 +1281,6 @@ class Match:
         if err:
             return err
 
-        self.apply_choices(e, order)
         self.commits[side] = dict(order, kind="action")
         self.bump()
         self.maybe_resolve()
@@ -1173,9 +1309,18 @@ class Match:
                 return f"{ch['name']}: pick one."
         return None
 
-    def apply_choices(self, e, order):
-        """Run at seal time — the moment the turn actually begins."""
-        picks = order.get("choices") or {}
+    def apply_choices(self, e, payload):
+        """Settle this unit's free picks. Run as its turn *begins* — before the
+        move and the action are judged — because that is when they happen: the
+        fee 军火商人 charges for a weapon is AP in its own pocket for the rest of
+        the same turn, and its shot may burn it.
+
+        Once per turn, whatever happens next. A commit refused for a bad order
+        leaves the picks made, exactly the way it leaves the turn started."""
+        if e.vars.get("choices_exchange") == self.exchange:
+            return
+        picks = (payload or {}).get("choices") or {}
+        e.vars["choices_exchange"] = self.exchange
         for ch in self.turn_choices(e):
             target = picks.get(ch["key"])
             if target not in ch["options"]:
@@ -1206,7 +1351,14 @@ class Match:
         # Solo mode aims normal attacks for you — random grids within range.
         if self.mode == "self" and key == "attack" and e.hero.attack["mode"] == HEROES.CELL:
             action = dict(action, shots=self.random_shots(e, dest))
-        err = self.validate_action(e, dest, action) or self.validate_choices(e, payload)
+        # The free picks are settled first, then the action is judged against
+        # what they leave behind. 军火商人 collects its fee as its turn opens, so
+        # by the time its shot is priced the fee is its own to feed into it.
+        err = self.validate_choices(e, payload)
+        if err:
+            return None, err
+        self.apply_choices(e, payload)
+        err = self.validate_action(e, dest, action)
         if err:
             return None, err
         return {
@@ -1255,8 +1407,6 @@ class Match:
         if any(r is not None for r in ranks) and ranks != sorted(r or 0 for r in ranks):
             return "This one acts in a fixed order — the head leads."
 
-        for o in orders:
-            self.apply_choices(self.entity(o["entity"]), o)
         self.commits[side] = {
             "kind": "gang",
             "gang": self.gang_of(picked),
@@ -1658,6 +1808,14 @@ class Match:
                 uses = e.vars.setdefault("ability_uses", {})
                 uses[ab.key] = uses.get(ab.key, 0) + 1
             self.log_line(f"{self.label(e)} spends {ab.ap_cost} AP on {ab.name}.")
+            # An ability may resolve as real action instances rather than straight
+            # to damage. That is the only way to get a victim picked *after*
+            # everyone has moved — the resolution pauses for instances, not for
+            # `build_damage` — which is what an ability shaped like an attack
+            # needs (忍者's 雷切 marks a net and takes one body out of it).
+            own = getattr(ab, "instances", None)
+            if own is not None:
+                return own(self, e, action, intended)
             return [ACT.AbilityAction(e, ab, action, 0)]
         return [ACT.NullAction()]
 
@@ -2122,6 +2280,11 @@ class Match:
                     e.vars["rooted_at"] = None
                     e.vars.pop("rooted_squares", None)
                     e.vars.pop("rooted_tag", None)
+                # A stride is spent the same way, on the turn after the one that
+                # granted it — the turn it was meant to carry.
+                if e.vars.get("sprint_at") not in (None, (self.round, self.exchange)):
+                    e.vars["sprint_at"] = None
+                    e.vars.pop("sprint_squares", None)
                 # Turns this unit has finished. Read at menu-build time as well as
                 # at commit, so it must not change between the two.
                 e.vars["turns_done"] = e.vars.get("turns_done", 0) + 1
@@ -2130,10 +2293,6 @@ class Match:
                 self.bus.emit(EV.TURN_END, {"entity": e})
                 # "本回合" buffs (哥布林鼓舞) die with the turn that granted them.
                 e.expire_modifiers(UNTIL_TURN_END)
-                before = e.ap
-                e.gain_ap(1)
-                if e.ap != before:
-                    self.log_line(f"{self.label(e)} charges to {e.ap}/{e.max_ap} AP.", quiet=True)
         if self.check_victory():
             return
         self.res = None

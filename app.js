@@ -41,7 +41,11 @@ function confirmOpening(){
   }
   cmd({cmd:'opening', cell});
 }
-let hoverId = null, inspected = null, revealActive = false, shownReveal = "";
+let hoverId = null, revealActive = false, shownReveal = "";
+// Where the field log was left, and what it last said. The right-hand panel is
+// shared with the hero card now that hovering shows one, so a mouse crossing the
+// board must not scroll away the line somebody is reading.
+let logScroll = null, logShown = "", rhsShowing = "log";
 let codex = {};   // all hero cards, fetched once from /api/codex (not per poll)
 
 // Squares have no names a player can read off the board, so anything that has to
@@ -60,6 +64,14 @@ const dist = (a,b) => Math.abs(a[0]-b[0]) + Math.abs(a[1]-b[1]);
 const plural = (n, one, many) => `${n} ${n === 1 ? one : (many || one + 's')}`;
 const within = (a,b,rng) => dist(a,b) <= rng;
 const has = (arr,c) => (arr||[]).some(x => eq(x,c));
+// May anybody of your side come to rest on that square, before asking who is
+// standing there? Two facts about the board itself say no: the far side of
+// another 工匠's doors is wall to you, and an island is off the board entirely.
+// The server refuses both (`can_enter`), so anywhere the client works out a
+// landing square for itself has to know them too — otherwise it offers a square
+// that is taken back the moment you press Enter.
+const standable = c => !has(S.offboard, c)
+  && !(S.doors||[]).some(d => d.owner !== S.you && has(d.cells, c));
 
 async function api(path, body){
   const r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json', 'ngrok-skip-browser-warning':'1'},
@@ -71,7 +83,7 @@ async function cmd(body){
   err = res.error || "";
   await poll(true);
 }
-async function resetMatch(){ await api('/api/reset'); draft=null; armed=null; pendingMoves=[]; inspected=null; hoverId=null; revealActive=false; shownReveal=""; err=""; await poll(true); }
+async function resetMatch(){ await api('/api/reset'); draft=null; armed=null; pendingMoves=[]; hoverId=null; revealActive=false; shownReveal=""; logScroll=null; logShown=""; rhsShowing="log"; err=""; await poll(true); }
 
 async function loadCodex(){
   try {
@@ -165,6 +177,7 @@ function linkedMoves(i){
   const taken = ms.filter((x,j) => j!==i && placedPos()[x.entity]).map(x => placedPos()[x.entity]);
   const open = c => {
     if (c[0]<1 || c[1]<1 || c[0]>S.board.cols || c[1]>S.board.rows) return false;
+    if (!standable(c)) return false;
     if (has(taken, c)) return false;
     const u = unitAt(c);
     return !u || has(own, c);
@@ -213,6 +226,18 @@ function curChoices(){
     return (g && g.choices) || [];
   }
   return (S.commit && S.commit.choices) || [];
+}
+// What this turn's free picks are about to put in the acting hero's pocket.
+// 军火商人 charges its fee as its turn opens, before it moves or shoots, so a
+// sale being set up right now is fuel the very same shot may burn.
+function pendingFee(){
+  let got = 0;
+  for (const ch of curChoices()){
+    const picked = (draft.choices||{})[ch.key];
+    const w = (ch.wares||[]).find(x => x.value === picked);
+    if (w) got += w.ap || 0;
+  }
+  return got;
 }
 function choicesReady(){
   return curChoices().every(ch => ch.optional || (draft.choices||{})[ch.key] != null);
@@ -478,7 +503,7 @@ function renderBoard(){
   applyHover();
 }
 
-/* ---- hover a hero to preview its auto-attack reach; click to inspect ---- */
+/* ---- hover a hero: its reach on the board, its card in the panel ---- */
 function reachCells(origin, rng){
   if (rng==null) return [];
   const out=[];
@@ -497,8 +522,16 @@ function applyHover(){
     if (el) el.classList.add(cls);
   }
 }
-function setHover(id){ hoverId = (id==null ? null : id); applyHover(); }
-function inspect(id){ inspected = (inspected === id ? null : id); renderRHS(); }
+// Hovering a hero previews its reach on the board and puts its card in the panel.
+// Reading a hero used to be a click, which on the board is never *only* a click:
+// the hero sits inside its square, so the same press also marked that square as
+// an attack grid. Looking something up should not be a move.
+function setHover(id){
+  const was = hoverId;
+  hoverId = (id==null ? null : id);
+  applyHover();
+  if (hoverId !== was) renderRHS();
+}
 
 function unitHTML(u, pending){
   const cls=['unit',u.side];
@@ -532,7 +565,7 @@ function unitHTML(u, pending){
   // Board art sits behind the name and HP; heroes with no sprite render as before.
   const sprite = u.sprite ? `<span class="sp" style="background-image:url('${u.sprite}')"></span>` : '';
   if (u.sprite) cls.push('has-sprite');
-  return `<span class="${cls.join(' ')}" onmouseenter="setHover(${u.id})" onmouseleave="setHover(null)" onclick="inspect(${u.id})">`
+  return `<span class="${cls.join(' ')}" onmouseenter="setHover(${u.id})" onmouseleave="setHover(null)">`
        + sprite
        + (qi>=0 ? `<span class="qn" title="acts ${qi+1}${'st,nd,rd'.split(',')[qi]||'th'} this gang turn">${qi+1}</span>` : '')
        + badges
@@ -628,6 +661,16 @@ async function dropCell(e, c, r){
 // 狙击手's lanes, scanned client-side from the square being aimed at — the
 // server re-scans from the real destination when the order is sealed. Mirrors
 // actions.LineShot.scan: first body wins, your own line blocks the shot.
+// Everything the marking net could actually be laid over, from where this hero
+// will be standing. The cells counterpart of laneShots(): it is what separates
+// "you forgot to aim" from "there is genuinely nothing to shoot at", and only
+// the first of those deserves to stop an Enter.
+function cellTargets(){
+  const act = currentAction(), cs = cellSpec();
+  if (!act || !cs) return [];
+  const o = originCell(); if (!o) return [];
+  return (S.units||[]).filter(u => nameable(act, u) && u.cell && within(o, u.cell, cs.range));
+}
 function laneShots(){
   const act = currentAction(), u = selectedUnit();
   if (!act || act.targeting.kind!=='lane' || !u) return [];
@@ -1076,8 +1119,15 @@ function sealFromKeyboard(){
       draft.shotIndex = (draft.shotIndex||0) + 1;
       err=""; return render();
     }
-    // Solo mode fires a random attack; otherwise no grids marked = hold.
-    if (S.mode!=='self' && !(draft.shots||[]).some(s=>s.length>0)) draft.actionKey='none';
+    // Solo mode fires a random attack. Otherwise no grids marked means hold —
+    // but the same trap as the sniper's lane applies: silently turning an
+    // unaimed attack into a hold loses the turn without saying so. Fall through
+    // to a hold only when there was nothing to shoot at anyway, and never when
+    // the shot has been fed AP (军火商人) — that would burn the fee on nothing.
+    if (S.mode!=='self' && !(draft.shots||[]).some(s=>s.length>0)){
+      if (!orderReady()){ err = stillNeeded(act); return render(); }
+      draft.actionKey='none';           // genuinely nothing to shoot: hold
+    }
     return sealOrder();
   }
   if (act.key==='attack' && act.targeting.kind==='area') return sealOrder();
@@ -1120,6 +1170,13 @@ function stillNeeded(act){
     return unitCount()>1
       ? `Name ${unitCount()} enemies for ${act.name} — ${namedUnits().length} so far.`
       : `Choose an enemy for ${act.name}.`;
+  if (t.kind==='cells'){
+    if ((draft.spend||0) > 0)
+      return `You fed ${draft.spend} AP into this shot — mark where it lands, `
+           + 'or set the fuel back to 0.';
+    return `Mark where this shot lands — ${plural(cellTargets().length, 'target')} `
+         + 'in reach — or choose Hold.';
+  }
   if (t.kind==='any_cell')  return `Choose a square for ${act.name}.`;
   if (t.kind==='direction') return `Choose a direction for ${act.name}.`;
   if (t.kind==='weapon')    return draft.weapon ? 'Finish aiming this weapon.' : 'Choose a weapon first.';
@@ -1133,9 +1190,13 @@ function stillNeeded(act){
   return 'That order is not ready yet.';
 }
 function onKey(e){
-  // Deployment: Enter seals once all heroes are placed.
+  // Deployment: Enter seals once the budget is spent. Slots rather than bodies,
+  // because a squad is several bodies for one slot and 武器大师 is one body for
+  // two — the server's rule is "you field what you can afford", so this is it.
   if (S && S.phase==='setup' && !S.setup.ready){
-    if (e.key==='Enter' && S.setup.placements.length===S.setup.force_size){
+    const slots = S.setup.slots != null ? S.setup.slots : S.setup.force_size;
+    const used = S.setup.slots_used != null ? S.setup.slots_used : S.setup.placements.length;
+    if (e.key==='Enter' && used >= slots){
       e.preventDefault(); cmd({cmd:'lock'});
     }
     return;
@@ -1254,7 +1315,18 @@ function orderReady(){
   const act = currentAction(); if (!act) return false;
   const t = act.targeting;
   if (t.kind==='none') return true;
-  if (t.kind==='cells') return S.mode==='self' || (draft.shots.length===t.shots && draft.shots.every(s=>s.length<=t.count));
+  if (t.kind==='cells'){
+    if (S.mode==='self') return true;                 // solo mode aims for you
+    if (draft.shots.length!==t.shots) return false;
+    if (!draft.shots.every(s=>s.length<=t.count)) return false;
+    // Marking nothing is a hold, and a hold is a real order — but only when it
+    // was a real choice. With something in reach, or with AP already fed into
+    // the shot (军火商人), an unmarked attack is a forgotten one, and sealing it
+    // silently costs the turn. Hold is a button; it should be pressed on purpose.
+    if (!draft.shots.some(s=>s.length>0))
+      return (draft.spend||0) === 0 && !cellTargets().length;
+    return true;
+  }
   if (t.kind==='unit') return namedUnits().length === unitCount();
   if (t.kind==='any_unit') return draft.target!=null;
   if (t.kind==='ally') return draft.target!=null;
@@ -1274,8 +1346,10 @@ function sealOrder(){
   const act=currentAction(), t=act.targeting, action={key:draft.actionKey};
   if (t.kind==='cells'){
     action.shots = draft.shots;
-    // Points fed into the shot, each one a point of damage (军火商人).
-    if (t.fuel) action.spend = Math.max(0, Math.min(draft.spend||0, t.fuel));
+    // Points fed into the shot, each one a point of damage (军火商人) — the fee
+    // for a sale made this turn included, since it is collected before the shot.
+    if (t.fuel !== undefined)
+      action.spend = Math.max(0, Math.min(draft.spend||0, t.fuel + pendingFee()));
   }
   if (t.kind==='unit'){
     const ids = namedUnits();
@@ -1535,15 +1609,29 @@ function renderSetup(){
   if (st.ready){
     h += `<div class="waiting">Deployment sealed<br>Waiting for the other seat</div>`;
   } else {
-    const left = st.force_size - st.placements.length;
-    h += `<p class="note">Drag each hero onto a square in your shaded zone. <b>${left}</b> left to place.</p>`;
+    // Slots, not bodies. Almost every card costs one, so this reads exactly as
+    // "N left to place" did; a card priced higher (武器大师 at two) is the only
+    // time the two differ, and then the player has to be told why.
+    const slots = st.slots != null ? st.slots : st.force_size;
+    const used = st.slots_used != null ? st.slots_used : st.placements.length;
+    const left = slots - used;
+    h += `<p class="note">Drag each hero onto a square in your shaded zone.
+      <b>${left}</b> of ${slots} slot${slots===1?'':'s'} left.</p>`;
+    if ((st.benched||[]).length)
+      h += `<p class="note">No room left for <b>${st.benched.join(', ')}</b> —
+        they sit this one out unless you take something off.</p>`;
     h += `<p class="dzHint">Drag a placed hero to move it · drop onto another to swap · click it to remove.</p>`;
     for (const hero of S.roster){
       shownCount[hero.key] = (shownCount[hero.key]||0)+1;
       const on = shownCount[hero.key] <= (placedCount[hero.key]||0);
-      const drag = on ? '' : `draggable="true" ondragstart="startDragHero(event,'${hero.key}')" ondragend="endDrag()"`;
-      h += `<div class="hero ${on?'used':'pickable'} ${armed===hero.key?'armed':''}" ${drag} onclick="armHero('${hero.key}')">
-        <div class="top"><span class="cn">${hero.name}</span><span class="en">${hero.name_en}</span>${on?'':'<span class="grip">⠿</span>'}</div>
+      // Down already, or the budget cannot take it: either way it is not draggable.
+      const broke = !on && hero.afford === false;
+      const drag = (on || broke) ? ''
+        : `draggable="true" ondragstart="startDragHero(event,'${hero.key}')" ondragend="endDrag()"`;
+      const cost = (hero.slots||1) > 1
+        ? `<span class="en">${hero.slots} slots</span>` : '';
+      h += `<div class="hero ${on?'used':broke?'used':'pickable'} ${armed===hero.key?'armed':''}" ${drag} onclick="${broke?'':`armHero('${hero.key}')`}">
+        <div class="top"><span class="cn">${hero.name}</span><span class="en">${hero.name_en}</span>${cost}${(on||broke)?'':'<span class="grip">⠿</span>'}</div>
         <div class="stats">HP ${hero.hp} · ATK ${hero.atk} · MOVE ${hero.move} · AP ${hero.max_ap}
           · ${hero.attack.mode==='cell_locked'?`${hero.attack.cells} cells @ ${hero.attack.range}`
               :hero.attack.mode==='area_locked'?'every enemy in the 8 around it'
@@ -1554,9 +1642,10 @@ function renderSetup(){
         ${hero.traits.map(t=>`<div class="trait"><b>${t.name}${t.ap_cost?` (${t.ap_cost} AP)`:''}</b> — ${t.text}</div>`).join('')}
       </div>`;
     }
-    h += st.placements.length===st.force_size
-      ? `<p class="note">All heroes placed — press <b>Enter</b> to seal your deployment.</p>`
-      : `<p class="note">Place all ${st.force_size} heroes, then press <b>Enter</b> to seal.</p>`;
+    h += left <= 0
+      ? `<p class="note">Every slot spent — press <b>Enter</b> to seal your deployment.</p>`
+      : `<p class="note">Fill your remaining ${left} slot${left===1?'':'s'}, then press
+         <b>Enter</b> to seal.</p>`;
   }
   h += `<p class="err">${err}</p>`;
   document.getElementById('leftbody').innerHTML = h;
@@ -1780,16 +1869,21 @@ function targetingHTML(act){
               ${t.shots>1?`Shot ${i+1}`:'Cells'} <span class="cost">${n}/${t.count}</span>
               ${t.shots>1&&i===1?'<small>Half damage</small>':''}</button>`;
     }
-    if (t.fuel){
-      // 军火商人 feeds its own shot: every point spent is a point of damage.
+    // 军火商人 feeds its own shot: every point spent is a point of damage. Read
+    // as "does this attack take fuel at all", not "is there any banked" — a
+    // dealer down to nothing can still sell a weapon and burn the fee.
+    if (t.fuel !== undefined){
       const su = selectedUnit() || {};
-      const x = Math.max(0, Math.min(draft.spend||0, t.fuel));
+      const fee = pendingFee();
+      const cap = t.fuel + fee;
+      const x = Math.max(0, Math.min(draft.spend||0, cap));
       h += `<div class="step">Fuel</div>
         <p class="note">Feed the shot. Every point spent is a point of damage.</p>
-        <input type="range" min="0" max="${t.fuel}" value="${x}" style="width:100%"
+        <input type="range" min="0" max="${cap}" value="${x}" style="width:100%"
                oninput="setSpend(this.value)">
-        <p class="note">Spending <b>${x}</b> of ${t.fuel} · this shot hits for
-           <b>${(su.atk||0) + x}</b></p>`;
+        <p class="note">Spending <b>${x}</b> of ${cap}${
+           fee?` <small>(${t.fuel} banked + ${fee} from the sale)</small>`:''} ·
+           this shot hits for <b>${(su.atk||0) + x}</b></p>`;
     }
   } else if (t.kind==='cone'){
     const arcs = coneArcs();
@@ -2038,13 +2132,16 @@ function heroDetailHTML(u){
   const a = u.attack || {};   // stats come from the unit itself — robust if codex hasn't loaded
   const pct = Math.max(0, Math.round(100*u.hp/u.max_hp));
   const tile = (k,v) => `<div class="hd-tile"><div class="k">${k}</div><div class="v">${v}</div></div>`;
-  let tiles = tile('Attack', u.atk) + tile('Move', u.move);
+  // Attack, then what the attack reaches with, then feet — one row, read left to
+  // right. Move goes last so the two numbers describing the *shot* stay together.
+  let tiles = tile('Attack', u.atk);
   if (a.mode==='cell_locked') tiles += tile('Grids', u.grid ?? a.cells) + tile('Range', u.rng);
-  else if (a.mode==='line_locked') tiles += tile('Reach', 'row & column') + tile('Damage', 'distance');
-  else if (a.mode==='area_locked') tiles += tile('Reach', 'all 8 around') + tile('Hits', 'everyone');
-  else if (a.mode==='cone_locked') tiles += tile('Reach', '3-square arc') + tile('Hits', 'everyone in it');
+  else if (a.mode==='line_locked') tiles += tile('Reach', 'row & col') + tile('Damage', 'distance');
+  else if (a.mode==='area_locked') tiles += tile('Reach', 'all 8') + tile('Hits', 'everyone');
+  else if (a.mode==='cone_locked') tiles += tile('Reach', '3-arc') + tile('Hits', 'all in it');
   else if (a.mode==='weapon') tiles += tile('Weapon', 'varies');
   else tiles += tile('Reach', 'any enemy');
+  tiles += tile('Move', u.move);
   const status = (u.status||[]).map(s =>
     `<div class="hd-status"><b>${s.badge} ${s.label}</b>${s.text}</div>`).join('');
   return `<div class="hd">
@@ -2060,17 +2157,26 @@ function heroDetailHTML(u){
 }
 function renderRHS(){
   const head=document.getElementById('rhshead'), body=document.getElementById('rhsbody');
-  if (inspected!=null){
-    const u=unitById(inspected);
-    if (u){ head.textContent='Hero'; body.className='body'; body.innerHTML=heroDetailHTML(u); return; }
-    inspected=null;
+  // Leaving the log: remember where it was, so coming back does not lose the place.
+  if (rhsShowing==='log') logScroll = body.scrollTop;
+  const u = hoverId!=null ? unitById(hoverId) : null;
+  if (u){
+    rhsShowing='hero';
+    head.textContent='Hero'; body.className='body'; body.innerHTML=heroDetailHTML(u);
+    return;
   }
+  rhsShowing='log';
   head.textContent='Field log'; body.className='body log';
-  body.innerHTML=(S.log||[]).map(l=>{
+  const html=(S.log||[]).map(l=>{
     const isRound = l.text.startsWith('—');
     return `<div class="${isRound?'rd':(l.quiet?'quiet':'')}">${l.text}</div>`;
   }).join('');
-  body.scrollTop = body.scrollHeight;
+  const grew = html !== logShown;
+  body.innerHTML = html;
+  logShown = html;
+  // A line actually arriving pins it to the bottom; merely coming back from a
+  // hero card puts it back exactly where it was left.
+  body.scrollTop = (grew || logScroll==null) ? body.scrollHeight : logScroll;
 }
 
 document.addEventListener('dragend', endDrag);

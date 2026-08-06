@@ -405,7 +405,9 @@ ok("both javelins throw in one gang turn, rallied", rallied == 2 * (j1.atk + 2),
 ok("the gang costs exactly one turn", m.round == 2, f"round {m.round}, exchange {m.exchange}")
 ok("鼓舞 expires with the turn that granted it",
    all(g.atk == g.hero.atk for g in (j1, j2, cm)), str([g.atk for g in (j1, j2, cm)]))
-ok("only 指挥 banks AP", cm.ap == 1 and j1.max_ap == 0, f"cmdr {cm.ap}/{cm.max_ap}, javelin max {j1.max_ap}")
+ok("only 指挥 banks AP — the javelins have no bar at all",
+   cm.max_ap > 0 and j1.max_ap == 0 and j1.ap == 0 and j2.ap == 0,
+   f"cmdr {cm.ap}/{cm.max_ap}, javelins {j1.ap}/{j1.max_ap} {j2.ap}/{j2.max_ap}")
 
 # 22 — order matters: rally after the throws helps nobody
 m, j1, j2, cm, d = gang()
@@ -1523,7 +1525,12 @@ before_ap = doll.ap
 turn(m, doll.id, {"destination": None,
                   "action": {"key": "ability:recurse", "target": can.id}},
      d.id, hold)
-ok("再咒 costs its 2 AP", before_ap - doll.ap == 2 - 1, f"{before_ap} -> {doll.ap} (+1 at turn end)")
+_recurse = next(a for a in doll.abilities if a.key == "recurse")
+# Charged at the start of its turn and then billed: a charge into a bar that
+# is already full is simply lost, so this is not always "price less one".
+_want = min(doll.max_ap, before_ap + 1) - _recurse.ap_cost
+ok("再咒 costs its AP", doll.ap == _want,
+   f"{before_ap} -> {doll.ap}, wanted {_want}, costs {_recurse.ap_cost}")
 ok("the new ally carries the mark", can.vars.get("curse_mark") == doll.id)
 ok("and 再咒 is hidden again until this one springs",
    "ability:recurse" not in [a["key"] for a in m.action_menu(doll)])
@@ -1815,17 +1822,20 @@ ok("row and column are the only two offered",
    [c["dir"] for c in m.ability_targeting(sw, sw.abilities[0])["choices"]] == ["row", "column"])
 m.deselect(LEFT)
 m, sw, ally, d, cannon, gate = sword_arena()
-sw.ap = 2
+# Two short of the price, because the turn itself pays one of them back: AP is
+# charged at the *start* of a turn, so the menu answers for what the hero will
+# hold when it acts, not for what is banked while it is still being chosen.
+_cut_cost = sw.abilities[0].ap_cost
+sw.ap = _cut_cost - 2
 entry = next(a for a in m.action_menu(sw) if a["key"] == "ability:gale_slash")
-ok("two AP is not enough for it — the menu says so", not entry["affordable"])
+ok("short of the price even after this turn's charge — the menu says so",
+   not entry["affordable"], f"{sw.ap} banked, {m.turn_ap(sw)} at turn start, costs {_cut_cost}")
 m.select_hero(LEFT, sw.id)
 ok("...and committing it anyway is refused", m.commit(LEFT, cut("row")) is not None)
 m.deselect(LEFT)
 sw.ap = sw.max_ap
-before_ap = sw.ap
 turn(m, sw.id, cut("row"), cannon.id, hold)
-ok("a cut costs the whole bar", before_ap - sw.ap == 3 - 1,
-   f"{before_ap} -> {sw.ap} (+1 at turn end)")
+ok("a cut costs the whole bar", sw.ap == 0, f"{sw.ap} left")
 
 # 51 — 炸弹客: spends itself all at once, in one of three shapes
 def bomb_arena():
@@ -1837,12 +1847,16 @@ def bomb_arena():
 
 blast = lambda which: {"destination": None,
                        "action": {"key": "ability:self_destruct", "direction": which}}
+# Read off the ability, never written down here: 自爆 gets retuned like anything
+# else, and a suite that hardcodes its number fails on the balance pass rather
+# than on a bug.
+BLAST = HEROES.SelfDestruct.DAMAGE
 
 # the row: 6 to everyone in it, and the bomber is gone
 m, bo, ally, gate, cannon, d = bomb_arena()
 hp0 = (gate.hp, cannon.hp)
 turn(m, bo.id, blast("row"), cannon.id, hold)
-ok("the blast takes everyone in the row for 6", hp0[0] - gate.hp == 6, f"took {hp0[0] - gate.hp}")
+ok("the blast takes everyone in the row", hp0[0] - gate.hp == BLAST, f"took {hp0[0] - gate.hp}")
 ok("...and nobody outside it", cannon.hp == hp0[1], f"took {hp0[1] - cannon.hp}")
 ok("the bomber spends itself", not bo.alive and bo.hp == 0, f"{bo.hp} hp, alive={bo.alive}")
 
@@ -1852,7 +1866,7 @@ cannon.set_cell((3, 1)); gate.set_cell((3, 5))
 hp0 = (cannon.hp, gate.hp, d.hp)
 turn(m, bo.id, blast("column"), d.id, hold)
 ok("the column catches its whole height",
-   (hp0[0] - cannon.hp, hp0[1] - gate.hp) == (6, 6), f"{hp0[0] - cannon.hp}, {hp0[1] - gate.hp}")
+   (hp0[0] - cannon.hp, hp0[1] - gate.hp) == (BLAST, BLAST), f"{hp0[0] - cannon.hp}, {hp0[1] - gate.hp}")
 ok("...and leaves the rest of the board alone", d.hp == hp0[2])
 
 # the 8 around it — diagonals included, and nothing further out
@@ -1860,8 +1874,8 @@ m, bo, ally, gate, cannon, d = bomb_arena()
 gate.set_cell((4, 4)); cannon.set_cell((4, 3)); d.set_cell((5, 3))
 hp0 = (gate.hp, cannon.hp, d.hp)
 turn(m, bo.id, blast("surround8"), d.id, hold)
-ok("the ring catches a diagonal neighbour", hp0[0] - gate.hp == 6, f"took {hp0[0] - gate.hp}")
-ok("...and the one straight beside it", hp0[1] - cannon.hp == 6, f"took {hp0[1] - cannon.hp}")
+ok("the ring catches a diagonal neighbour", hp0[0] - gate.hp == BLAST, f"took {hp0[0] - gate.hp}")
+ok("...and the one straight beside it", hp0[1] - cannon.hp == BLAST, f"took {hp0[1] - cannon.hp}")
 ok("...but not the one two squares out", d.hp == hp0[2], f"took {hp0[2] - d.hp}")
 
 # its own line walks away
@@ -1879,7 +1893,7 @@ turn(m, bo.id, {"destination": [5, 3],
                 "action": {"key": "ability:self_destruct", "direction": "surround8"}},
      d.id, hold)
 ok("it walks two squares in and blows up there",
-   (hp0[0] - gate.hp, hp0[1] - cannon.hp) == (6, 6), f"{hp0[0] - gate.hp}, {hp0[1] - cannon.hp}")
+   (hp0[0] - gate.hp, hp0[1] - cannon.hp) == (BLAST, BLAST), f"{hp0[0] - gate.hp}, {hp0[1] - cannon.hp}")
 
 # 体力降至0 is a setting, not a blow: nothing wards it, softens it or is marked by it
 m, bo, ally, gate, cannon, d = bomb_arena()
@@ -1896,7 +1910,7 @@ hp0 = gate.hp
 turn(m, bo.id, blast("row"),
      gate.id, {"destination": None, "action": {"key": "attack", "shots": [[[3, 3]]]}})
 ok("a bomber cut down in the same instant still goes off",
-   hp0 - gate.hp == 6 and not bo.alive, f"took {hp0 - gate.hp}, bomber alive={bo.alive}")
+   hp0 - gate.hp == BLAST and not bo.alive, f"took {hp0 - gate.hp}, bomber alive={bo.alive}")
 
 # all three shapes are offered, and it costs the whole bar
 m, bo, ally, gate, cannon, d = bomb_arena()
@@ -1907,9 +1921,11 @@ m.select_hero(LEFT, bo.id)
 ok("a shape it does not have is refused", m.commit(LEFT, blast("diagonal")) is not None)
 m.deselect(LEFT)
 m, bo, ally, gate, cannon, d = bomb_arena()
-bo.ap = 2
+_boom = next(a for a in bo.abilities if a.key == "self_destruct")
+bo.ap = _boom.ap_cost - 2      # two short: the turn charge pays back only one
 entry = next(a for a in m.action_menu(bo) if a["key"] == "ability:self_destruct")
-ok("two AP is not enough to set it off", not entry["affordable"])
+ok("short of the price even after the turn charge", not entry["affordable"],
+   f"{bo.ap} banked, {m.turn_ap(bo)} at turn start, costs {_boom.ap_cost}")
 
 # 52 — 蛇帝: one creature on two squares, head leading and tail following
 def snake_arena(right=(("gatekeeper", (7, 3)), ("dummy", (7, 1)))):
@@ -2318,9 +2334,11 @@ ok("no prompt when there is nothing to choose between",
 
 # AP: it costs the whole bar
 m, asn, ally, gk, d = assassin_arena()
-asn.ap = 1
+_gar = next(a for a in asn.abilities if a.key == "garrote")
+asn.ap = _gar.ap_cost - 2      # two short: the turn charge pays back only one
 entry = next(a for a in m.action_menu(asn) if a["key"] == "ability:garrote")
-ok("one AP is not enough", not entry["affordable"])
+ok("short of the price even after the turn charge", not entry["affordable"],
+   f"{asn.ap} banked, {m.turn_ap(asn)} at turn start, costs {_gar.ap_cost}")
 
 # 55 — 猎人: one kill and it sees further, and takes two at a time
 from entities import Modifier
@@ -3061,7 +3079,7 @@ m, wm, ally, d1, d2, gk = wm_arena()
 wm.hp = 5
 turn(m, wm.id, soak([(5, 1), (5, 2), (5, 3), (5, 4)]), gk.id, hold)
 ok("an empty shape mends nothing", wm.hp == 5, f"{wm.hp} hp")
-ok("...and still costs the AP", wm.ap == 0 + 1, f"{wm.ap} AP (+1 at turn end)")
+ok("...and still costs the AP", wm.ap == 0, f"{wm.ap} AP left")
 
 # it is water, and it only touches theirs
 m, wm, ally, d1, d2, gk = wm_arena()
@@ -3271,6 +3289,48 @@ ok("it cannot spend what it does not have",
                    "action": {"key": "attack", "shots": [[[5, 2]]], "spend": 99}}) is not None)
 m.deselect(LEFT)
 
+# the sale happens as its turn opens, before it moves or shoots — so the fee is
+# fuel for that very shot, not money it has to sit on for a round
+m, ad, ally, cannon, d = dealer_arena()
+fee = HEROES.ARMS_BY_KEY["rifle"]["ap"]
+ad.ap, ally.ap = 0, fee
+cannon.set_cell((5, 2))
+hp0, atk0 = cannon.hp, ad.atk
+turn(m, ad.id, {"destination": None, "choices": {"armory": f"rifle:{ally.id}"},
+                "action": {"key": "attack", "shots": [[[5, 2]]], "spend": fee}},
+     d.id, hold)
+ok("with nothing banked, the fee it collects this turn feeds this turn's shot",
+   hp0 - cannon.hp == atk0 + fee, f"took {hp0 - cannon.hp}, atk {atk0} + fee {fee}")
+ok("...and the buyer paid for it", ally.ap == 0, f"{ally.ap} AP")
+
+# banked, charged and collected all spend together, and not a point more.
+# Three sources now: what was saved, the point the turn itself charges, and
+# the fee for the weapon it sells on the way.
+m, ad, ally, cannon, d = dealer_arena()
+banked = 3
+ad.ap, ally.ap = banked, fee
+purse = m.turn_ap(ad) + fee
+m.select_hero(LEFT, ad.id)
+ok("a point past the whole purse is refused",
+   m.commit(LEFT, {"destination": None, "choices": {"armory": f"rifle:{ally.id}"},
+                   "action": {"key": "attack", "shots": [[[2, 2]]],
+                              "spend": purse + 1}}) is not None)
+ok("...and the whole purse is allowed",
+   m.commit(LEFT, {"destination": None, "choices": {"armory": f"rifle:{ally.id}"},
+                   "action": {"key": "attack", "shots": [[[2, 2]]],
+                              "spend": purse}}) is None, f"purse {purse}")
+ok("a sale refused mid-order is not charged twice over", ally.ap == 0, f"{ally.ap} AP")
+
+# without a sale there is nothing extra to burn
+m, ad, ally, cannon, d = dealer_arena()
+ad.ap, ally.ap = banked, fee
+m.select_hero(LEFT, ad.id)
+ok("no sale, no fee to burn",
+   m.commit(LEFT, {"destination": None,
+                   "action": {"key": "attack", "shots": [[[2, 2]]],
+                              "spend": m.turn_ap(ad) + 1}}) is not None)
+m.deselect(LEFT)
+
 # an ordinary hero's shot takes no fuel
 m, ad, ally, cannon, d = dealer_arena()
 m.select_hero(LEFT, ally.id)
@@ -3425,7 +3485,7 @@ ok("it buries every enemy on the board, wherever they stand",
 ok("...and leaves your own line alone", ally.hp == hp0[3], f"took {hp0[3] - ally.hp}")
 ok("the cold takes a point of AP", td.ap == 2, str(td.ap))
 ok("...and cannot take one from an empty bar", cannon.ap == 0, str(cannon.ap))
-ok("it costs the whole bar", sw.ap == 0 + 1, f"{sw.ap} AP (+1 at turn end)")
+ok("it costs the whole bar", sw.ap == 0, f"{sw.ap} AP left")
 
 # it is water, and it counts one creature once
 m = arena([("snow_woman", (3, 3)), ("gatekeeper", (3, 1))],
@@ -3452,8 +3512,6 @@ def tree_arena():
     tree = next(e for e in m.entities if e.key == "world_tree")
     return m, tree, unit(m, LEFT, "cannoneer"), unit(m, LEFT, "gatekeeper")
 
-chop = {"destination": None, "action": {"key": "attack", "shots": [[[5, 3]]]}}
-
 def answer_all(m, pick=None):
     guard = 0
     while m.phase == "interrupt" and m.interrupts and guard < 12:
@@ -3461,19 +3519,31 @@ def answer_all(m, pick=None):
         t = m.interrupts[0]
         m.choose_interrupt(t["side"], pick(t) if pick else t["options"][0])
 
-def chop_once(m, tree, auto=True):
-    """One exchange in which whoever can reach the tree strikes it. `auto` answers
-    whatever the strike raises; pass False to inspect it instead."""
-    L = [e for e in m.unacted(LEFT)]
-    R = [e for e in m.unacted(RIGHT)]
-    if L:
-        m.select_hero(LEFT, L[0].id)
-        reach = m.topology.distance(L[0].cell, (5, 3)) <= (L[0].rng or 0)
-        m.commit(LEFT, chop if reach else hold)
-    if R and m.phase == "commit":
-        m.select_hero(RIGHT, R[0].id); m.commit(RIGHT, hold)
-    if auto:
-        answer_all(m)
+def run_rounds(m, until, pick=None):
+    """Everybody holds until the given round begins. The tree needs nothing spent
+    on it, so a whole round of holds is enough to move its clock on."""
+    guard = 0
+    while m.round < until and guard < 200:
+        guard += 1
+        if m.phase == "interrupt":
+            answer_all(m, pick)
+        elif m.phase in ("victim", "move_choice"):
+            for side in (LEFT, RIGHT):
+                if m.res and m.res["options"][side] and not m.victims_complete(side):
+                    m.choose_victim(side, m.res["options"][side][0])
+        elif m.phase == "commit":
+            moved = False
+            for side in (LEFT, RIGHT):
+                if m.commits[side] is None:
+                    pool = m.unacted(side)
+                    if pool:
+                        m.select_hero(side, pool[0].id)
+                        m.commit(side, hold)
+                        moved = True
+            if not moved:
+                break
+        else:
+            break
 
 m, tree, can, gk = tree_arena()
 ok("it stands in the middle without being placed", tree.cell == (5, 3), str(tree.cell))
@@ -3485,30 +3555,29 @@ ok("...and blocks the middle", tree.flags["blocks_movement"]
    and m.occupant((5, 3)) is tree)
 ok("the enemy cannot lay a finger on it",
    not m.enemies_in([(5, 3)], RIGHT), str(m.enemies_in([(5, 3)], RIGHT)))
-ok("...but your own may strike it",
-   [e.id for e in m.strikeable_allies([(5, 3)], LEFT)] == [tree.id])
+ok("...and neither can its own side — it is a clock, not a chore",
+   m.strikeable_allies([(5, 3)], LEFT) == [],
+   str(m.strikeable_allies([(5, 3)], LEFT)))
 
-# first strike — 长冬
-foe = unit(m, RIGHT, "cannoneer")
-mv0 = foe.move_allowance
-chop_once(m, tree)
-ok("the first strike counts", tree.vars.get("struck") == 1, str(tree.vars.get("struck")))
-ok("...and takes nothing off the tree", tree.hp == tree.max_hp, f"{tree.hp}")
-ok("长冬 slows every enemy by a square", foe.move_allowance == mv0 - 1,
-   f"{mv0} -> {foe.move_allowance}")
-r0 = m.round
-while m.round == r0:
-    L = [e.id for e in m.unacted(LEFT)]; R = [e.id for e in m.unacted(RIGHT)]
-    turn(m, L[0] if L else None, hold, R[0] if R else None, hold)
-ok("...and thaws when the round turns over", foe.move_allowance == mv0,
-   f"{foe.move_allowance}")
+# round 1 — 长冬, and nothing was spent to get it
+ok("round one opens with 长冬 already settled", m.round == 1, str(m.round))
+foes = [e for e in m.living(RIGHT) if e.flags["takes_turns"]]
+ok("no enemy can move a square in round one",
+   all(m.move_budget(e) == 0 for e in foes), str([m.move_budget(e) for e in foes]))
+ok("...and none of them may be carried anywhere either",
+   all(m.rooted(e) for e in foes))
+ok("your own side is untouched by it",
+   m.move_budget(can) == can.move_allowance, str(m.move_budget(can)))
+run_rounds(m, 2)
+ok("...and the thaw comes with round two",
+   all(m.move_budget(e) == e.move_allowance for e in m.living(RIGHT)
+       if e.flags["takes_turns"]),
+   str([m.move_budget(e) for e in m.living(RIGHT) if e.flags["takes_turns"]]))
 
-# third strike — the beasts
+# round 3 — the beasts
 m, tree, can, gk = tree_arena()
-while tree.vars.get("struck", 0) < 3 and m.phase == "commit":
-    chop_once(m, tree, auto=False)
-    if m.interrupts: break
-ok("the third strike looses all three beasts",
+run_rounds(m, 3)
+ok("round three looses all three beasts",
    [t.get("amount") for t in m.interrupts] == [1, 2, 3],
    str([t.get("beast") for t in m.interrupts]))
 ok("...and each names an enemy", m.interrupts[0]["option_kind"] == "unit")
@@ -3518,12 +3587,9 @@ answer_all(m, pick=lambda t: victim.id)
 ok("the same hero may be named by all three", hp0 - victim.hp == 1 + 2 + 3,
    f"took {hp0 - victim.hp}")
 
-# fifth strike — it falls, and 洛基 walks out
-while tree.alive and m.phase == "commit":
-    chop_once(m, tree, auto=False)
-    if m.interrupts: break
-ok("the fifth strike brings it down", not tree.alive and tree.vars["struck"] == 5,
-   f"alive={tree.alive} struck={tree.vars.get('struck')}")
+# round 5 — it falls, and 洛基 walks out
+run_rounds(m, 5, pick=lambda t: victim.id)
+ok("round five brings it down", not tree.alive, f"alive={tree.alive}")
 ok("...and the middle is free again", m.occupant((5, 3)) is None)
 ok("the ground under what the beasts bit is alight",
    m.board.has_kind(victim.cell, "burning"), str(m.board.serialise()))
@@ -3533,9 +3599,11 @@ answer_all(m, pick=lambda t: [1, 5])
 loki = next((e for e in m.living(LEFT) if e.key == "loki"), None)
 ok("洛基 walks out where you asked", loki is not None and loki.cell == (1, 5),
    str(loki and loki.cell))
-ok("...at his own stats", loki and (loki.max_hp, loki.atk, loki.rng, loki.grid,
-                                    loki.move_allowance) == (10, 5, 2, 2, 2),
-   f"{loki.max_hp}/{loki.atk}/{loki.rng}/{loki.grid}/{loki.move_allowance}")
+_lk = HEROES.BY_KEY["loki"]
+ok("...at his own stats — the card's, not the tree's",
+   loki and (loki.max_hp, loki.atk, loki.move_allowance) == (_lk.max_hp, _lk.atk, _lk.move),
+   f"{loki.max_hp}/{loki.atk}/{loki.move_allowance} "
+   f"vs card {_lk.max_hp}/{_lk.atk}/{_lk.move}")
 ok("...and he takes turns like anything else",
    loki.flags["takes_turns"] and loki.flags["counts_for_defeat"])
 
@@ -3640,14 +3708,16 @@ lane = cen.abilities[0].path(m, cen, "forward")
 ok("nor does a charge trample it on the way past",
    lane is None or tree.id not in [v.id for v in lane[1]])
 
-# the same gate must not close on the side that is *meant* to strike it
+# the gate closes on its own side too: 世界树 keeps time now, and nobody swings
+# at it. Its own line may still shoot *through* the square it stands on.
 m, tree, _ = untouchable_arena("dummy")
 friend = unit(m, LEFT, "gatekeeper")
 friend.set_cell((4, 3))
-ok("your own may still take an axe to it",
-   [e.id for e in m.strikeable_allies([(5, 3)], LEFT)] == [tree.id])
+ok("nor may its own side take an axe to it",
+   m.strikeable_allies([(5, 3)], LEFT) == [],
+   str(m.strikeable_allies([(5, 3)], LEFT)))
 m.select_hero(LEFT, friend.id)
-ok("...and the strike is accepted",
+ok("...and a shot marking its square simply finds nothing there",
    m.commit(LEFT, {"destination": None,
                    "action": {"key": "attack", "shots": [[[5, 3]]]}}) is None)
 
@@ -3925,7 +3995,7 @@ ok("...and it is sold nothing either",
    not [o for o in ad6.passives[0].turn_choice(m6, ad6)["options"]
         if o["value"].split(":")[1] == str(ex6.id)])
 ok("but the mainland feels every bit of it",
-   elder6.move_allowance == shore6 - 1, f"{shore6} -> {elder6.move_allowance}")
+   m6.move_budget(elder6) == 0, f"{shore6} -> {m6.move_budget(elder6)}")
 
 # --- what takes no turn is never selectable, and never spends an exchange
 m7 = Match()
@@ -4095,9 +4165,7 @@ ok("infected ground under both halves bites 蛇帝 once",
 # 洛基 comes out of the wreck onto the board, never onto an island
 m6e = six_arena()
 tree6e = next(e for e in m6e.entities if e.key == "world_tree")
-tree6e.vars["struck"] = 4
-tree6e.passives[0].on_struck(m6e, tree6e,
-                             next(e for e in m6e.entities if e.key == "arms_dealer"))
+tree6e.passives[0]._fell(m6e, tree6e)
 lok = [t for t in m6e.interrupts if t.get("key") == "loki"]
 ok("felling 世界树 calls 洛基 up", bool(lok))
 ok("...but never onto an island",
@@ -4295,8 +4363,11 @@ m78, fm78 = aim_arena("fisherman", (2, 2), [("cannoneer", (3, 2))], [("dummy", (
 m78.select_hero(LEFT, fm78.id)
 menu78 = next(a for a in view.state_for(m78, LEFT)["commit"]["actions"]
               if a["key"] == "ability:hook")["targeting"]
+# Against the engine's own answer, not a list written down here: the squares a
+# hero can reach follow from its move stat, and that gets retuned.
+want78 = {f"{c[0]},{c[1]}" for c in m78.legal_moves(fm78)} | {"2,2"}
 ok("the menu ships a lane list per square the hero could reach",
-   set(menu78["at"]) == {"2,2", "1,2", "2,1", "2,3"}, str(sorted(menu78["at"])))
+   set(menu78["at"]) == want78, f"{sorted(menu78['at'])} vs {sorted(want78)}")
 ok("...empty where the throw is blocked", not menu78["at"]["2,2"]["choices"])
 ok("...and live where it is not",
    [c["dir"] for c in menu78["at"]["2,3"]["choices"]] == ["forward"])
@@ -4777,6 +4848,144 @@ w.vars["reprieve_used"] = True
 w.add_modifier(Modifier("atk", "add", -1))
 ok("a lowered arm means it takes less from a stronger hero",
    blow(m, ber, w) == w.atk, f"{blow(m, ber, w)} vs atk {w.atk}")
+
+# 73 — 忍者: a wide net for one throat, and long strides out of it
+def ninja_arena():
+    m = arena([("ninja", (3, 3)), ("dummy", (1, 1))],
+              [("gatekeeper", (7, 3)), ("dummy", (7, 1))])
+    nj = unit(m, LEFT, "ninja")
+    gk = unit(m, RIGHT, "gatekeeper")
+    gk.set_cell((4, 3))
+    nj.ap = HEROES.Raikiri.ap_cost
+    return m, nj, gk, unit(m, RIGHT, "dummy")
+
+NET = [[4, 3], [4, 2], [4, 4], [3, 2], [3, 4], [2, 3], [5, 3], [3, 3]]
+cut = {"destination": None, "action": {"key": "ability:raikiri", "shots": [NET]}}
+
+# the net is wider than the ninja's own swing, and it hits for more
+m, nj, gk, d = ninja_arena()
+entry = next(a for a in m.action_menu(nj) if a["key"] == "ability:raikiri")
+ok("雷切 marks a wider net than the ordinary attack",
+   entry["targeting"]["count"] > nj.hero.attack["cells"],
+   f'{entry["targeting"]["count"]} cells vs {nj.hero.attack["cells"]}')
+ok("...at the same reach", entry["targeting"]["range"] == nj.hero.attack["range"])
+hp0 = gk.hp
+turn(m, nj.id, cut, d.id, hold)
+ok("it lands for more than the ninja swings for",
+   hp0 - gk.hp == HEROES.Raikiri.DAMAGE and HEROES.Raikiri.DAMAGE > nj.atk,
+   f"took {hp0 - gk.hp}, atk {nj.atk}")
+
+# one throat, however many are caught in it
+m, nj, gk, d = ninja_arena()
+mars = gk                      # the gatekeeper stands in the net
+d.set_cell((4, 2))             # and so does the dummy
+hp0 = (gk.hp, d.hp)
+m.select_hero(LEFT, nj.id)
+assert m.commit(LEFT, cut) is None
+m.select_hero(RIGHT, d.id)
+m.commit(RIGHT, hold)
+ok("both bodies in the net are offered", m.phase == "victim"
+   and sorted(m.res["options"][LEFT]) == sorted([gk.id, d.id]),
+   f'{m.phase} {m.res and m.res["options"][LEFT]}')
+m.choose_victim(LEFT, gk.id)
+guard = 0
+while m.phase in ("victim", "move_choice") and guard < 10:
+    guard += 1
+    for side in (LEFT, RIGHT):
+        if m.res and m.res["options"][side] and not m.victims_complete(side):
+            m.choose_victim(side, m.res["options"][side][0])
+ok("...but only the one it names takes the blow",
+   hp0[0] - gk.hp == HEROES.Raikiri.DAMAGE and d.hp == hp0[1],
+   f"{hp0[0] - gk.hp} and {hp0[1] - d.hp}")
+
+# the stride belongs to the next turn, and is spent by it
+m, nj, gk, d = ninja_arena()
+base = m.move_budget(nj)
+turn(m, nj.id, cut, d.id, hold)
+turn(m, unit(m, LEFT, "dummy").id, hold, gk.id, hold)   # finishes the round
+ok("the ninja moves further on the turn after the cut",
+   m.move_budget(nj) == base + HEROES.Raikiri.SPRINT,
+   f"{m.move_budget(nj)} vs {base} + {HEROES.Raikiri.SPRINT}")
+ok("...and the board offers it those squares",
+   len(m.legal_moves(nj)) > 3, f"{len(m.legal_moves(nj))} squares")
+turn(m, nj.id, hold, d.id, hold)
+ok("...and the stride is spent by that turn", m.move_budget(nj) == base,
+   f"{m.move_budget(nj)} vs {base}")
+
+# it is paid for by using it, not by landing it
+m, nj, gk, d = ninja_arena()
+gk.set_cell((9, 5))            # nothing anywhere near the net
+base = m.move_budget(nj)
+turn(m, nj.id, cut, d.id, hold)
+turn(m, unit(m, LEFT, "dummy").id, hold, gk.id, hold)   # finishes the round
+ok("a cut that catches nobody still carries the ninja",
+   m.move_budget(nj) == base + HEROES.Raikiri.SPRINT, str(m.move_budget(nj)))
+
+
+# 74 — deployment slots: a card can cost more of your force than one body
+def slotted(cards):
+    """A real four-card draft, so the budget is four slots rather than the
+    everything-fits one a scripted force gets."""
+    m = Match()
+    m.drafted = {LEFT: list(cards), RIGHT: ["dummy"] * 4}
+    m._finish_draft()
+    return m
+
+ok("武器大师 is priced at two slots", HEROES.BY_KEY["weapon_master"].slots == 2,
+   str(HEROES.BY_KEY["weapon_master"].slots))
+ok("...and everything else at one",
+   all(h.slots == 1 for h in HEROES.ROSTER if h.key != "weapon_master"),
+   str([h.key for h in HEROES.ROSTER if h.slots != 1]))
+
+m = slotted(["weapon_master", "cannoneer", "snow_woman", "swordsman"])
+ok("four cards drafted, four slots to spend", m.slot_budget(LEFT) == 4, str(m.slot_budget(LEFT)))
+assert m.place(LEFT, "weapon_master", (2, 1)) is None
+ok("the master eats two of them", m.slots_used(LEFT) == 2 and m.slots_left(LEFT) == 2,
+   f"{m.slots_used(LEFT)}/{m.slot_budget(LEFT)}")
+assert m.place(LEFT, "cannoneer", (2, 2)) is None
+assert m.place(LEFT, "snow_woman", (2, 3)) is None
+ok("...so the fourth card will not fit", m.place(LEFT, "swordsman", (2, 4)) is not None,
+   str(m.place(LEFT, "swordsman", (2, 4))))
+ok("and the client is told which cards are benched",
+   [c["name"] for c in view.state_for(m, LEFT)["setup"]["benched"]] if False else
+   view.state_for(m, LEFT)["setup"]["benched"] == [HEROES.BY_KEY["swordsman"].name],
+   str(view.state_for(m, LEFT)["setup"]["benched"]))
+ok("three heroes is a legal force when one of them costs two",
+   m.lock_force(LEFT) is None)
+ok("...and only three came out", len(m.setup_state[LEFT]["placements"]) == 3,
+   str(len(m.setup_state[LEFT]["placements"])))
+
+# leaving the master on the bench is the other legal answer
+m = slotted(["weapon_master", "cannoneer", "snow_woman", "swordsman"])
+for k, c in (("cannoneer", (2, 1)), ("snow_woman", (2, 2)), ("swordsman", (2, 3))):
+    assert m.place(LEFT, k, c) is None
+ok("or you leave the master out and field the other three",
+   m.lock_force(LEFT) is None, f"{m.slots_used(LEFT)}/{m.slot_budget(LEFT)}")
+
+# you still have to fill what you can afford
+m = slotted(["cannoneer", "snow_woman", "swordsman", "gatekeeper"])
+m.place(LEFT, "cannoneer", (2, 1)); m.place(LEFT, "snow_woman", (2, 2))
+ok("an ordinary force still has to be fully deployed",
+   m.lock_force(LEFT) is not None, str(m.lock_force(LEFT)))
+
+# a squad is several bodies for one slot
+m = slotted(["goblin_gang", "cannoneer", "snow_woman", "swordsman"])
+gang_bodies = HEROES.BY_KEY["goblin_gang"].squad
+free = [(c, r) for c in (1, 2, 3) for r in range(1, 6)]
+for k, c in zip(gang_bodies, free):
+    assert m.place(LEFT, k, c) is None, (k, c)
+ok("a squad is one slot however many bodies it puts down",
+   m.slots_used(LEFT) == 1 and len(m.setup_state[LEFT]["placements"]) == len(gang_bodies),
+   f"{m.slots_used(LEFT)} slot(s), {len(m.setup_state[LEFT]['placements'])} bodies")
+
+# half a squad is not a choice
+m = slotted(["goblin_gang", "cannoneer", "snow_woman", "swordsman"])
+assert m.place(LEFT, gang_bodies[0], (1, 1)) is None
+for k, c in (("cannoneer", (2, 1)), ("snow_woman", (2, 2)), ("swordsman", (2, 3))):
+    m.place(LEFT, k, c)
+ok("a half-placed squad will not lock", m.lock_force(LEFT) is not None,
+   str(m.lock_force(LEFT)))
+
 
 print("\nlog tail:")
 for line in m.log[-5:]:

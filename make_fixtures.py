@@ -9,6 +9,7 @@ against payloads the server would really send — not hand-written ones that dri
 import json
 
 import board
+import heroes as HEROES
 import view
 from entities import Modifier
 from match import Match
@@ -288,6 +289,19 @@ def build():
     ad = unit(m, LEFT, "arms_dealer"); ad.ap = 6
     snap("fuelled", m, select=ad.id)
 
+    # --- the same, with nothing banked and a sale to make ---------------------
+    # The fee is collected as the turn opens, before the shot, so it is fuel for
+    # that shot — and a dealer down to nothing still has a full slider.
+    m = arena([("arms_dealer", (3, 3)), ("gatekeeper", (3, 1))], [("dummy", (7, 3))])
+    ad = unit(m, LEFT, "arms_dealer"); ad.ap = 0
+    unit(m, LEFT, "gatekeeper").ap = max(w["ap"] for w in HEROES.ARMS)
+    snap("fuelled_sale", m, select=ad.id)
+
+    # --- a cells attack with nothing whatever in reach -------------------------
+    # Marking nothing really is a hold here: there was never a shot to forget.
+    m = arena([("gatekeeper", (1, 1))], [("gatekeeper", (9, 5))])
+    snap("no_targets", m, select=unit(m, LEFT, "gatekeeper").id)
+
     # --- a unit attack that names two heroes rather than one ------------------
     m = arena([("four_beasts", (3, 3))], [("dummy", (7, 3)), ("gatekeeper", (7, 1))])
     fb = unit(m, LEFT, "four_beasts")
@@ -331,6 +345,20 @@ def build():
     # --- two halves of one body, positioned together before either aims -------
     m = arena([("snake_head", (2, 2)), ("snake_tail", (2, 3))], [("dummy", (8, 3))])
     snap("linked", m, select=unit(m, LEFT, "snake_head").id)
+
+    # --- the same, with the enemy's door standing where the tail could go -----
+    # The client works the tail's squares out for itself (it follows the head,
+    # wherever the head is going), so it has to know the two board facts the
+    # server checks: another side's door is wall, and an island is off the board.
+    m = Match()
+    m.assign_draft(["snake_emperor", "cannoneer"], ["artisan", "dummy"])
+    m.build_choose(RIGHT, {"cells": [[3, 3], [8, 3]]})   # (3,3) is wall to Left
+    for k, c in (("snake_head", (2, 3)), ("snake_tail", (2, 4)), ("cannoneer", (1, 1))):
+        m.place(LEFT, k, c)
+    for k, c in (("artisan", (8, 3)), ("dummy", (8, 1))):
+        m.place(RIGHT, k, c)
+    m.lock_force(LEFT); m.lock_force(RIGHT)
+    snap("linked_doors", m, select=unit(m, LEFT, "snake_head").id)
 
     # --- a hero with no square of its own, ready to take one ------------------
     m = arena([("ghost", (3, 3)), ("gatekeeper", (3, 1))], [("cannoneer", (7, 3)), ("dummy", (7, 1))])

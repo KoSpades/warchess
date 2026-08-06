@@ -38,7 +38,7 @@ header{display:flex;align-items:baseline;gap:18px;flex-wrap:wrap;
    header; the board takes the left, and the right column stacks the order panel
    over the info panel, each scrolling inside itself. --chrome is the header plus
    main's own padding. --rsplit is how the right column divides between them. */
-:root{--rpanel:344px; --chrome:72px; --rsplit:1.15fr;
+:root{--rpanel:344px; --chrome:72px; --rsplit:0.85fr;
   /* The board's own size, worked out once so the right column can match its
      height exactly instead of stretching past the bottom row. Cells are 5:6 and
      the grid is 9x5 with 4px gaps, so height = width*2/3 - 5.34px. */
@@ -248,10 +248,17 @@ body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
 .hd-hp .bar i{display:block;height:100%;background:var(--verdigris);transition:width .2s}
 .hd-hp.sideR .bar i{background:var(--brass)}
 .hd-hp .bar i.hurt{background:var(--oxide)}
-.hd-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin:9px 0}
-.hd-tile{background:var(--panel-2);border:1px solid var(--rule);border-radius:3px;padding:4px 8px}
-.hd-tile .k{font-family:var(--mono);font-size:9px;letter-spacing:.18em;text-transform:uppercase;color:var(--dim)}
-.hd-tile .v{font-size:18px;font-weight:600;margin-top:1px;letter-spacing:.01em}
+/* One row, however many tiles there are: `auto-flow: column` lays them side by
+   side and `auto-columns: 1fr` shares the width evenly. The wordier attack modes
+   (a lane's "row & column") get the same slot as a bare number, so the tile has
+   to be able to wrap inside itself rather than push the row wider. */
+.hd-grid{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:5px;margin:9px 0}
+.hd-tile{background:var(--panel-2);border:1px solid var(--rule);border-radius:3px;
+  padding:4px 6px;min-width:0;overflow:hidden}
+.hd-tile .k{font-family:var(--mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hd-tile .v{font-size:17px;font-weight:600;margin-top:1px;letter-spacing:.01em;
+  line-height:1.15;overflow-wrap:anywhere}
 /* Live status (背水 rage): same shape as a trait, but in the alarm colour. */
 .hd-status{border-left:2px solid var(--oxide);background:rgba(180,74,52,.10);border-radius:0 3px 3px 0;
   padding:6px 10px 6px 12px;margin:9px 0;font-size:14px;line-height:1.5;color:var(--text)}

@@ -133,6 +133,13 @@ def unit_payload(m, e, live, viewer=None):
     # Some badges are for their owner's eyes only (诅咒娃娃's mark).
     if viewer is not None and viewer != e.side:
         status = [x for x in status if not x.get("private")]
+    # AP is charged at the start of a turn, so a hero yet to act is about to hold
+    # one more than it is standing there with — and the action menu already prices
+    # its abilities against that. Showing the un-charged number left the panel
+    # saying "0 AP" beside an ability it was perfectly willing to let you cast.
+    # Only for your own side: what the enemy will charge to is not yours to read.
+    if viewer is not None and viewer == e.side and live:
+        ap = m.turn_ap(e)
     return {
         "id": e.id,
         "side": e.side,
@@ -218,10 +225,23 @@ def state_for(m, side):
         # One entry per body to place, so a squad shows up as its members and a
         # duplicated member (two 投矛手) shows up twice.
         cards = codex()
-        out["roster"] = [cards[k] for k in m.deploy_bodies(side)]
+        fits, wont = m.bench(side)
+        out["roster"] = [dict(cards[k],
+                              # What this body's *card* costs, and whether the
+                              # budget can still take it. A squad member carries
+                              # its squad's price, not one of its own.
+                              slots=HEROES.BY_KEY[m.card_of(k)].slots,
+                              afford=m.card_of(k) not in wont)
+                         for k in m.deploy_bodies(side)]
         out["setup"] = {
             # Bodies, not cards: a squad card puts several units on the board.
             "force_size": m.bodies_needed(side),
+            # The budget. Everything costs one slot unless a card says otherwise
+            # (武器大师 at two), so normally used == placed cards and this is
+            # invisible; when it is not, the client has to say why.
+            "slots": m.slot_budget(side),
+            "slots_used": m.slots_used(side),
+            "benched": [cards[k]["name"] for k in wont],
             "placements": m.setup_state[side]["placements"],
             "ready": m.setup_state[side]["ready"],
             "opponent_ready": m.setup_state[foe]["ready"],

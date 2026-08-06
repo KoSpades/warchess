@@ -31,6 +31,14 @@ There is no password. Anyone with the link can open either seat, and the URL is
 the only thing deciding which side you are. The link changes each time you
 restart `--share`.
 
+### One player, against the AI
+
+```
+python game.py --pve
+```
+
+You hold the Left seat and the AI holds the Right. See *Playing the AI* below.
+
 `--port 9000` to change port, `--no-browser` to suppress the auto-open.
 
 Commitment is hidden, so the two seats genuinely need separate views: the server
@@ -73,6 +81,21 @@ browser code, so the two can never drift apart.
 `TEST_HEROES` straight on the board, padded with dummies. Every new hero goes in
 that list so it can be played the moment it exists.
 
+## Playing the AI
+
+`python game.py --pve` gives you a whole game — draft, build, deployment, fight
+— against the same brain the tournament runs on. You hold the Left seat; the AI
+holds the Right and answers the moment a decision is its own, so there is only
+one link to open and nothing to wait for.
+
+Every PvE game is written to `logs/`, one JSON Lines file per game. The record
+that matters is `turn`: the board before an order, the order actually played,
+and how the AI ranked every hero that could have acted — for its own moves *and*
+for yours. So a game leaves a series of positions labelled with both the AI's
+answer and a human's, which is what a change to `ai.py` can be judged against.
+`matchlog.py`'s docstring lists the record types; the `seed` in the `start`
+record plus the command stream replays a game exactly.
+
 ## Known issue: the Robot stalemate
 
 The Robot heals 4 at the end of its own turn, so anything that cannot out-damage
@@ -101,6 +124,9 @@ Every module sits at the repository root; there is no package directory.
 | `server.py` | HTTP API |
 | `index.html` + `app.js` | client |
 | `playtest.py` | headless bot play and balance tournaments |
+| `ai.py` | the judging brain — what a board is worth once a move resolves |
+| `pve.py` | the AI holding one seat against a live player, and its draft |
+| `matchlog.py` | the per-game record `--pve` writes to `logs/` |
 | `make_fixtures.py` | real engine states written out for `test_client.js` |
 
 Adding a hero should mean editing `heroes.py` only. If it doesn't, the engine

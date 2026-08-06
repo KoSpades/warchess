@@ -65,7 +65,7 @@ class Sweep(Ability):
     name = "横扫 Sweep"
     ap_cost = 2
     targeting = {"kind": "direction", "options": ["forward", "backward"]}
-    blurb = "Own column plus one adjacent column, forward or back. 4 damage to every enemy inside."
+    blurb = "4 damage to every enemy in your column and one adjacent column."
 
     @staticmethod
     def block(match, actor, direction):
@@ -91,10 +91,8 @@ class Charge(Ability):
     ap_cost = 2
     carries_self = True          # but not instead of its walk: it does both
     targeting = {"kind": "direction", "options": ["forward", "backward", "up", "down"]}
-    blurb = ("Charge 3 squares down one lane, dealing 3 to each enemy in the two squares "
-             "crossed on the way (at most two). If the third square is taken or off the "
-             "board it still tramples, but holds its ground. You may move first — the "
-             "run starts from wherever your move ends.")
+    blurb = ("Charge 3 squares down one lane. 3 damage to each enemy crossed, at most "
+             "two. Blocked on the last square, it still deals the damage.")
     DAMAGE = 3
     DISTANCE = 3
 
@@ -197,8 +195,8 @@ class Possess(Ability):
     name = "附身 Possess"
     ap_cost = 0
     targeting = {"kind": "unit"}
-    blurb = ("Sink into one enemy: 2 damage, and until your next turn everything it "
-             "deals is 1 weaker and its reach is 1 shorter.")
+    blurb = ("2 damage. That enemy deals 1 less and reaches 1 less until your next "
+             "turn.")
     DAMAGE = 2
     RNG_FLOOR = 1
 
@@ -234,8 +232,7 @@ class Pounce:
     """剑齿虎 pins what it mauls: anything its normal attack draws blood from cannot
     move on its next turn. It can still fight from where it stands."""
 
-    describe = ("Anything its normal attack hits cannot move on its next turn — it "
-                "may still attack and cast from where it stands.")
+    describe = "Anything its attack hits is pinned next turn."
 
     # Late in the pipeline, so it only fires on damage that actually got through.
     @EV.hook(priority=60)
@@ -253,9 +250,8 @@ class Shotgun:
     its damage (to a cap), and a hit lets it reposition once the exchange has
     settled — the follow-up asks where."""
 
-    describe = ("Its attack sprays a three-cell arc in a chosen direction. Every shot "
-                "that connects raises its damage by 1 — at most +2 — and lets it step "
-                "one square once the exchange is over.")
+    describe = ("Attacks a three-cell arc. Each connecting shot: +1 damage, max +2, and a "
+                "one-square step.")
     RAMP_CAP = 2
 
     def on_turn_resolved(self, match, owner, ctx):
@@ -305,8 +301,8 @@ class Shotgun:
             return None
         return {
             "key": "ramp", "badge": f"+{ramp}", "label": "散弹枪 DIALLED IN",
-            "text": f"Every shot that connected has raised its damage — +{ramp}"
-                    + (", as far as it goes." if ramp >= self.RAMP_CAP else "."),
+            "text": f"+{ramp} damage"
+                    + (" — capped." if ramp >= self.RAMP_CAP else " and climbing."),
         }
 
 
@@ -316,11 +312,8 @@ class GhostForm:
     world is its *movement* — the squares beside whoever it is haunting — so the
     turn it appears is an ordinary turn: it walks out of the host and acts."""
 
-    describe = ("Bodiless: holds no square and nothing can touch it, but it cannot hold "
-                "the field either. From its 4th turn it may step into an empty square "
-                "beside the hero it haunts — giving up 附身 for good — and then take "
-                "that turn as normal. The body it builds has as much health as it has "
-                "dealt damage, so the longer it haunts the stronger it steps out.")
+    describe = ("Untouchable, holds no ground. From its 4th turn it may take flesh beside "
+                "the hero it haunts, giving up 附身. Its health is the damage it has dealt.")
     FROM_TURN = 4
 
     def on_match_start(self, match, owner, ctx):
@@ -378,12 +371,10 @@ class GhostForm:
         left = max(0, self.FROM_TURN - 1 - owner.vars.get("turns_done", 0))
         return {
             "key": "ghost", "badge": "魂", "label": "鬼魂 BODILESS",
-            "text": ("Cannot be touched, and holds no ground."
-                     + (f" Haunting {host.name}." if host and host.alive else "")
-                     + f" Drained {max(1, owner.vars.get('harvest', 0))} — the health it"
-                       " would take flesh with."
-                     + (f" Can do so in {left} more turn{'' if left == 1 else 's'}."
-                        if left else " It may do so now.")),
+            "text": ("Untouchable · "
+                     + (f"haunting {host.name} · " if host and host.alive else "")
+                     + f"{max(1, owner.vars.get('harvest', 0))} drained · "
+                     + (f"flesh in {left}." if left else "may take flesh now.")),
         }
 
 
@@ -416,9 +407,7 @@ class CursePoison(LayCurse):
     use_limit = 1
     opening = True
     COST = "loses two rounds"
-    blurb = ("At game start, mark one ally (itself included). The first attack or "
-             "ability that damages the marked hero costs its source its next turn. "
-             "Once it springs, 再咒 can lay another.")
+    blurb = "At game start, curse one ally. The first hero to damage it is frozen."
 
 
 class Transfer(Ability):
@@ -430,9 +419,7 @@ class Transfer(Ability):
     name = "转移 Transfer"
     ap_cost = 2
     targeting = {"kind": "two_units"}
-    blurb = ("Swap any two units on the board, anywhere. It happens as everyone "
-             "moves, so a hero dragged into a marked square takes what was aimed "
-             "at whoever stood there.")
+    blurb = "Swap any two units on the board."
 
     @staticmethod
     def pair(match, params):
@@ -477,9 +464,7 @@ class Bless(Ability):
     name = "祝福 Blessing"
     ap_cost = 2
     targeting = {"kind": "ally"}
-    blurb = ("Ward one ally — itself included — against the next attack or ability "
-             "that would hurt it, and give it +1 movement until that happens. One "
-             "blessing to a hero.")
+    blurb = "Ward one ally from the next blow. +1 movement until it lands."
 
     def blessable(self, match, actor, origin=None):
         return [e.id for e in match.on_map(actor.side) if not e.vars.get("blessed")]
@@ -523,9 +508,8 @@ class Slam(Ability):
     name = "摔击 Slam"
     ap_cost = 1
     targeting = {"kind": "any_unit"}
-    blurb = ("Take hold of anyone in the 8 squares around you — either side. Nothing "
-             "happens until the exchange has settled; then you throw them to any "
-             "empty square within 3 of where you ended up. An enemy takes 3.")
+    blurb = ("Grab anyone in the 8 around you and throw them to an empty square within "
+             "3. An enemy takes 3.")
     DAMAGE = 3
     REACH = 3
     THROW = "slam_throw"
@@ -663,9 +647,7 @@ class GaleSlash(ShapeAbility):
     name = "狂风绝息斩 Gale Slash"
     ap_cost = 3
     targeting = {"kind": "shape", "options": ["row", "column"]}
-    blurb = ("5 damage to every enemy in your whole row, or your whole column — "
-             "you choose. Everyone caught takes 1 more from everything for the "
-             "rest of the match, and the marks stack.")
+    blurb = "5 damage down your row or your column. Enemies hit gain 1 vulnerability."
     DAMAGE = 5
     MARK = 1
 
@@ -711,9 +693,9 @@ class SelfDestruct(ShapeAbility):
     name = "自爆 Self-Destruct"
     ap_cost = 3
     targeting = {"kind": "shape", "options": ["row", "column", "surround8"]}
-    blurb = ("Drop your own health to nothing. 6 damage to every enemy in one shape "
-             "you choose: your row, your column, or the 8 squares around you.")
-    DAMAGE = 6
+    blurb = ("Your health drops to 0. 8 damage to every enemy in your row, your "
+             "column, or the 8 around you.")
+    DAMAGE = 8
 
     def build_damage(self, match, actor, params):
         return [DMG.DamageEvent(source=actor, target=e, amount=self.DAMAGE,
@@ -737,8 +719,8 @@ class LayBigBomb(Ability):
     use_limit = 1
     opening = True
     targeting = {"kind": "any_cell"}
-    blurb = ("Before the first exchange, bury a charge in any square. It goes off at "
-             "the start of the round two later for 6 — and only your side can see it.")
+    blurb = ("Before the first exchange, bury a charge anywhere. 6 damage two rounds "
+             "later. Hidden from the enemy.")
 
     def side_effects(self, match, actor, params):
         plant_big_bomb(match, actor, tuple(params["cell"]))
@@ -763,10 +745,9 @@ class BombLayer:
     Neither needs new machinery — the board owns the bombs and the follow-up pair
     owns the asking."""
 
-    describe = ("Lays a small bomb in an empty square beside it at the end of any turn "
-                "it moved — 3 damage to the first enemy that steps on it. Buries a big "
-                "charge before the first exchange, and another as it dies. Only your "
-                "side can see them.")
+    describe = ("Lays a small bomb beside it at the end of any turn it moved: 3 damage to "
+                "the first enemy on it. Buries a big charge as it dies. Hidden from "
+                "the enemy.")
     SMALL = "small_bomb"
     LAST = "last_charge"
 
@@ -848,9 +829,7 @@ class Garrote(Ability):
     self_move = True             # its blink replaces the walk
     carries_self = True
     targeting = {"kind": "unit"}
-    blurb = ("Blink to a square beside any one enemy, anywhere on the board, and cut "
-             "it. It resolves after everyone has moved, so the mark cannot dodge — but "
-             "if all four squares around it are taken there is nowhere to appear.")
+    blurb = "Blink beside any enemy for 5 damage."
 
     @staticmethod
     def landings(match, actor, params):
@@ -912,12 +891,63 @@ class Garrote(Ability):
             f"{match.label(actor)} is gone, and standing over {match.label(tgt)}."
         )
 
+    #: Told apart from a `garrote_target` of None, which means the blink was tried
+    #: and found nowhere to land. Absent means it has not been tried yet.
+    _UNSET = object()
+
     def build_damage(self, match, actor, params):
-        tgt = match.entity(actor.vars.pop("garrote_target", None))
-        if tgt is None or not tgt.alive or not actor.alive:
-            return []      # nowhere to appear, so no throat to cut
+        """What this order takes off.
+
+        Two callers, asking different questions. During resolution `move_effects`
+        has already run and left `garrote_target`: the mark it reached, or None if
+        the mark was hemmed in on every side and there was no throat to cut.
+
+        Asked *cold* — before anybody has moved, which is how the AI prices a turn
+        it is considering — that var does not exist yet. Reading the absence as
+        "no target" answered zero, so the AI valued 封喉 at exactly what it valued
+        standing still, and 刺客 sat last in the roster on 32.9% while holding the
+        joint-highest attack in the game. Asked cold, answer for the mark the
+        order names."""
+        got = actor.vars.pop("garrote_target", self._UNSET)
+        tgt = match.entity(params.get("target") if got is self._UNSET else got)
+        if tgt is None or not tgt.alive or not actor.alive or tgt.side == actor.side:
+            return []
         return [DMG.DamageEvent(source=actor, target=tgt, amount=actor.atk,
                                 category=DMG.NORMAL_ATTACK)]
+
+
+class Raikiri(Ability):
+    """忍者's 雷切. The same shape as an ordinary grid attack, only far wider — a
+    net of eight squares within two instead of the ninja's usual two — and it
+    lands for more than the ninja swings for.
+
+    It resolves as a real `CellLockedAttack` rather than as ability damage, which
+    is what gets it a victim picked *after* everyone has moved: with eight squares
+    marked it will often catch several bodies, and which one takes it is the
+    ninja's to choose, exactly as with any grid attack.
+
+    The stride is paid for by *using* it, hit or miss — the lightning carries the
+    ninja whether or not it found a throat — and it is spent on the next turn
+    rather than this one, which `sprint` stamps for."""
+
+    key = "raikiri"
+    name = "雷切 Raikiri"
+    ap_cost = 2
+    targeting = {"kind": "cells", "count": 8, "range": 2, "shots": 1}
+    blurb = ("Mark up to 8 squares within 2. One enemy in them takes 5. Move +2 next "
+             "turn.")
+    DAMAGE = 5
+    SPRINT = 2
+
+    def instances(self, match, actor, params, intended):
+        match.sprint(actor, self.SPRINT)
+        match.log_line(
+            f"{match.label(actor)} rides the lightning — two squares further next turn."
+        )
+        import actions as ACT   # local: actions imports damage, which imports this
+        cells = (params.get("shots") or [[]])[0]
+        return [ACT.CellLockedAttack(actor, cells, intended,
+                                     amount=self.DAMAGE, max_victims=1)]
 
 
 class Soak(Ability):
@@ -931,9 +961,11 @@ class Soak(Ability):
     key = "soak"
     name = "浸水 Soak"
     ap_cost = 2
-    targeting = {"kind": "cells", "count": 4, "range": 6, "shots": 1}
-    blurb = ("Mark four connected squares within 6. Every enemy in them takes 3 water "
-             "damage, and the mage mends for half of everything that actually landed.")
+    # Four, not up to four: the shape is the ability. A single square would be a
+    # different card, and the connectivity check below has nothing to say about one.
+    targeting = {"kind": "cells", "count": 4, "range": 6, "shots": 1, "exact": True}
+    blurb = ("Mark 4 connected squares within 6. 3 water damage to enemies in them, "
+             "and heal half of it.")
     DAMAGE = 3
 
     def validate(self, match, actor, params, origin=None):
@@ -986,11 +1018,10 @@ class Commend(Ability):
 
     key = "commend"
     name = "赏善 Commend"
-    ap_cost = 2
+    ap_cost = 1
     targeting = {"kind": "any_unit"}
     judges = "reward"
-    blurb = ("Mark anyone. At the end of its next turn it is mended for everything it "
-             "dealt during that turn.")
+    blurb = "Mark anyone. At the end of its next turn it heals for what it dealt."
 
     def side_effects(self, match, actor, params):
         pass_judgement(match, actor, match.entity(params.get("target")), "reward")
@@ -1004,8 +1035,7 @@ class Condemn(Ability):
     ap_cost = 1
     targeting = {"kind": "any_unit"}
     judges = "punish"
-    blurb = ("Mark anyone. At the end of its next turn it takes everything it dealt "
-             "during that turn, back on itself.")
+    blurb = "Mark anyone. At the end of its next turn it takes back what it dealt."
 
     def side_effects(self, match, actor, params):
         pass_judgement(match, actor, match.entity(params.get("target")), "punish")
@@ -1024,8 +1054,7 @@ class RaiseDoors(Ability):
     ap_cost = 0
     prebuild = True
     targeting = {"kind": "two_cells"}
-    blurb = ("Before anyone deploys, pick two squares anywhere on the board. Your side "
-             "may step between them as though they touched. Both sides can see them.")
+    blurb = "Before deployment, pick two squares. Your side may step between them."
 
     def build_cells(self, match, side):
         """Only the board proper. An island is not somewhere a door can open onto,
@@ -1059,8 +1088,7 @@ class Avalanche(Ability):
     name = "大雪崩 Great Avalanche"
     ap_cost = 4
     targeting = {"kind": "none"}
-    blurb = ("6 water damage to every enemy on the board, and every one of them loses "
-             "a point of AP.")
+    blurb = "6 water damage to every enemy, and each loses 1 AP."
     DAMAGE = 6
 
     def build_damage(self, match, actor, params):
@@ -1096,9 +1124,7 @@ class Hook(Ability):
     targeting = {"kind": "direction",
                  "options": ["forward", "backward", "up", "down",
                              "fwd_up", "fwd_down", "back_up", "back_down"]}
-    blurb = ("Throw down any of the eight lanes. The first enemy it reaches is hauled "
-             "in to the square beside you. It fails if the lane is empty, if one of "
-             "your own is first, or if that square is taken.")
+    blurb = "Throw down any of the 8 lanes. The first enemy hit is hauled beside you."
 
     @staticmethod
     def cast(match, actor, name, origin=None):
@@ -1174,8 +1200,7 @@ class Recurse(LayCurse):
     name = "再咒 Curse Again"
     ap_cost = 2
     COST = "loses a turn"
-    blurb = ("Lay the curse on another ally, once the last one has been sprung. "
-             "The next hero to draw that ally's blood loses its next turn.")
+    blurb = "Curse another ally, once the last curse has sprung."
 
     def available(self, match, actor):
         return not actor.vars.get("curse_live")
@@ -1191,9 +1216,7 @@ class MagicWard(Ability):
     name = "魔法守护 Magic Ward"
     ap_cost = 2
     targeting = {"kind": "none"}
-    blurb = ("Until her next turn begins, no enemy hero can use an active ability. "
-             "Orders already sealed this exchange still resolve, and the ward lifts "
-             "early if she falls.")
+    blurb = "No enemy can use an active ability until her next turn."
 
     def side_effects(self, match, actor, params):
         match.set_ability_lock(actor)
@@ -1203,8 +1226,7 @@ class DreamWard:
     """Display only — the lock itself lives on the match, since it silences a whole
     side rather than attaching to any one unit."""
 
-    describe = ("While her ward is up, enemy heroes cannot use active abilities — "
-                "until her next turn, or until she is destroyed.")
+    describe = "Her ward lifts early if she falls."
 
     def status(self, match, owner):
         if match.ability_lock.get(other_side(owner.side)) != owner.id:
@@ -1213,7 +1235,7 @@ class DreamWard:
             "key": "ward",
             "badge": "守",
             "label": "魔法守护 WARD",
-            "text": "Enemy heroes cannot use active abilities until her next turn.",
+            "text": "Enemy abilities sealed until her next turn.",
         }
 
 
@@ -1222,9 +1244,8 @@ class GreatFog(Ability):
     name = "大雾 Great Fog"
     ap_cost = 3
     targeting = {"kind": "none"}
-    blurb = ("Every enemy loses 1 attack range and 1 movement, permanently. Casts "
-             "stack, but neither goes below 1 — heroes already at 1, and those who "
-             "strike any enemy anywhere, shrug off that half of it.")
+    blurb = ("Every enemy −1 range and −1 movement, permanently. Stacks, never below "
+             "1.")
     FLOOR = 1
 
     def side_effects(self, match, actor, params):
@@ -1261,7 +1282,7 @@ class Ray(Ability):
     name = "射线 Ray"
     ap_cost = 2
     targeting = {"kind": "none"}
-    blurb = "6 damage to every enemy in the caster's row. Travels with it if bounced."
+    blurb = "6 damage to every enemy in your row."
 
     def build_damage(self, match, actor, params):
         return [
@@ -1292,7 +1313,7 @@ class Inspire(RallyTheLine):
     name = "鼓舞 Inspire"
     STAT = "atk"
     VERB = "inspires"
-    blurb = "Every ally gains +1 attack, permanently. Casts stack."
+    blurb = "All allies +1 attack, permanently. Stacks."
 
 
 class Incite(RallyTheLine):
@@ -1300,7 +1321,7 @@ class Incite(RallyTheLine):
     name = "激励 Incite"
     use_limit = 1
     STAT = "move"
-    blurb = "Once per match: every ally gains +1 movement, permanently."
+    blurb = "Once: all allies +1 movement, permanently."
 
 
 class Pierce(Ability):
@@ -1308,7 +1329,7 @@ class Pierce(Ability):
     name = "穿刺 Pierce"
     ap_cost = 3
     targeting = {"kind": "unit"}
-    blurb = "8 damage to one chosen enemy, anywhere. Element: wood."
+    blurb = "8 wood damage to one enemy, anywhere."
 
     def build_damage(self, match, actor, params):
         tgt = match.entity(params.get("target"))
@@ -1326,7 +1347,7 @@ class Thunderstorm(Ability):
     name = "雷暴 Thunderstorm"
     ap_cost = 2
     targeting = {"kind": "none"}
-    blurb = "2 damage to every living enemy. No targeting, no counterplay."
+    blurb = "2 damage to every enemy on the board."
 
     def build_damage(self, match, actor, params):
         return [
@@ -1346,7 +1367,8 @@ class Ignite(Ability):
     name = "点燃 Ignite"
     ap_cost = 1
     targeting = {"kind": "any_cell"}
-    blurb = "Permanently sets one cell alight, anywhere. Enemies starting a turn there take 2 fire. Stacks."
+    blurb = ("Set any cell alight permanently. 2 fire damage to enemies starting a "
+             "turn on it. Stacks.")
 
     def side_effects(self, match, actor, params):
         cell = tuple(params["cell"])
@@ -1362,7 +1384,7 @@ class Heal(Ability):
     name = "治疗 Heal"
     ap_cost = 2
     targeting = {"kind": "ally"}
-    blurb = "Restore 6 HP to one ally — herself included."
+    blurb = "Heal 6 to one ally."
 
     def side_effects(self, match, actor, params):
         tgt = match.entity(params.get("target"))
@@ -1379,8 +1401,8 @@ class BloodRite(Ability):
     ap_cost = 1
     use_limit = 1
     targeting = {"kind": "magnitude"}
-    blurb = ("Once per match: spend health — current and maximum alike — for that "
-             "much permanent attack. Never enough to kill yourself.")
+    blurb = ("Once: spend health, current and max, for that much permanent attack. "
+             "Never fatal.")
 
     def magnitude_cap(self, actor):
         # Never enough to self-kill: one point of each is always left standing.
@@ -1407,8 +1429,7 @@ class GoblinRally(Ability):
     name = "哥布林鼓舞 Goblin Rally"
     ap_cost = 2
     targeting = {"kind": "none"}
-    blurb = ("Every living goblin in the gang gets +2 attack for the rest of this "
-             "gang turn — so cast it before the javelins throw.")
+    blurb = "Every living goblin +2 attack for the rest of this gang turn."
 
     def side_effects(self, match, actor, params):
         crew = [e for e in match.living(actor.side) if e.hero.gang == actor.hero.gang]
@@ -1425,8 +1446,7 @@ class BeastForm(Ability):
     ap_cost = 3
     use_limit = 1
     targeting = {"kind": "none"}
-    blurb = ("Once per match: turn beast, permanently. Heal 4, Atk +3, Move +1 — "
-             "but one grid less and 2 less range.")
+    blurb = "Once, permanently: heal 4, +3 attack, +1 movement, −1 grid, −2 range."
 
     def side_effects(self, match, actor, params):
         healed = DMG.heal(match, actor, 4, source=actor)
@@ -1447,7 +1467,7 @@ class AncientGuard(Ability):
     use_limit = 1
     opening = True
     targeting = {"kind": "ally"}
-    blurb = "At game start, grant one ally (yourself included) a permanent −1 to all damage taken."
+    blurb = "At game start, one ally takes 1 less damage, permanently."
 
     def side_effects(self, match, actor, params):
         tgt = match.entity(params.get("target"))
@@ -1466,7 +1486,7 @@ class DivineAegis:
     Tile damage neither triggers it nor is blocked by it."""
 
     TRIGGERS = (DMG.NORMAL_ATTACK, DMG.ABILITY)
-    describe = "After taking attack or ability damage, immune to all further attack and ability damage this round."
+    describe = "After taking attack or ability damage, immune to both for the round."
 
     @EV.hook(priority=30)
     def on_before_damage(self, match, owner, ev):
@@ -1491,8 +1511,7 @@ class DivineAegis:
             "key": "aegis",
             "badge": "盾",
             "label": "神圣壁垒 SHIELD",
-            "text": f"Immune to attack and ability damage for the rest of round {match.round}. "
-                    "Tile damage still lands.",
+            "text": f"Immune to attacks and abilities this round. Tiles still bite.",
         }
 
     def on_round_start(self, match, owner, ctx):
@@ -1510,7 +1529,7 @@ class SelfRepair:
 
 
 class KeenEdge:
-    describe = "At the end of its own turn, Atk +1 (up to a maximum of 10)."
+    describe = "+1 attack at the end of its own turn, up to 10."
     CAP = 10
 
     def on_turn_end(self, match, owner, ctx):
@@ -1524,7 +1543,7 @@ class KeenEdge:
 
 
 class Regrowth:
-    describe = "At the start of its own turn, every ally recovers 1 HP."
+    describe = "All allies heal 1 at the start of its turn."
 
     def on_turn_start(self, match, owner, ctx):
         if ctx.get("entity") is not owner or not owner.alive:
@@ -1543,7 +1562,7 @@ class BattleFury:
     """Below a health threshold, hits harder and reaches further. Conditional on
     current HP, so it is recomputed (spec 7.3) whenever HP can change."""
 
-    describe = "While at 11 HP or below, Atk +2 and Rng +1."
+    describe = "At 11 health or below: +2 attack, +1 range."
     THRESHOLD = 11
 
     def _recompute(self, match, owner):
@@ -1569,7 +1588,7 @@ class BattleFury:
 
 
 class TwinGuns:
-    describe = "Two normal attacks per turn, resolved in sequence. The second deals half damage, rounded down."
+    describe = "Two attacks per turn. The second deals half damage, rounded down."
 
 
 class Warlord:
@@ -1582,7 +1601,7 @@ class Warlord:
     current roster, but recomputing on round_start/match_start too keeps it
     correct if a future design revives or spawns units."""
 
-    describe = "Rng +1 once an enemy hero is destroyed; Atk +1 while only one enemy remains."
+    describe = "+1 range once an enemy dies. +1 attack while one enemy remains."
 
     def _recompute(self, match, owner):
         if not owner.alive:
@@ -1613,9 +1632,8 @@ class LastStand:
     burns him out — he drops dead at the start of his third turn in it, so the
     rage buys exactly two turns of action."""
 
-    describe = ("Once: a lethal hit leaves him at 1 HP and enrages him instead — "
-                "immune to all damage and Atk +3, but he burns out at the start of "
-                "his third turn enraged (two turns of action).")
+    describe = ("Once: a lethal hit leaves him at 1 health and enraged — immune to all "
+                "damage, +3 attack. Burns out on his third enraged turn.")
     RAGE_TURNS = 3
     RAGE_ATK = 3
 
@@ -1676,8 +1694,7 @@ class Almsgiving:
     somebody else every time his turn comes round. The pick is a `turn_choice`:
     it rides along with his order instead of costing his action."""
 
-    describe = ("Gains no AP himself. When his turn begins, one ally you choose gains "
-                "1 AP — free, and he still moves and attacks as normal.")
+    describe = "Gains no AP. One ally you choose gains 1 AP when his turn begins."
     CHOICE = "handout"
 
     def turn_choice(self, match, owner):
@@ -1725,8 +1742,8 @@ class SerpentBody:
     no half a snake — and only the head counts toward defeat, so the pair is one
     hero on the board and one hero in the victory check."""
 
-    describe = ("Head and tail are one 25 HP body across two adjacent squares. A blow "
-                "to either wounds the whole snake, and both fall together.")
+    describe = ("One 25-health body on two adjacent squares. A blow to either wounds "
+                "both, and both fall together.")
 
     @EV.hook(priority=95)
     def on_after_damage(self, match, owner, ev):
@@ -1805,9 +1822,7 @@ class VenomFangs:
 
     It also notes what it bit this turn, which is what the tail closes on."""
 
-    describe = ("Its bite leaves venom: the hero it wounds moves one square less on "
-                "its next turn, and then it wears off. Only a hero not already "
-                "carrying a dose can be given one.")
+    describe = "Its bite slows the target 1 square on its next turn. No second dose."
     SQUARES = 1
     TAG = "venom"
 
@@ -1835,8 +1850,8 @@ class PincerStrike:
     lands 1 harder — the pincer closing on one victim. The head always acts first,
     so the tail is always the half that completes it."""
 
-    describe = ("Strikes from 3 squares away. Anything the head already bit this turn "
-                "takes 1 more from the tail.")
+    describe = ("Strikes from 3 squares away. Anything the head bit this turn takes 1 "
+                "more.")
     BONUS = 1
 
     @EV.hook(priority=15)
@@ -1892,9 +1907,7 @@ class Prophecy(Ability):
     use_limit = 1
     opening = True
     targeting = {"kind": "unit"}
-    blurb = ("Before the first exchange, name the enemy you expect to fall first. "
-             "Name it right and you read a star; every star makes the next prophecy "
-             "worse for whoever it lands on.")
+    blurb = ("Name the enemy you expect to fall first. A right call earns a star.")
 
     def side_effects(self, match, actor, params):
         read_the_omen(match, actor, match.entity(params.get("target")))
@@ -1905,10 +1918,9 @@ class StarSign:
     reads another star and the next prophecy bites harder. A wrong call costs
     nothing — the stars only ever go up."""
 
-    describe = ("Names the enemy it expects to fall next, at the start and again "
-                "whenever an enemy dies. Right calls earn stars: 0 — the named hero "
-                "takes 1 more from everything. 1 — it is also held where it stands. "
-                "2+ — and a quarter of its maximum life is torn out at once.")
+    describe = ("Names an enemy at the start and after every death. A right call earns a "
+                "star. 0 stars: the named hero gains 1 vulnerability. 1: also pinned. 2 "
+                "or more: also loses a quarter of its max health.")
     OMENS = ["疑云 Doubt", "凶兆 Ill Omen", "大祸 Catastrophe"]
 
     def on_death(self, match, owner, ctx):
@@ -1956,10 +1968,9 @@ class StarSign:
         tgt = match.entity(owner.vars.get("prediction")) if owner.vars.get("prediction") else None
         return {
             "key": "stars", "badge": f"星{stars}", "label": "星标记 STARS",
-            "text": (f"{stars} star{'' if stars == 1 else 's'} read — next prophecy is "
-                     f"{self.OMENS[min(stars, 2)]}."
-                     + (f" Watching {tgt.name}." if tgt is not None and tgt.alive
-                        else " Nobody named.")),
+            "text": (f"Next prophecy: {self.OMENS[min(stars, 2)]}"
+                     + (f" · watching {tgt.name}." if tgt is not None and tgt.alive
+                        else " · nobody named.")),
         }
 
 
@@ -1974,8 +1985,8 @@ class TakeThePlague(Ability):
     use_limit = 1
     opening = True
     targeting = {"kind": "any_cell"}
-    blurb = ("Once both forces are down and in view, step onto any empty square on "
-             "the board. It is infected the moment you arrive.")
+    blurb = ("Deploy onto any empty square once both forces are down. It becomes "
+             "infected.")
 
     def cells(self, match, actor, origin=None):
         """Any square it may stand on — it may open inside the enemy formation, but
@@ -2010,11 +2021,8 @@ class Absolution:
     The engine owns the whole thing — a killing blow pauses resolution and asks. All
     this passive does is say that its owner is the kind of hero who can be asked."""
 
-    describe = ("When any hero is about to fall to a normal attack or an active "
-                "ability, it may step in front: that hero takes nothing at all, and "
-                "whoever swung permanently gains one of +1 attack, +1 grid or +1 "
-                "range, chosen by whoever controls it. Seven times a match, and it "
-                "cannot save itself.")
+    describe = ("May step in front of a killing blow: that hero takes nothing, the "
+                "attacker gains +1 attack, grid or range. Seven a match, never on itself.")
     saves_deaths = True
     SAVE_LIMIT = 7
 
@@ -2022,9 +2030,8 @@ class Absolution:
         left = self.SAVE_LIMIT - owner.vars.get("saves_used", 0)
         return {
             "key": "absolution", "badge": f"赦{left}", "label": "赦免 ABSOLUTION",
-            "text": (f"{left} of {self.SAVE_LIMIT} mercies left — it can still step in "
-                     f"front of that many killing blows."
-                     if left else "Every mercy spent. Nothing is safe now."),
+            "text": (f"{left} mercy left." if left == 1 else
+                     f"{left} mercies left." if left else "Every mercy spent."),
         }
 
 
@@ -2036,11 +2043,8 @@ class PlagueBearer:
     The plague is ground, not an attack: everything the board owns lives in
     board.py, and nothing here knows how it spreads."""
 
-    describe = ("Deploys after both forces are down and visible, on any empty square. "
-                "The square it lands on is infected: anyone starting a turn on infected "
-                "ground loses 2, either side's, and nothing softens it. Infected ground "
-                "creeps to the four squares beside it at the start of every round. It "
-                "alone is immune.")
+    describe = ("Infected ground costs 2 to anyone starting a turn on it, and spreads to "
+                "the four squares beside it each round. It alone is immune.")
 
     def on_match_start(self, match, owner, ctx):
         # Off the board until it chooses its square, like a hero with no body yet.
@@ -2056,7 +2060,7 @@ class PlagueBearer:
             return None
         return {
             "key": "waiting", "badge": "疫", "label": "瘟疫 UNPLACED",
-            "text": "Not on the board yet — it walks in once both forces are set.",
+            "text": "Walks in once both forces are set.",
         }
 
 
@@ -2069,9 +2073,8 @@ class PaintStroke:
     Three of each, tracked apart. Both are ordinary modifiers on the stack, so
     nothing in the damage code knows this hero exists."""
 
-    describe = ("When it is damaged, it may take 1 attack off whoever struck it. When "
-                "it deals damage, it may add 1 to its own. Three of each per match, "
-                "and it is asked each time.")
+    describe = ("When damaged, may take 1 attack off the attacker. When it deals damage, "
+                "may add 1 to its own. Three each a match.")
     LIMIT = 3
     BLUNT = "paint_blunt"
     SHARPEN = "paint_sharpen"
@@ -2141,8 +2144,7 @@ class PaintStroke:
             return None
         return {
             "key": "brush", "badge": f"画{used[0]}/{used[1]}", "label": "画师 BRUSHWORK",
-            "text": f"{used[0]} of {self.LIMIT} enemies painted thinner · "
-                    f"{used[1]} of {self.LIMIT} strokes on itself.",
+            "text": f"{used[0]}/{self.LIMIT} thinned · {used[1]}/{self.LIMIT} on itself.",
         }
 
 
@@ -2157,10 +2159,9 @@ class ArmsDealer:
     savings above a hero's own ceiling go with it. A weapon is a stat block a unit
     carries instead of its own, which the engine already reads through one hook."""
 
-    describe = ("While it stands, every one of your heroes can bank AP without limit. "
-                "Once a round, on its own turn, it charges one of them for a weapon "
-                "and keeps the fee. Its own shot can be fed AP: every point spent is "
-                "a point of damage. It does not sell to itself.")
+    describe = ("Your side banks AP without limit while it stands. Sells an ally a weapon "
+                "once a round and keeps the fee. Its own shot burns AP for damage, 1 for "
+                "1.")
     OPEN_BAR = 99
     CHOICE = "armory"
 
@@ -2196,6 +2197,11 @@ class ArmsDealer:
                 if e.ap >= w["ap"]:
                     opts.append({"value": f"{w['key']}:{e.id}",
                                  "label": f"{e.name} ← {w['name']}",
+                                 # The fee, as a number rather than only inside the
+                                 # note: it is what the dealer pockets the moment
+                                 # the sale goes through, and the client has to add
+                                 # it to the fuel its own shot may burn this turn.
+                                 "ap": w["ap"],
                                  "note": f"{w['ap']} AP · {w['text']}"})
         return {
             "key": self.CHOICE,
@@ -2227,27 +2233,26 @@ class ArmsDealer:
     def status(self, match, owner):
         return {
             "key": "open_bar", "badge": "军", "label": "军火商人 OPEN BAR",
-            "text": "Every one of your heroes can bank AP without limit while it "
-                    "stands. Its own shot takes AP as fuel, a point for a point.",
+            "text": "Side banks AP without limit · burns AP for damage.",
         }
 
 
 class WorldTree:
-    """世界树. It stands in the middle of the board and never acts. Its own side may
-    strike it with an ordinary attack — no blow lands, because the tree has nothing
-    to wound; what counts is how many times it has been struck.
+    """世界树. It stands in the middle of the board and never acts. It is not fed,
+    struck or spent — it simply keeps time, and three things happen as it does.
 
-    Nothing here is friendly fire. The tree simply offers itself as a target to its
-    own side, and the attack resolves into a tally instead of damage."""
+    It used to be woken by its own side hitting it: one blow, three blows, five.
+    That made the tree a chore rather than a clock — the side holding it spent
+    whole turns swinging at furniture to buy an effect. The schedule replaces the
+    tally, so the tree costs a draft slot and a square and nothing else, and both
+    sides can see exactly when each thing lands."""
 
-    describe = ("Stands in the middle of the board and never takes a turn. Your own "
-                "heroes may attack it. First strike: 长冬 — every enemy is a square "
-                "slower for the rest of the round. Third: 魔狼, 巨蟒 and 邪龙 take "
-                "three enemies for 1, 2 and 3, the same hero allowed more than once. "
-                "Fifth: it falls, 洛基 rises on a square of your choosing, and the "
-                "ground under everything the beasts bit catches fire.")
-    struck_by_allies = True
+    describe = ("Never acts. Round 1: no enemy can move. Round 3: three enemies take 1, 2 "
+                "and 3, repeats allowed. Round 5: it falls and 洛基 rises.")
     BEASTS = [("魔狼 Fenrir", 1), ("巨蟒 Jörmungandr", 2), ("邪龙 Níðhöggr", 3)]
+    #: Which round brings which. Read by the badge too, so the card and the clock
+    #: can never disagree.
+    SCHEDULE = {1: "winter", 3: "beasts", 5: "fall"}
 
     @EV.hook(priority=10)
     def on_match_start(self, match, owner, ctx):
@@ -2259,26 +2264,32 @@ class WorldTree:
         owner.flags.update(takes_turns=False, counts_for_defeat=False,
                            blocks_movement=True, targetable=False)
 
-    def on_struck(self, match, owner, attacker):
-        n = owner.vars.get("struck", 0) + 1
-        owner.vars["struck"] = n
-        match.log_line(f"{match.label(attacker)} strikes 世界树 — {n} now.")
-        if n == 1:
+    def on_round_start(self, match, owner, ctx):
+        """The clock. Nothing has to be spent to advance it and nothing can stop
+        it but felling the tree, which is the last thing it does anyway."""
+        if not owner.alive:
+            return
+        due = self.SCHEDULE.get(match.round)
+        if due == "winter":
             self._long_winter(match, owner)
-        elif n == 3:
+        elif due == "beasts":
             self._loose_the_beasts(match, owner)
-        elif n == 5:
+        elif due == "fall":
             self._fell(match, owner)
 
     def _long_winter(self, match, owner):
-        foes = [e for e in match.on_map(other_side(owner.side)) if e.move_allowance > 0]
+        """Not a square slower — stopped. `root` with no count is the engine's
+        own full pin, and it is stamped so that it is spent by the turn it takes
+        away rather than by the round-start that laid it: every enemy loses the
+        turn it is about to take, and nothing carries into round two."""
+        foes = [e for e in match.on_map(other_side(owner.side))
+                if e.flags["takes_turns"]]
         for e in foes:
-            e.add_modifier(Modifier("move", "add", -1, source=self,
-                                    duration=UNTIL_ROUND_END))
-        match.log_line(
-            f"长冬 settles — every enemy is a square slower for the rest of round "
-            f"{match.round}."
-        )
+            match.root(e, tag="long_winter")
+        if foes:
+            match.log_line(
+                f"长冬 settles — no enemy moves a square in round {match.round}."
+            )
 
     def _loose_the_beasts(self, match, owner):
         foes = [e.id for e in match.living(other_side(owner.side))
@@ -2320,15 +2331,21 @@ class WorldTree:
             "text": "The tree is down. Choose any empty square for 洛基 to step into.",
         })
 
+    WHAT = {"winter": "长冬 — no enemy moves",
+            "beasts": "the beasts take three enemies for 1, 2 and 3",
+            "fall": "it falls and 洛基 rises"}
+
     def status(self, match, owner):
-        n = owner.vars.get("struck", 0)
-        nxt = {0: "长冬 at the first strike", 1: "the beasts at the third",
-               2: "the beasts at the third", 3: "it falls at the fifth",
-               4: "it falls at the fifth"}.get(n, "")
+        """What is coming and when. Both sides see it: the tree is a clock in the
+        middle of the board, and a clock nobody can read is just a wall."""
+        nxt = [(r, k) for r, k in sorted(self.SCHEDULE.items()) if r > match.round]
+        if not nxt:
+            return {"key": "world_tree", "badge": "树", "label": "世界树",
+                    "text": "Its work is done."}
+        r, k = nxt[0]
         return {
-            "key": "world_tree", "badge": f"树{n}", "label": "世界树 STRUCK",
-            "text": f"Struck {n} time{'' if n == 1 else 's'}."
-                    + (f" Next: {nxt}." if nxt else ""),
+            "key": "world_tree", "badge": f"树{r}", "label": "世界树 THE CLOCK",
+            "text": f"Round {r}: {self.WHAT[k]}.",
         }
 
 
@@ -2345,12 +2362,10 @@ class FourBeasts:
     any of the three wakes that beast; the other two do nothing more, because a
     shrine is one blessing however much of it you walk over."""
 
-    describe = ("Four shrines bless it, once each and for good — three squares apiece, "
-                "across the middle of their edge. 青龙, your own back line: heal 1 at "
-                "the start of every turn. 玄武, the top row: heal 3, +3 maximum "
-                "health, and −1 to all damage taken. 朱雀, the bottom row: its attacks "
-                "set the ground under the target alight. 白虎, the enemy back line: "
-                "+2 attack, and it strikes two enemies instead of one.")
+    describe = ("Four shrines, three squares each, once each. 青龙 (your back line): heal 1 "
+                "a turn. 玄武 (top row): heal 3, +3 max health, −1 damage taken. 朱雀 (bottom "
+                "row): attacks light the ground. 白虎 (their back line): +2 attack, hits "
+                "two enemies.")
     NAMES = {"dragon": "青龙 Dragon", "turtle": "玄武 Turtle",
              "phoenix": "朱雀 Phoenix", "tiger": "白虎 Tiger"}
     WIDTH = 3            # squares per shrine, centred on its edge
@@ -2477,10 +2492,10 @@ class FirstBlood:
     Both halves are ordinary modifiers on the stack, so nothing in the attack code
     knows about this hero: `rng` and `targets` are read live like any other stat."""
 
-    describe = ("The first time it kills an enemy: +4 attack range, and its normal "
-                "attack hits two enemies in its net instead of one. Once per match.")
+    describe = "First kill: +4 range, +1 grid, and its attack hits two enemies."
     RNG = 4
     EXTRA_TARGETS = 1
+    EXTRA_GRID = 1
 
     # After the flat cuts and caps, so it only counts a blow that really landed.
     @EV.hook(priority=70)
@@ -2492,9 +2507,10 @@ class FirstBlood:
         owner.vars["first_blood"] = True
         owner.add_modifier(Modifier("rng", "add", self.RNG, source=self))
         owner.add_modifier(Modifier("targets", "add", self.EXTRA_TARGETS, source=self))
+        owner.add_modifier(Modifier("grid", "add", self.EXTRA_GRID, source=self))
         match.log_line(
             f"{match.label(owner)} takes its first kill — reach now {owner.rng}, "
-            f"and its net catches {owner.targets} at once."
+            f"{owner.grid} cells to mark, and its net catches {owner.targets} at once."
         )
 
     def status(self, match, owner):
@@ -2502,8 +2518,7 @@ class FirstBlood:
             return None
         return {
             "key": "blooded", "badge": "猎", "label": "首杀 BLOODED",
-            "text": f"Reach {owner.rng}, and its attack hits {owner.targets} enemies "
-                    f"in its net instead of one.",
+            "text": f"Reach {owner.rng} · {owner.grid} cells · hits {owner.targets}.",
         }
 
 
@@ -2511,8 +2526,7 @@ class GangTactics:
     """Display-only: the ordering rule itself lives in the turn loop (a gang
     commits one order per living member and they resolve in the chosen order)."""
 
-    describe = ("Gang turn: every living goblin acts, in an order you choose — "
-                "the whole gang costs one turn.")
+    describe = "Every living goblin acts in an order you choose, for one turn."
 
 
 class StoneHide:
@@ -2520,8 +2534,8 @@ class StoneHide:
     they hit. Abilities and burning ground are unaffected — the way through it is
     magic, not muscle."""
 
-    describe = ("Any normal attack deals at most 1 damage to it. Abilities and burning "
-                "ground land in full.")
+    describe = ("Normal attacks deal at most 1 to it. Abilities and burning ground land "
+                "in full.")
     CAP = 1
 
     # Sits after the flat reductions (40) so it overrides them rather than stacking
@@ -2541,7 +2555,7 @@ class MountainGuard:
     every hit (all damage, fire included). He himself is not covered. Positional —
     re-checked at damage time, so it follows units as they move."""
 
-    describe = "Allied units in his column take 2 less from every hit. He is not covered."
+    describe = "Allies in his column take 2 less damage. He is not covered."
 
     @EV.hook(priority=20)
     def on_before_damage(self, match, owner, ev):
@@ -2588,6 +2602,11 @@ class HeroDef:
     # A hero that is not deployed by its owner but stands somewhere the board
     # decides (世界树 at the middle). It takes a draft slot and no zone square.
     deploys: str = None
+    # How much of the deployment budget this card eats. One for almost everything
+    # — you field what you drafted — but a card can be priced at more (武器大师),
+    # and then bringing it means leaving something else on the bench. Independent
+    # of how many *bodies* it puts down: 哥布林团伙 is three units for one slot.
+    slots: int = 1
     blurb: str = ""
 
 
@@ -2645,9 +2664,8 @@ class Vagabond:
     the pair actually settled on: 增伤 sharpens it, a shield still blunts it, and
     双枪手's halving still halves it."""
 
-    describe = ("Its normal attacks land for the higher of its own Atk and the "
-                "target's; normal attacks against it land for the lower. Abilities "
-                "are untouched.")
+    describe = ("Its attacks use the higher of its attack and the target's; attacks on it "
+                "use the lower. Abilities unaffected.")
 
     @EV.hook(priority=10)
     def on_before_damage(self, match, owner, ev):
@@ -2669,9 +2687,7 @@ class Reprieve:
     sense that matters: the passive has already chosen a number, and this throws
     the whole blow away regardless."""
 
-    describe = ("Once in the match, when a blow lands on it, it may give up a point "
-                "of Atk for good to take that damage back — any damage, from any "
-                "source, including one that would have ended it.")
+    describe = "Once: give up 1 attack for good to undo a blow, lethal ones included."
     KEY = "reprieve"
 
     def damage_prompt(self, match, owner, applied):
@@ -2707,8 +2723,7 @@ class Reprieve:
             return None
         return {
             "key": "reprieve", "badge": "遁", "label": "金蝉脱壳 REPRIEVE",
-            "text": "Once in the match it can give up a point of Atk to take back "
-                    "a blow that has just landed.",
+            "text": "Once: 1 Atk to survive a killing blow.",
         }
 
 
@@ -2722,9 +2737,7 @@ class Gore:
     the tally is kept on the way in rather than on the way out — a cancelled blow
     never reaches the far end of the pipeline at all."""
 
-    describe = ("Anything its normal attack reaches this turn may be shoved one "
-                "square at the end of it, from wherever that hero ended up. A blow "
-                "turned aside still counts. Shoving is a choice, not a duty.")
+    describe = "Anything its attack reaches may be shoved one square."
     KEY = "gore"
 
     def on_turn_start(self, match, owner, ctx):
@@ -2777,7 +2790,7 @@ class Gore:
 
 
 class WeaponMaster:
-    describe = "Each turn, choose a weapon: it sets that turn's attack and stance."
+    describe = "Choose a weapon each turn: it sets that turn's attack and stance."
 
     def on_turn_start(self, match, owner, ctx):
         # A new turn — last turn's stance expires "before this turn begins".
@@ -2828,9 +2841,8 @@ class ChooseIsland(Ability):
     ap_cost = 0
     prebuild = True
     targeting = {"kind": "cells", "count": 4}
-    blurb = ("Before anyone deploys, mark four squares in a T. They leave the board "
-             "entirely until round four — nothing can enter them, and nothing on "
-             "them can be touched. Both sides see it.")
+    blurb = ("Before deployment, mark four squares in a T. They leave the board until "
+             "round 4.")
 
     def validate_build(self, match, side, params):
         cells = [tuple(c) for c in (params.get("cells") or [])]
@@ -2872,7 +2884,8 @@ class MakeLandfall(Ability):
     ap_cost = 0
     prebuild = True
     targeting = {"kind": "any_cell"}
-    blurb = "Choose which square of your island you start on. The other three are what you dig."
+    blurb = ("Choose which island square you start on. The other three are what you "
+             "dig.")
 
     def build_cells(self, match, side):
         isl = match.islands.get(side) or {}
@@ -2910,6 +2923,29 @@ class Dig(Ability):
             return "That square is not free island ground."
         return None
 
+    # Roughly what a spadeful is worth, in the health-ish units the play-testing
+    # AI evaluates a board in. Nothing about digging shows up in damage or in a
+    # movement preview, so without this all three read as an identical blank turn
+    # and the choice between arriving at 3 health and arriving at 18 comes down to
+    # whichever ability happens to be listed first.
+    WORTH = {"grape": 4, "slave": 8, "mineral": 10}
+
+    def gain(self, match, actor, params):
+        dug = list(actor.vars.get("dug") or [])
+        worth = float(self.WORTH.get(self.resource, 0))
+        # 三个一样 and 一个一种 both pay a bonus, and the bonus is most of the
+        # point of the hero: a spadeful that keeps one of them reachable is worth
+        # more than the same spadeful that gives both of them up.
+        after = dug + [self.resource]
+        left = 3 - len(after)
+        same = len(set(after)) == 1
+        allsorts = len(set(after)) == len(after)
+        if len(after) == 3:
+            worth += 9 if (same or allsorts) else 0
+        elif same or allsorts:
+            worth += 4 - left      # nearer the bonus is worth more than further
+        return worth
+
     def side_effects(self, match, actor, params):
         cell = tuple(params["cell"])
         actor.vars.setdefault("dug", []).append(self.resource)
@@ -2924,24 +2960,21 @@ class DigGrapes(Dig):
     key = "dig_grapes"
     name = "葡萄 Grapes"
     resource = "grape"
-    blurb = ("Plant a vine. The first friendly hero to step onto it mends 4. The vine "
-             "stays where it is for the rest of the match.")
+    blurb = "Plant a vine. The first ally to step on it heals 4."
 
 
 class TrainNatives(Dig):
     key = "train_natives"
     name = "奴隶 Slaves"
     resource = "slave"
-    blurb = ("Train a 土著 on that square: a hero of your own whose blow is worth "
-             "a sixth of whatever it lands on.")
+    blurb = "Train a 土著: its blow deals a sixth of the target's max health."
 
 
 class MineOre(Dig):
     key = "mine_ore"
     name = "矿物 Ore"
     resource = "mineral"
-    blurb = ("Dig ore and beat it into armour: +3 max HP (and the health with it), "
-             "+1 attack, +1 range. The square is left as bare as it was found.")
+    blurb = "Beat ore into armour: +3 maximum health, +1 attack, +1 range."
 
 
 def apply_resource(match, owner, resource, cell):
@@ -2975,12 +3008,9 @@ class Explorer:
     board, digging one resource a round, and arrives at the top of round four with
     whatever it found. Three of a kind, or one of each, is worth more."""
 
-    describe = ("Charts four squares in a T before anyone deploys; they leave the "
-                "board until round four and it stands on them alone, untouchable. "
-                "Each of the first three rounds it digs one resource into an empty "
-                "island square — a vine, a 土著, or a plate of armour — and does "
-                "nothing else. At the top of round four the island is joined back "
-                "on. Three of one resource, or one of each, pays a bonus.")
+    describe = ("Off the board on its island until round 4, untouchable. Digs one "
+                "resource a round for the first three and does nothing else. Three of "
+                "one, or one of each, pays a bonus.")
 
     JOIN_ROUND = 4
     GREAT_PLATE = 6      # 完全矿物装甲, on top of the three ordinary plates
@@ -3135,7 +3165,7 @@ class NativeStrike:
     """土著 fight with what they are given, so their blow is measured against
     whatever it lands on rather than by any arm of their own."""
 
-    describe = "Its normal attack deals a sixth of the target's maximum health, rounded down."
+    describe = "Its attack deals a sixth of the target's max health."
     SHARE = 6
 
     def on_before_damage(self, match, owner, ev):
@@ -3187,7 +3217,7 @@ ROSTER = [
         key="thunder_dragon",
         name="雷霆龙",
         name_en="thunderDragon",
-        max_hp=17,
+        max_hp=16,
         atk=2,
         move=1,
         max_ap=6,
@@ -3237,7 +3267,7 @@ ROSTER = [
         key="cannoneer",
         name="炮手",
         name_en="cannoneer",
-        max_hp=16,
+        max_hp=15,
         atk=4,
         move=1,
         max_ap=0,
@@ -3248,7 +3278,7 @@ ROSTER = [
         key="mountain_god",
         name="山神",
         name_en="mountainGod",
-        max_hp=19,
+        max_hp=17,
         atk=2,
         move=1,
         max_ap=0,
@@ -3344,7 +3374,8 @@ ROSTER = [
         key="weapon_master",
         name="武器大师",
         name_en="weaponMaster",
-        max_hp=23,
+        max_hp=25,
+        slots=2,
         atk=2,
         move=1,
         max_ap=0,
@@ -3463,7 +3494,7 @@ ROSTER = [
         key="bomber",
         name="炸弹客",
         name_en="bomber",
-        max_hp=15,
+        max_hp=14,
         atk=3,
         move=2,
         max_ap=3,
@@ -3643,7 +3674,7 @@ ROSTER = [
         key="judge",
         name="法官",
         name_en="judge",
-        max_hp=16,
+        max_hp=14,
         atk=3,
         move=1,
         max_ap=4,
@@ -3670,7 +3701,7 @@ ROSTER = [
         name_en="fisherman",
         max_hp=16,
         atk=3,
-        move=1,
+        move=2,
         max_ap=2,
         attack={"mode": CELL, "cells": 2, "range": 2},
         abilities=[Hook()],
@@ -3680,7 +3711,7 @@ ROSTER = [
         key="snow_woman",
         name="雪女",
         name_en="snowWoman",
-        max_hp=16,
+        max_hp=15,
         atk=2,
         move=1,
         max_ap=4,
@@ -3935,10 +3966,22 @@ SQUAD_MEMBERS = [
 
 SQUAD_MEMBERS += [
     HeroDef(
+        key="ninja",
+        name="忍者",
+        name_en="ninja",
+        max_hp=17,
+        atk=3,
+        move=1,
+        max_ap=3,
+        attack={"mode": CELL, "cells": 2, "range": 2},
+        abilities=[Raikiri()],
+        blurb="Cuts with lightning and is gone — a wide net, and long strides after it.",
+    ),
+    HeroDef(
         key="loki",
         name="洛基",
         name_en="loki",
-        max_hp=10,
+        max_hp=12,
         atk=5,
         move=2,
         max_ap=0,
@@ -3985,7 +4028,7 @@ BY_KEY[DUMMY.key] = DUMMY
 # whenever you add heroes; --test fills the rest of your side with dummies.
 # Whoever is newest goes here — --test always deploys the hero just added, so it
 # can be played immediately. Up to two; the rest of the side is padded with dummies.
-TEST_HEROES = ["wanderer", "minotaur"]
+TEST_HEROES = ["ninja", "wanderer"]
 
 
 
@@ -4086,22 +4129,19 @@ def status_of(match, entity):
         out.append({
             "key": "cursed", "badge": "咒", "label": "咒毒 MARKED",
             "private": True,      # only the side that laid the curse may see it
-            "text": "The first attack or ability that damages this hero costs its "
-                    "source the next two rounds.",
+            "text": "First hit freezes the attacker.",
         })
     if entity.vars.get("blessed"):
         out.append({
             "key": "blessed", "badge": "佑", "label": "祝福 BLESSED",
-            "text": "The next attack or ability that would hurt it is turned aside. "
-                    "+1 movement until then. Burning ground still bites.",
+            "text": "Turns aside the next blow · +1 move.",
         })
     if entity.vars.get("arms"):
         w = entity.vars["arms"]
         spent = w.get("spent")
         out.append({
             "key": "armed", "badge": "械", "label": f"{w['name']}",
-            "text": ("Its own attack is gone — the warhead is spent." if spent
-                     else w["text"]),
+            "text": ("Warhead spent — no attack left." if spent else w["text"]),
         })
     if entity.vars.get("judged"):
         mark = entity.vars["judged"]
@@ -4109,28 +4149,24 @@ def status_of(match, entity):
         out.append({
             "key": "judged", "badge": "赏" if good else "罚",
             "label": "赏善 COMMENDED" if good else "罚恶 CONDEMNED",
-            "text": ("At the end of its next turn it is mended for everything it "
-                     "dealt during that turn." if good else
-                     "At the end of its next turn it takes everything it dealt "
-                     "during that turn, back on itself."),
+            "text": ("Next turn: healed for what it deals." if good else
+                     "Next turn: takes back what it deals."),
         })
     if entity.vars.get("vulnerable"):
         n = entity.vars["vulnerable"]
         out.append({
-            "key": "vulnerable", "badge": f"伤+{n}", "label": "增伤 EXPOSED",
-            "text": f"Takes {n} more from every hit — attacks, abilities and "
-                    f"burning ground alike. It does not wear off.",
+            "key": "vulnerable", "badge": f"伤+{n}", "label": "增伤 VULNERABLE",
+            "text": f"Takes +{n} from everything. Permanent.",
         })
     if match.bound(entity):
         out.append({
             "key": "bound", "badge": "缚", "label": "束缚 BOUND",
-            "text": "Held where it stands for as long as whoever holds it lives — "
-                    "it can still attack and cast.",
+            "text": "Cannot move while its holder lives.",
         })
     elif match.rooted(entity):
         out.append({
             "key": "rooted", "badge": "钉", "label": "定身 PINNED",
-            "text": "Cannot move on its next turn — it can still attack and cast.",
+            "text": "Cannot move next turn. Still fights.",
         })
     elif entity.vars.get("rooted_at") is not None:
         n = entity.vars.get("rooted_squares", 0)
@@ -4139,17 +4175,14 @@ def status_of(match, entity):
             "key": "poisoned" if venom else "slowed",
             "badge": "毒" if venom else "慢",
             "label": "中毒 ENVENOMED" if venom else "减速 SLOWED",
-            "text": (f"Moves {n} square{'' if n == 1 else 's'} less on its next turn, "
-                     f"and then it wears off."
-                     + (" It cannot be given a second dose until this one is spent."
-                        if venom else "")),
+            "text": (f"−{n} move next turn"
+                     + (", no second dose." if venom else ".")),
         })
     if match.frozen(entity):
         left = match.frozen_rounds_left(entity)
         out.append({
             "key": "frozen", "badge": "禁", "label": "无法行动 FROZEN",
-            "text": f"Cursed — cannot take a turn for {left} more round"
-                    f"{'' if left == 1 else 's'}.",
+            "text": f"No turn for {left} more round{'' if left == 1 else 's'}.",
         })
     for p in entity.passives:
         fn = getattr(p, "status", None)

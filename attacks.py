@@ -66,7 +66,9 @@ class CellLocked(AttackMode):
              "shots": e.hero.attacks_per_turn}
         if e.attack_spec.get("fuel"):
             # 军火商人 feeds its own shot: every point spent is a point of damage.
-            t["fuel"] = e.ap
+            # What the turn will open with, not what is banked now — the charge
+            # lands before the shot, so it is fuel like anything else already there.
+            t["fuel"] = match.turn_ap(e)
         return t
 
     def validate(self, match, e, dest, action):

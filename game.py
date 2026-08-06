@@ -15,6 +15,7 @@ import time
 import urllib.request
 import webbrowser
 
+import matchlog
 from server import serve
 
 DOMAIN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ngrok_domain.txt")
@@ -99,10 +100,13 @@ def main():
     ap.add_argument("--test", action="store_true",
                     help="Test mode: an auto-set-up 2v2 with your newest champions "
                          "(plus dummies) vs two dummies, so you can try a new hero fast.")
+    ap.add_argument("--pve", action="store_true",
+                    help="Play a full game — draft and all — against the AI. You "
+                         "take the Left seat; every game is written to logs/.")
     ap.add_argument("--no-browser", action="store_true")
     args = ap.parse_args()
 
-    mode = "test" if args.test else "self" if args.solo else "pvp"
+    mode = "pve" if args.pve else "test" if args.test else "self" if args.solo else "pvp"
     try:
         httpd = serve(args.host, args.port, mode)
     except OSError as e:
@@ -129,7 +133,15 @@ def main():
 
     local = f"http://127.0.0.1:{args.port}"
     print("Warchess is running.\n")
-    if args.test:
+    if args.pve:
+        print("  PvE — you hold the Left seat, the AI holds the Right. A full")
+        print("  game: draft, deploy, fight. It picks and moves the moment it")
+        print("  is its turn, so just play.\n")
+        print(f"    Your seat   {local}/?side=L")
+        print(f"\n  Every game is recorded under {matchlog.LOG_DIR}/ —")
+        print("  one file per game, restart or reset starts a new one.")
+        open_url = f"{local}/?side=L"
+    elif args.test:
         print("  Test mode — your newest champions (+ dummies) vs two dummies,")
         print("  already deployed. You drive both sides.\n")
         print(f"    Your side   {local}/?side=L")

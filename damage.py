@@ -98,7 +98,13 @@ class Vulnerability:
     something already softened to nothing is not revived by being easier to hurt.
 
     Generic like the rest of this file — it reads a var and names no hero, so
-    anything that can mark a unit works through it."""
+    anything that can mark a unit works through it.
+
+    Applied after the halving, which is what makes it worth the same to every
+    blow that lands. Folded in before it, a +1 mark was worth only half a point
+    to 双枪手's second shot and floored away to nothing: two shots into a marked
+    hero dealt 5 and 2, exactly what an unmarked one took from the second barrel.
+    A mark that says "everything hurts more" has to mean the small blows too."""
 
     @EV.hook(priority=35)
     def on_before_damage(self, match, ev):
@@ -225,11 +231,16 @@ class Verdict:
 
 
 class HalvingRule:
-    """The gunslinger's second shot halves *after* every other modifier, so it
-    sits at the very end of the pipeline rather than being folded into the
-    attack's base damage."""
+    """The gunslinger's second shot is half a shot, so it halves before anything
+    that is charged per blow rather than per point — the mark a hero carries, the
+    guard it is holding, the ceiling stone puts on what can get through. Otherwise
+    a +1 mark is worth only half a point to the second barrel and floors away to
+    nothing, and both shots off a marked hero land for what one of them does.
 
-    @EV.hook(priority=90)
+    It still sits after `OutgoingShift`, which shifts the swing itself: that is
+    part of the shot, so half a shot carries half of it."""
+
+    @EV.hook(priority=30)
     def on_before_damage(self, match, ev):
         if "halve" in ev.tags and not ev.cancelled:
             ev.amount = ev.amount // 2

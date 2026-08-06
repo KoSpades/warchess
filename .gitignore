@@ -4,4 +4,5 @@ __pycache__
 ngrok_domain.txt
 warchess-game.zip
 fixtures.json
+logs/
 .client.test.js

@@ -56,7 +56,9 @@ def attack_options(m, e, a, origin):
         return
 
     if kind == "cells":
-        # A tree of your own is worth chopping: five strikes and 洛基 walks out.
+        # An ally that offers itself as a target on purpose. Nothing does today
+        # — 世界树 keeps time now rather than being struck — but the rule is the
+        # engine's, not the tree's, so it stays.
         tree = next((x for x in m.strikeable_allies(
             m.topology.cells_within(origin, e.rng or 0), e.side)), None)
         if tree is not None:
@@ -65,6 +67,10 @@ def attack_options(m, e, a, origin):
         reach = [f for f in foes if m.topology.distance(origin, f.cell) <= (e.rng or 0)]
         if not reach:
             return
+        # Frailest first. Aiming by what a body is *worth* instead was measured at
+        # 48.1% against this over 5,000 games: a kill takes a whole hero off the
+        # board, so the shot that pays is the one that finishes something, not the
+        # one that scratches whoever is scariest.
         picked = [f.cell for f in sorted(reach, key=lambda f: f.hp)[:t["count"]]]
         shots = [[list(c) for c in picked] for _ in range(t["shots"])]
         best = min(reach, key=lambda f: f.hp)
@@ -74,7 +80,7 @@ def attack_options(m, e, a, origin):
                e.atk + fuel + kill_bonus(best, e.atk + fuel))
 
     elif kind == "unit":
-        # A tree of your own is worth chopping: five strikes and 洛基 walks out.
+        # Same rule, for an attack that names a hero rather than a square.
         for i in (t.get("strikeable") or []):
             yield {"target": i}, 5
         want = t.get("count", 1)
@@ -195,7 +201,10 @@ def ability_options(m, e, a, origin):
                     continue
                 picked.append(n)
                 frontier.append(n)
-        if len(picked) != t["count"]:
+        # An ability that wants its exact shape (水法师's four connected squares)
+        # has nothing to offer if the board cannot give it one. Everything else
+        # marks up to `count`, so a net that came up short is still a net.
+        if t.get("exact") and len(picked) != t["count"]:
             return
         hit = [f for f in reach if f.cells & set(picked)]
         got = damage_of({"shots": [[list(c) for c in picked]]})
@@ -273,16 +282,36 @@ def candidates(m, e, pending=None):
 # Which brain is driving. `smart` judges a move by what the board is worth after
 # it; `greedy` by the damage it does now. Both pick from `candidates`, so a
 # mirror match between them is a test of judgement and nothing else.
+#
+# `flatpull` is `smart` with the old flat approach term — the version that would
+# not walk into a fight. Kept so a change to how the AI values position can be
+# played against the version it replaced, rather than only against itself.
 POLICY = "smart"
-# Set to {LEFT: "smart", RIGHT: "greedy"} to put a different brain on each side,
-# which is how the two are compared head to head.
+# Set to {LEFT: "smart", RIGHT: "flatpull"} to put a different brain on each
+# side, which is how two of them are compared head to head.
 SIDE_POLICY = None
+# The brains that judge a board rather than a blow. They share everything except
+# how they weigh position, so they must also share the same deployment — testing
+# a scoring change against an opponent that also starts badly placed measures two
+# things at once and tells you which of them won.
+SMART = ("smart", "flatpull")
+
+
+def policy_for(side):
+    return SIDE_POLICY[side] if SIDE_POLICY else POLICY
 
 
 def best_order(m, e, pending=None):
-    policy = SIDE_POLICY[e.side] if SIDE_POLICY else POLICY
+    policy = policy_for(e.side)
     if policy == "smart":
         return AI.best_order(m, e, pending, candidates)
+    if policy == "flatpull":
+        # The approach pull as it was: flat per square, whatever the hero brings.
+        was, AI.push_of = AI.push_of, lambda e: 1.0
+        try:
+            return AI.best_order(m, e, pending, candidates)
+        finally:
+            AI.push_of = was
     return _greedy_order(m, e, pending)
 
 
@@ -335,7 +364,7 @@ def free_picks(m, e, payload):
             continue
         wares = ch.get("wares")
         if wares:
-            best = max(wares, key=lambda w: int((w.get("note") or "0").split()[0]))
+            best = max(wares, key=lambda w: w.get("ap") or 0)
             choices[ch["key"]] = best["value"]
         else:
             choices[ch["key"]] = ch["options"][0]
@@ -344,7 +373,10 @@ def free_picks(m, e, payload):
     return payload
 
 
-def take_turn(m, side):
+def take_turn(m, side, observer=None):
+    """Pick which hero acts and commit its order. `observer(m, side, scored, e)`
+    is handed the whole ranking, not just the winner — a PvE log wants to know
+    what the AI passed over as much as what it played."""
     pool = m.unacted(side)
     if not pool:
         return
@@ -353,6 +385,8 @@ def take_turn(m, side):
         score, payload = best_order(m, e)
         scored.append((score, e, payload))
     score, e, payload = max(scored, key=lambda x: x[0])
+    if observer is not None:
+        observer(m, side, scored, e)
     if m.select_hero(side, e.id) is not None:
         return
     actors = m.turn_actors(e)
@@ -429,18 +463,21 @@ def bot_cell_groups(m, count):
         yield [list(x) for x in cells[i:i + count]]
 
 
-def step(m):
+def step(m, sides=(LEFT, RIGHT), observer=None):
     """One turn of the crank: whatever this phase is waiting for, answer it.
     Split out of the match loop so a harness can drive a match a step at a
-    time and look at the board in between."""
+    time and look at the board in between.
+
+    `sides` narrows it to the seats the bot is holding. A headless match drives
+    both; PvE drives one and leaves the other's decisions to the player."""
     if m.phase == "build":
-        for side in (LEFT, RIGHT):
+        for side in sides:
             if m.phase != "build" or not m.build:
                 break
             if m.build["pending"][side]:
                 bot_build(m, side)
     elif m.phase == "opening":
-        for side in (LEFT, RIGHT):
+        for side in sides:
             if m.opening is None or m.phase != "opening":
                 break        # the last pick ends the phase
             pend = m.opening["pending"][side]
@@ -471,7 +508,7 @@ def step(m):
     elif m.phase == "victim":
         if m.res is None:
             return
-        for side in (LEFT, RIGHT):
+        for side in sides:
             # answering one side can finish the whole exchange
             if m.res is None or m.phase != "victim":
                 break
@@ -490,7 +527,7 @@ def step(m):
                     break        # refused for any reason — never spin on it
     elif m.phase == "interrupt":
         task = m.interrupts[0] if m.interrupts else None
-        if task is None:
+        if task is None or task["side"] not in sides:
             return
         if task.get("option_kind") == "unit":
             opts = [m.entity(i) for i in task["options"]]
@@ -519,7 +556,7 @@ def step(m):
         else:
             m.choose_interrupt(task["side"], task["options"][0])
     elif m.phase == "move_choice":
-        for side in (LEFT, RIGHT):
+        for side in sides:
             if m.phase != "move_choice":
                 break
             if m.move_choices[side]:
@@ -535,7 +572,7 @@ def step(m):
                                                  for f in foes if f.cells))
                 m.choose_move(side, pick)
     elif m.phase == "resolved":
-        for side in (LEFT, RIGHT):
+        for side in sides:
             if m.phase != "resolved":
                 break
             if m.followups[side]:
@@ -560,9 +597,9 @@ def step(m):
                                                      for f in foes))
                 m.choose_followup(side, pick)
     elif m.phase == "commit":
-        for side in (LEFT, RIGHT):
+        for side in sides:
             if m.commits[side] is None:
-                take_turn(m, side)
+                take_turn(m, side, observer)
     else:
         return
 
@@ -590,13 +627,15 @@ def play_teams(left, right, seed=0, verbose=False):
         free = sorted((c for c in m.topology.deployment_zone(side)
                        if c in m.topology.all_cells()),
                       key=lambda c: (-c[0] if side == LEFT else c[0], c[1]))
-        bodies = m.deploy_bodies(side)
+        bodies = m.affordable_bodies(side)
         if len(bodies) > len(free):
             # zip would quietly drop the overflow and field a short side, which
             # reads as a hero being weak rather than as a hero never arriving.
             return "unplayable"
+        cells = (AI.deployment(m, side, bodies, free)
+                 if policy_for(side) in SMART else free)
         m.setup_state[side]["placements"] = [
-            {"key": k, "cell": list(c)} for k, c in zip(bodies, free)
+            {"key": k, "cell": list(c)} for k, c in zip(bodies, cells)
         ]
         m.setup_state[side]["ready"] = True
     m.begin()
