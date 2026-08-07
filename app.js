@@ -506,7 +506,9 @@ function renderBoard(){
             + ` onclick="onCell(${c},${r})"${dnd}>`
             + `<span class="tick"></span>${extra}`
             + (tile?`<span class="flame">▲${tile.stacks}</span>`:'')
-            + (door?`<span class="door ${door.owner}">门</span>`:'')
+            + (door?`<span class="door ${door.owner}" title="${doorTitle(door)}">${
+                 door.passages == null ? '门'
+                 : door.passages ? '门' + door.passages : '闭'}</span>`:'')
             + (plague?`<span class="plague">疫</span>`:'')
             + (vine?`<span class="vine ${vine.owner}">${vine.great?'葡':vine.spent?'枝':'萄'}</span>`:'')
             + (mk?`<span class="markglyph" title="${mk.name}">${mk.glyph}</span>`:'')
@@ -1303,7 +1305,24 @@ function chooseWeapon(key){
  * something that does not exist — pickable, never sealable. The normal attack
  * has always degraded to a hold in that case; an ability has nothing to degrade
  * to, so it is shown as unusable instead. */
+/* What a door has left, for the square it stands on. The number is on the board
+ * rather than only in the log because the way running out changes what a side can
+ * plan, and a plan is made looking at the board. */
+function doorTitle(door){
+  const mine = door.owner === SIDE;
+  if (door.passages == null) return mine ? 'Your door' : 'Their door — wall to you';
+  if (!door.passages) return mine ? 'Your door — the way is closed'
+                                  : 'Their door, closed — still wall to you';
+  const n = door.passages === 1 ? '1 passage' : door.passages + ' passages';
+  return mine ? `Your door — ${n} left` : `Their door — wall to you (${n} left)`;
+}
+
 function unaimable(a){
+  // Judged from where the hero will be standing, not where it is leaving: the
+  // option lists are positional, and movement resolves before the ability does.
+  // Read raw, a centaur with no lane from its own square had 冲撞 greyed out for
+  // the whole turn, however far it walked toward one.
+  a = aimedFrom(a);
   if (!a || !a.targeting) return "";
   const k = a.targeting.kind;
   if (k==='unit' || k==='any_unit'){
@@ -1977,8 +1996,12 @@ function targetingHTML(act){
               ${d==='forward'?'Forward — toward the enemy':'Backward — toward your own line'}</button>`;
     }
   } else if (t.kind==='any_cell'){
-    h += `<p class="note">Click any cell on the board to set it alight.</p>`;
-    if (draft.cell) h += `<button class="btn on">That square is marked to burn</button>`;
+    // The ability says what the square is for; the panel only says where to click.
+    // Several of these now (火法师 burns one, 半人马 runs to one, 探险家 digs one),
+    // so naming the fire here would be wrong for most of them.
+    h += `<p class="note">${t.cells ? 'Click one of the marked squares'
+                                    : 'Click any square on the board'} for ${act.name}.</p>`;
+    if (draft.cell) h += `<button class="btn on">${draft.cell.join(',')} is marked</button>`;
   } else if (t.kind==='any_unit'){
     h += `<p class="note">Choose any hero on the board — yours or theirs. <b>Enter</b> registers.</p>`;
     for (const u of (S.units||[]).filter(u=>u.alive && u.cell)){

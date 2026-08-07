@@ -215,7 +215,24 @@ def ability_options(m, e, a, origin):
     elif kind == "any_cell":
         cells = t.get("cells")
         if cells:
-            yield {"cell": list(cells[0])}, 5
+            # Which square matters for some of these — 半人马 picks the one it can
+            # trample the most on the way to — and not at all for others (瘟疫 just
+            # wants a way in). Ask the ability what each is worth and let a flat
+            # score stand where it has no opinion.
+            scored = []
+            for c in cells:
+                got = damage_of({"cell": list(c)})
+                dmg = got[0] if got else 0
+                best = max((kill_bonus(ev.target, ev.amount) for ev in got[1]),
+                           default=0) if got else 0
+                scored.append((c, dmg + best))
+            # The flat score is for an ability with no opinion about damage at
+            # all, not for a square that happens to be worth nothing: judged per
+            # ability, or a charge trampling one enemy would rank below a charge
+            # trampling none.
+            silent = not any(v for _c, v in scored)
+            for c, v in scored:
+                yield {"cell": list(c)}, 5 if silent else v
         else:
             f = nearest(m, e, origin)
             if f:

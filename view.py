@@ -198,8 +198,11 @@ def state_for(m, side):
         # Squares a hero's passive wants drawn (四圣兽's shrines). Both seats see
         # them: where they are follows from the rules, so there is nothing to hide.
         "marks": HEROES.board_marks(m),
-        "doors": [{"cells": [list(a), list(b)], "owner": owner}
-                  for a, b, owner in m.topology.links],
+        # `passages` is what the door has left, so the side that built it can see
+        # the way running out before it walks the last one.
+        "doors": [{"cells": [list(d.a), list(d.b)], "owner": d.side,
+                   "passages": d.passages}
+                  for d in m.topology.links],
         "units": units,
         "log": [l for l in m.log if l.get("side") in (None, side)][-60:],
         "reveal": m.last_reveal,

@@ -1198,6 +1198,31 @@ class Match:
             frontier = nxt
         return out
 
+    def doors_walked(self, e, dest):
+        """The doors this walk cannot have avoided. Each of the side's own doors is
+        shut in turn and the walk worked out again: a destination that falls out of
+        reach was only reachable through that door, so it was used.
+
+        A door that merely shortened a walk the hero could have made anyway is not
+        counted — the engine records where a hero was going, never which way it
+        went, and charging a passage nobody can prove was taken is the worse
+        mistake of the two."""
+        if not e.cells:
+            return []
+        dest = tuple(dest)
+        out = []
+        for d in self.topology.links:
+            if d.side != e.side or not d.open:
+                continue
+            d.muted = True
+            try:
+                reachable = {tuple(c) for c in self.legal_moves(e)}
+            finally:
+                d.muted = False
+            if dest not in reachable:
+                out.append(d)
+        return out
+
     def sole_actions(self, e):
         """Ability keys that are the *only* thing this hero may do right now, or
         None for the ordinary case. A passive answers for its own hero (探险家 while
@@ -1781,7 +1806,19 @@ class Match:
                 self.log_line(f"{self.label(winner)} is blocked — no movement.")
                 continue
             frm = winner.cell
+            # Worked out before the step, while the hero is still standing where
+            # the walk began. Only walking uses a door: everything that shifts a
+            # hero without walking it reads the board's own neighbours, which no
+            # door is part of.
+            spent = self.doors_walked(winner, d)
             winner.set_cell(d)
+            for door in spent:
+                door.walked()
+                self.log_line(
+                    f"{self.label(winner)} goes through the doors."
+                    + ("" if door.passages is None else
+                       f" {door.passages} passage{'' if door.passages == 1 else 's'} left."
+                       if door.passages else " The way closes behind it."))
             self.bus.emit(EV.AFTER_MOVE, {"entity": winner, "from": frm, "to": d})
             if frm is not None:     # a mover with no origin has just taken flesh
                 self.log_line(f"{self.label(winner)} moves.")

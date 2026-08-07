@@ -15,6 +15,41 @@ def other_side(side):
     return RIGHT if side == LEFT else LEFT
 
 
+class Door:
+    """Two squares joined for one side, and the count of how many times its own
+    side may still walk through.
+
+    Muting is how the engine asks "was this door needed?" — the walk is worked out
+    again with the door shut, and a destination that falls out of reach must have
+    gone through it. Cheaper than remembering the path a hero took, and it answers
+    the only question anybody asks of it."""
+
+    __slots__ = ("a", "b", "side", "passages", "muted")
+
+    def __init__(self, a, b, side, passages=None):
+        self.a, self.b, self.side = tuple(a), tuple(b), side
+        self.passages = passages
+        self.muted = False
+
+    @property
+    def open(self):
+        return not self.muted and (self.passages is None or self.passages > 0)
+
+    def holds(self, cell):
+        return tuple(cell) in (self.a, self.b)
+
+    def across(self, cell):
+        """The square on the other side of this door, or None if it does not open
+        onto the one asked about."""
+        cell = tuple(cell)
+        return self.b if cell == self.a else self.a if cell == self.b else None
+
+    def walked(self):
+        """Spend one passage. A door with no count never runs down."""
+        if self.passages is not None:
+            self.passages -= 1
+
+
 class Topology:
     def __init__(self, cols=9, rows=5):
         self.cols = cols
@@ -66,31 +101,41 @@ class Topology:
             if (c, r) not in self.regions
         ]
 
-    def link(self, a, b, side):
+    def link(self, a, b, side, passages=None):
         """Join two squares for one side. They are neighbours for that side and
-        nobody else, and the board is otherwise unchanged."""
-        self.links.append((tuple(a), tuple(b), side))
+        nobody else, and the board is otherwise unchanged.
+
+        `passages` is how many times it may be walked through before the way
+        closes; None is a door that never wears out. Whoever builds the door owns
+        that number — the board only counts."""
+        self.links.append(Door(a, b, side, passages))
+        return self.links[-1]
 
     def closed_to(self, cell, side):
         """True if that side may not stand on this square at all. A door is already
         a per-side property of the board — one side may step between its two squares
         and nobody else — and this is the same fact read the other way round: to the
-        other side those two squares are wall."""
+        other side those two squares are wall.
+
+        A spent door is still a door: what runs out is the way through, not the
+        thing standing there, so those squares are no more open to the other side
+        than they were on the first round."""
         cell = tuple(cell)
-        return any(cell in (a, b) and owner != side for a, b, owner in self.links)
+        return any(d.holds(cell) and d.side != side for d in self.links)
 
     def linked_from(self, cell, entity):
-        """The far side of any door this unit may walk through from here."""
+        """The far side of any door this unit may walk through from here. A door
+        with no passages left is not one of them, nor is one muted while the
+        engine works out whether a walk needed it."""
         if entity is None:
             return []
         out = []
-        for a, b, side in self.links:
-            if entity.side != side:
+        for d in self.links:
+            if entity.side != d.side or not d.open:
                 continue
-            if cell == a:
-                out.append(b)
-            elif cell == b:
-                out.append(a)
+            far = d.across(cell)
+            if far is not None:
+                out.append(far)
         return out
 
     def neighbours(self, cell, entity=None):

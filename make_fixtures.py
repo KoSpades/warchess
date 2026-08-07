@@ -108,6 +108,15 @@ def build():
     snap("centaur_charge", m, select=unit(m, LEFT, "centaur").id,
          full_ap=[unit(m, LEFT, "centaur")])
 
+    # a hero with nobody in reach of the square it stands on, but somebody in
+    # reach of a square it can walk to: the menu has to judge an ability from
+    # where the hero will be, since movement resolves before the ability does
+    m = arena([("strongman", (2, 3)), ("gatekeeper", (1, 1))],
+              [("dummy", (7, 3)), ("cannoneer", (8, 3))])
+    stage(m, (unit(m, RIGHT, "dummy"), (4, 3)))
+    snap("reach_after_walk", m, select=unit(m, LEFT, "strongman").id,
+         full_ap=[unit(m, LEFT, "strongman")])
+
     m = arena([("mammoth", (3, 3))], [("dummy", (7, 3)), ("cannoneer", (7, 2))])
     stage(m, (unit(m, RIGHT, "dummy"), (4, 3)), (unit(m, RIGHT, "cannoneer"), (4, 2)))
     snap("mammoth", m, select=m.living(LEFT)[0].id)
@@ -477,6 +486,10 @@ def build():
     m.lock_force(LEFT); m.lock_force(RIGHT)
     m.select_hero(LEFT, unit(m, LEFT, "artisan").id)
     out["doors"] = view.state_for(m, LEFT)
+    # and the same pair with its last passage walked, so the board can say so
+    m.topology.links[0].passages = 0
+    out["doors_spent"] = view.state_for(m, LEFT)
+    m.topology.links[0].passages = HEROES.RaiseDoors.PASSAGES
 
     # --- the other phases -----------------------------------------------------
     out["draft"] = view.state_for(Match(), LEFT)

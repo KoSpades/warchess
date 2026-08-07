@@ -57,7 +57,7 @@ function loadClient(side = 'L') {
       chooseAction, sealOrder, syncDraft, nameableFor, unaimable,
       shotsWanted, onLastShot, linkedOrder, linkedMoves, isLinked,
       pickChoice, pendingFee, cellTargets, setHover, renderRHS,
-      allyOptions, allyAllowed };`;
+      allyOptions, allyAllowed, currentAction };`;
   const tmp = path.join(here, '.client.test.js');
   fs.writeFileSync(tmp, js + api);
   const mod = require(tmp);
@@ -995,6 +995,22 @@ if (F.build && F.doors) {
   ok('artisan: and a plain square stays plain', !cellHas([5, 5], 'doorL'));
 }
 
+// The way through a door runs out, and the board has to say so — a side plans
+// looking at the board, not at the log where the passages were counted.
+if (F.doors && F.doors_spent) {
+  const glyph = st => {
+    C.S = st; C.draft = null; C.err = ''; C.render();
+    const html = global.document.getElementById('rows').innerHTML || '';
+    const m = html.match(/<span class="door [^"]*"[^>]*>([^<]*)<\/span>/);
+    return m ? m[1] : null;
+  };
+  const left = F.doors.doors[0].passages;
+  ok('artisan: the board carries what the doors have left',
+     glyph(F.doors) === '门' + left, `${glyph(F.doors)} for ${left} passages`);
+  ok('artisan: and reads as shut once they are spent',
+     glyph(F.doors_spent) === '闭', glyph(F.doors_spent));
+}
+
 // ------------------------------- 教皇: a killing blow held up for a decision
 
 if (F.interrupt_save && F.interrupt_waiting) {
@@ -1172,6 +1188,57 @@ if (F.linked_boxed) {
      zone.length === 1 && zone[0][0] === tail.cell[0] && zone[0][1] === tail.cell[1],
      JSON.stringify(zone));
   ok('boxed snake: and that square is clickable', C.clickableCell(tail.cell));
+}
+
+// --------------------- 冲撞 picks a square down a line rather than a direction, so
+// the board itself is the panel: only the squares it can end on are clickable.
+
+if (F.centaur_charge) {
+  C.S = F.centaur_charge; C.err = '';
+  C.draft = C.blankDraft(F.centaur_charge.commit.selected);
+  C.confirmMove();
+  C.chooseAction('ability:charge');
+  const cells = C.currentAction().targeting.cells || [];
+  ok('centaur: the squares it may charge to are all in line with it',
+     cells.length > 0 && cells.every(c => c[0] === 3 || c[1] === 3),
+     JSON.stringify(cells));
+  ok('centaur: an occupied square is not among them',
+     !cells.some(c => !!C.unitAt(c)), JSON.stringify(cells.filter(c => !!C.unitAt(c))));
+  ok('centaur: every offered square is clickable',
+     cells.every(c => C.clickableCell(c)),
+     JSON.stringify(cells.filter(c => !C.clickableCell(c))));
+  ok('centaur: and a square off the line is not', !C.clickableCell([4, 4]));
+  const before = C.sent.length;
+  C.sealFromKeyboard();
+  ok('centaur: Enter with no square chosen explains itself',
+     C.sent.length === before && !!C.err, C.err || 'sealed silently');
+  C.onCell(cells[0][0], cells[0][1]);
+  C.sealFromKeyboard();
+  const sent = C.sent[C.sent.length - 1];
+  ok('centaur: the square goes with the order',
+     sent && sent.payload.action.key === 'ability:charge'
+     && String(sent.payload.action.cell) === String(cells[0]),
+     JSON.stringify(sent && sent.payload.action));
+}
+
+// --------------------- an ability whose option list is empty from the square the
+// hero stands on and not from one it can walk to. Movement resolves first, so the
+// menu has to judge from where the hero will be — read raw, the button stayed
+// greyed out for the whole turn however far the hero walked toward its target.
+
+if (F.reach_after_walk) {
+  C.S = F.reach_after_walk; C.err = '';
+  C.draft = C.blankDraft(F.reach_after_walk.commit.selected);
+  const slam = () => C.curActions().find(a => a.key === 'ability:slam');
+  ok('out of reach: the menu says there is nobody it can take hold of',
+     C.unaimable(slam()) === 'nothing it can name', C.unaimable(slam()));
+  C.onCell(3, 3); C.confirmMove();                 // walk one square toward them
+  ok('...and after a walk into reach, it is usable',
+     C.unaimable(slam()) === '', C.unaimable(slam()) || 'usable');
+  C.chooseAction('ability:slam');
+  ok('...offering the hero that the walk brought into reach',
+     (C.currentAction().targeting.options || []).length === 1,
+     JSON.stringify(C.currentAction().targeting.options));
 }
 
 if (F.followup) {

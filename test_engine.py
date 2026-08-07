@@ -604,87 +604,113 @@ turn(m, fog.id, {"destination": None, "action": {"key": "ability:great_fog"}},
      d.id, {"destination": None, "action": {"key": "none"}})   # 指挥 is a gang: let the dummy act
 ok("an enemy already at range 1 shrugs the fog off", cmdr.rng == base == 1, f"{base} -> {cmdr.rng}")
 
-# 30 — 半人马: 冲撞 runs a fixed 3 squares, trampling the two it crosses
+# 30 — 半人马: 冲撞 runs to a square it picks, trampling whatever it crosses
+CHARGE = HEROES.Charge
+
 def charge_arena(left, right):
     m = arena(left, right)
     cen = unit(m, LEFT, "centaur")
     cen.ap = cen.max_ap
     return m, cen
 
-def lanes_for(m, cen):
+def charge_cells(m, cen):
     m.select_hero(LEFT, cen.id)
     ability = next(a for a in m.action_menu(cen) if a["key"] == "ability:charge")
-    return {c["dir"]: c for c in ability["targeting"]["choices"]}
+    return [tuple(c) for c in ability["targeting"]["cells"]]
 
-# C3 · enemies at D3 and E3 · F3 open -> lands on F3, both trampled
+def charge_at(cell):
+    return {"destination": None,
+            "action": {"key": "ability:charge", "cell": list(cell)}}
+
+# it runs down a row or a column, as far as its reach, and stops where it can stand
+m, cen = charge_arena([("centaur", (3, 3))], [("dummy", (7, 1))])
+offered = charge_cells(m, cen)
+ok("every square offered is in line with it",
+   all(c[0] == 3 or c[1] == 3 for c in offered), str(offered))
+ok("...and none of them further than its reach",
+   max(m.topology.distance((3, 3), c) for c in offered) == CHARGE.REACH,
+   str(max(m.topology.distance((3, 3), c) for c in offered)))
+ok("...and the square it stands on is not one of them", (3, 3) not in offered)
+
+# an occupied square is not somewhere it can end up
 m, cen = charge_arena([("centaur", (3, 3))], [("dummy", (7, 3)), ("gatekeeper", (8, 3))])
 d, g = unit(m, RIGHT, "dummy"), unit(m, RIGHT, "gatekeeper")
-d.set_cell((4, 3)); g.set_cell((5, 3))
-lane = lanes_for(m, cen)["forward"]
-ok("the lane reports its landing square and both victims",
-   lane["landing"] == [6, 3] and len(lane["victims"]) == 2, str(lane))
+d.set_cell((5, 3)); g.set_cell((3, 5))
+offered = charge_cells(m, cen)
+ok("a square with somebody on it is not offered",
+   (5, 3) not in offered and (3, 5) not in offered, str(offered))
+ok("...but a square beyond them is", (6, 3) in offered and (7, 3) in offered, str(offered))
+ok("...and asking for an occupied one anyway is refused",
+   m.commit(LEFT, charge_at((5, 3))) is not None)
+ok("...as is a square off the line", m.commit(LEFT, charge_at((4, 4))) is not None)
+ok("...and one past its reach", m.commit(LEFT, charge_at((8, 3))) is not None)
+
+# everything enemy in the squares crossed is trampled, however many that is
+m, cen = charge_arena([("centaur", (3, 3))],
+                      [("dummy", (7, 3)), ("gatekeeper", (8, 3)), ("spearman", (8, 1))])
+d, g, sp = (unit(m, RIGHT, k) for k in ("dummy", "gatekeeper", "spearman"))
+for e, c in ((d, (4, 3)), (g, (5, 3)), (sp, (6, 3))):
+    e.set_cell(c)
+hp0 = {e.id: e.hp for e in (d, g, sp)}
+turn(m, cen.id, charge_at((7, 3)), d.id, hold)
+ok("it ends on the square it chose", cen.cell == (7, 3), str(cen.cell))
+ok("everything crossed takes the same hit",
+   all(hp0[e.id] - e.hp == CHARGE.DAMAGE for e in (d, g, sp)),
+   str([hp0[e.id] - e.hp for e in (d, g, sp)]))
+
+# a short charge crosses nothing and simply moves it
+m, cen = charge_arena([("centaur", (3, 3))], [("dummy", (7, 3))])
+d = unit(m, RIGHT, "dummy")
+hp0 = d.hp
+turn(m, cen.id, charge_at((4, 3)), d.id, hold)
+ok("a charge into the next square hurts nobody",
+   cen.cell == (4, 3) and d.hp == hp0, f"{cen.cell}, dummy took {hp0 - d.hp}")
+
+# a charge cannot be combined with a normal move: the ability does the moving
+m, cen = charge_arena([("centaur", (3, 3))], [("dummy", (7, 3))])
+m.select_hero(LEFT, cen.id)
 ok("a charge cannot be combined with a normal move",
    m.commit(LEFT, {"destination": [4, 2],
-                   "action": {"key": "ability:charge", "direction": "forward"}}) is not None)
-hp0 = (d.hp, g.hp)
-turn(m, cen.id, {"destination": None, "action": {"key": "ability:charge", "direction": "forward"}},
-     d.id, {"destination": None, "action": {"key": "none"}})
-ok("it ends three squares along", cen.cell == (6, 3), str(cen.cell))
-ok("both crossed enemies take the same hit",
-   hp0[0] - d.hp == hp0[1] - g.hp > 0, f"{hp0[0]-d.hp} and {hp0[1]-g.hp}")
+                   "action": {"key": "ability:charge", "cell": [3, 5]}}) is not None)
 
-# third square taken: damage still lands, the centaur stays put
-m, cen = charge_arena([("centaur", (3, 3))], [("dummy", (7, 3)), ("gatekeeper", (8, 3))])
-d, g = unit(m, RIGHT, "dummy"), unit(m, RIGHT, "gatekeeper")
-d.set_cell((4, 3)); g.set_cell((6, 3))        # crossed: D3 enemy, E3 empty; F3 blocked
-lane = lanes_for(m, cen)["forward"]
-ok("a blocked landing is reported as such", lane["landing"] is None, str(lane))
-hp0, start = d.hp, cen.cell
-turn(m, cen.id, {"destination": None, "action": {"key": "ability:charge", "direction": "forward"}},
-     d.id, {"destination": None, "action": {"key": "none"}})
-ok("blocked charge still tramples", hp0 - d.hp > 0, f"dealt {hp0 - d.hp}")
-ok("blocked charge does not move the centaur", cen.cell == start, str(cen.cell))
-ok("the enemy standing on the third square is untouched", g.hp == g.max_hp,
-   f"took {g.max_hp - g.hp}")
-
-# allies are ridden past: neither damaged nor blocking
+# allies are ridden past: neither damaged nor blocking the run
 m, cen = charge_arena([("centaur", (3, 3)), ("gatekeeper", (3, 2))], [("dummy", (7, 3))])
 ally, d = unit(m, LEFT, "gatekeeper"), unit(m, RIGHT, "dummy")
 ally.set_cell((4, 3)); d.set_cell((5, 3))
-turn(m, cen.id, {"destination": None, "action": {"key": "ability:charge", "direction": "forward"}},
-     d.id, {"destination": None, "action": {"key": "none"}})
-ok("an ally in the lane is ridden past unharmed and does not block",
-   cen.cell == (6, 3) and ally.hp == ally.max_hp, f"{cen.cell}, ally took {ally.max_hp - ally.hp}")
+turn(m, cen.id, charge_at((6, 3)), d.id, hold)
+ok("an ally in the way is ridden past unharmed and does not block",
+   cen.cell == (6, 3) and ally.hp == ally.max_hp,
+   f"{cen.cell}, ally took {ally.max_hp - ally.hp}")
 
-# a lane that would neither move nor hit anyone is not offered
+# nothing is offered off the board
 m, cen = charge_arena([("centaur", (1, 1))], [("dummy", (7, 3))])
-lanes = lanes_for(m, cen)
-ok("a lane off the board with nobody to hit is not offered", "up" not in lanes, str(list(lanes)))
-ok("that lane is refused if asked for anyway",
-   m.commit(LEFT, {"destination": None,
-                   "action": {"key": "ability:charge", "direction": "up"}}) is not None)
+offered = charge_cells(m, cen)
+ok("no square off the board is offered",
+   all(1 <= c[0] <= 9 and 1 <= c[1] <= 5 for c in offered), str(offered))
+ok("...and one asked for anyway is refused",
+   m.commit(LEFT, charge_at((1, 0))) is not None)
 
-# 31 — the charge reads the board *after* movement, so a landing square can be
+# 31 — the charge reads the board *after* movement, so its landing square can be
 # taken or freed by the same exchange it was aimed in
-def charge_vs_move(gk_from, gk_to):
+def charge_vs_move(gk_from, gk_to, aim=(6, 3)):
     m, cen = charge_arena([("centaur", (3, 3))], [("dummy", (7, 3)), ("gatekeeper", (8, 3))])
     d, g = unit(m, RIGHT, "dummy"), unit(m, RIGHT, "gatekeeper")
     d.set_cell((4, 3))                     # sits in a crossed square
     g.set_cell(gk_from)
-    predicted = lanes_for(m, cen)["forward"]["landing"]
+    offered = charge_cells(m, cen)
     hp0 = d.hp
-    turn(m, cen.id, {"destination": None, "action": {"key": "ability:charge", "direction": "forward"}},
-         g.id, {"destination": list(gk_to), "action": {"key": "none"}})
-    return predicted, cen.cell, hp0 - d.hp
+    turn(m, cen.id, charge_at(aim), g.id,
+         {"destination": list(gk_to), "action": {"key": "none"}})
+    return offered, cen.cell, hp0 - d.hp
 
-predicted, ended, dealt = charge_vs_move((6, 2), (6, 3))    # enemy steps into the landing square
+offered, ended, dealt = charge_vs_move((6, 2), (6, 3))    # enemy steps into the landing
 ok("an enemy moving into the landing square stops the charge dead",
-   predicted == [6, 3] and ended == (3, 3), f"previewed {predicted}, ended {ended}")
+   (6, 3) in offered and ended == (3, 3), f"offered {(6, 3) in offered}, ended {ended}")
 ok("...and the trample still lands anyway", dealt > 0, f"dealt {dealt}")
 
-predicted, ended, dealt = charge_vs_move((6, 3), (6, 4))    # enemy steps out of it
-ok("an enemy vacating the landing square lets the charge through",
-   predicted is None and ended == (6, 3), f"previewed {predicted}, ended {ended}")
+offered, ended, dealt = charge_vs_move((6, 3), (6, 4), aim=(7, 3))  # enemy steps out
+ok("a square vacated in the same instant is still charged through",
+   ended == (7, 3), f"ended {ended}")
 ok("...and that trample lands too", dealt > 0, f"dealt {dealt}")
 
 # 32 — 石像鬼: weapons chip it for 1, magic and fire go straight through
@@ -1962,21 +1988,24 @@ ok("...and picking the tail does the same",
 
 # one HP pool: a blow to the tail wounds the snake
 m, hd, tl, gate, d = snake_arena()
-ok("both halves start on the same 25", (hd.hp, tl.hp) == (25, 25), f"{hd.hp}/{tl.hp}")
+POOL = hd.max_hp
+ok("both halves start on the same pool", (hd.hp, tl.hp) == (POOL, POOL),
+   f"{hd.hp}/{tl.hp}")
 DMG.apply_batch(m, [DMG.DamageEvent(source=gate, target=tl, amount=6,
                                     category=DMG.NORMAL_ATTACK)])
-ok("a blow to the tail comes off the shared pool", hd.hp == 19, f"head {hd.hp}")
-ok("...and the tail reads the same", tl.hp == 19, f"tail {tl.hp}")
+ok("a blow to the tail comes off the shared pool", hd.hp == POOL - 6, f"head {hd.hp}")
+ok("...and the tail reads the same", tl.hp == POOL - 6, f"tail {tl.hp}")
 DMG.apply_batch(m, [DMG.DamageEvent(source=gate, target=hd, amount=4,
                                     category=DMG.NORMAL_ATTACK)])
-ok("a blow to the head comes off the same pool too", (hd.hp, tl.hp) == (15, 15),
-   f"{hd.hp}/{tl.hp}")
+ok("a blow to the head comes off the same pool too",
+   (hd.hp, tl.hp) == (POOL - 10, POOL - 10), f"{hd.hp}/{tl.hp}")
 
 # kill it once and the whole snake goes
 m, hd, tl, gate, d = snake_arena()
-DMG.apply_batch(m, [DMG.DamageEvent(source=gate, target=tl, amount=25,
+DMG.apply_batch(m, [DMG.DamageEvent(source=gate, target=tl, amount=hd.max_hp,
                                     category=DMG.NORMAL_ATTACK)])
-ok("25 through the tail kills the whole snake", not hd.alive and not tl.alive,
+ok("its whole pool through the tail kills the whole snake",
+   not hd.alive and not tl.alive,
    f"head alive={hd.alive} tail alive={tl.alive}")
 ok("...and both squares are cleared", not hd.cells and not tl.cells)
 m.check_victory()
@@ -2670,13 +2699,15 @@ ok("...and walking the rest of it grants nothing further",
 m, hd, tl, gate, d = snake_arena()
 DMG.apply_batch(m, [DMG.DamageEvent(source=gate, target=hd, amount=10,
                                     category=DMG.NORMAL_ATTACK)])
-ok("both halves read the wound", (hd.hp, tl.hp) == (15, 15), f"{hd.hp}/{tl.hp}")
+POOL = hd.max_hp
+ok("both halves read the wound", (hd.hp, tl.hp) == (POOL - 10, POOL - 10),
+   f"{hd.hp}/{tl.hp}")
 got = DMG.heal(m, tl, 6, source=None)
-ok("mending the tail mends the snake", got == 6 and hd.hp == 21,
+ok("mending the tail mends the snake", got == 6 and hd.hp == POOL - 4,
    f"healed {got}, head {hd.hp}")
-ok("...and both halves read it", tl.hp == 21, f"tail {tl.hp}")
+ok("...and both halves read it", tl.hp == POOL - 4, f"tail {tl.hp}")
 got = DMG.heal(m, hd, 100, source=None)
-ok("and it can never be mended past its whole", hd.hp == hd.max_hp == 25,
+ok("and it can never be mended past its whole", hd.hp == hd.max_hp == POOL,
    f"{hd.hp}/{hd.max_hp}")
 
 # 占星师: two enemies falling in one instant are both measured against the reading
@@ -3222,6 +3253,66 @@ for side, who in ((LEFT, "its builder"), (RIGHT, "the other side")):
        len(doors) == 1 and doors[0]["owner"] == LEFT
        and sorted(map(tuple, doors[0]["cells"])) == [(2, 3), (8, 3)], str(doors))
 
+# the way through runs out: three passages, and then it is only a wall
+PASSAGES = HEROES.RaiseDoors.PASSAGES
+m, art, ally, gk, d = artisan_arena()
+door = m.topology.links[0]
+ok("a fresh pair of doors carries its passages", door.passages == PASSAGES,
+   str(door.passages))
+
+def cross(m, who):
+    """Walk `who` from whichever door square it stands on to the far one, then let
+    the round turn over so it may walk again."""
+    far = door.across(who.cell)
+    m.select_hero(who.side, who.id)
+    err = m.commit(who.side, {"destination": list(far), "action": {"key": "none"}})
+    for _ in range(8):
+        if m.phase != "commit":
+            break
+        moved = False
+        for sd in (LEFT, RIGHT):
+            if m.commits[sd] is None and m.unacted(sd):
+                e = m.unacted(sd)[0]
+                m.select_hero(sd, e.id)
+                m.commit(sd, hold)
+                moved = True
+        if not moved:
+            break
+    return err
+
+for i in range(PASSAGES):
+    err = cross(m, art)
+    ok(f"passage {i + 1} goes through", err is None and door.passages == PASSAGES - i - 1,
+       f"{err} / {door.passages} left")
+ok("the third walk uses the last of them", door.passages == 0, str(door.passages))
+far = door.across(art.cell)
+ok("...and the far square stops being a step away",
+   list(far) not in m.legal_moves(art), str(m.legal_moves(art)))
+m.select_hero(LEFT, art.id)
+ok("...so a fourth walk through is refused",
+   m.commit(LEFT, {"destination": list(far), "action": {"key": "none"}}) is not None)
+
+# what runs out is the way through, not the thing standing there
+ok("a spent door is still wall to the other side",
+   m.topology.closed_to(door.a, RIGHT) and m.topology.closed_to(door.b, RIGHT))
+ok("...and still ground its own side may stand on",
+   not m.topology.closed_to(door.a, LEFT))
+
+# a walk the hero could have made anyway is not charged to the door
+m, art, ally, gk, d = artisan_arena(((2, 3), (2, 5)))
+door = m.topology.links[0]
+before = door.passages
+turn(m, art.id, {"destination": [2, 4], "action": {"key": "none"}}, d.id, hold)
+ok("walking to a square the board already reaches spends no passage",
+   art.cell == (2, 4) and door.passages == before, f"{art.cell} {door.passages}")
+
+# both seats are told how much of the way is left
+m, art, ally, gk, d = artisan_arena()
+for side, who in ((LEFT, "its builder"), (RIGHT, "the other side")):
+    doors = view.state_for(m, side)["doors"]
+    ok(f"{who} is shown what the doors have left",
+       doors[0]["passages"] == PASSAGES, str(doors[0]))
+
 # 65 — 军火商人: opens everyone's purse, then sells them what to do with it
 def dealer_arena():
     m = arena([("arms_dealer", (2, 2)), ("gatekeeper", (2, 3))],
@@ -3704,9 +3795,9 @@ ok("nor can a unit-locked attack commit to it",
    refused("thunder_dragon", "attack", targets="TREE_LIST") is not None)
 
 m, tree, cen = untouchable_arena("centaur", (7, 3))
-lane = cen.abilities[0].path(m, cen, "forward")
+run = cen.abilities[0].run(m, cen, (3, 3))
 ok("nor does a charge trample it on the way past",
-   lane is None or tree.id not in [v.id for v in lane[1]])
+   run is None or tree.id not in [v.id for v in run[1]])
 
 # the gate closes on its own side too: 世界树 keeps time now, and nobody swings
 # at it. Its own line may still shoot *through* the square it stands on.
@@ -4536,16 +4627,16 @@ foe81.set_cell((6, 3))
 ch81 = cen81.abilities[0]
 ok("冲撞 no longer takes the place of the move", not ch81.self_move)
 ok("...though it still carries the hero, so a root stops it", ch81.carries_self)
-ok("nothing worth charging from where it stands", not ch81.lanes(m81, cen81),
-   str(ch81.lanes(m81, cen81)))
-ok("...but a lane opens from one square forward",
-   [l["dir"] for l in ch81.lanes(m81, cen81, origin=(4, 3))] == ["forward", "backward"],
-   str([l["dir"] for l in ch81.lanes(m81, cen81, origin=(4, 3))]))
+ok("from where it stands, the square past the enemy is out of reach",
+   (8, 3) not in ch81.cells(m81, cen81), str(sorted(ch81.cells(m81, cen81))))
+ok("...but it is one square nearer once the walk is counted",
+   (8, 3) in ch81.cells(m81, cen81, origin=(4, 3)),
+   str(sorted(ch81.cells(m81, cen81, origin=(4, 3)))))
 m81.select_hero(LEFT, cen81.id)
 ok("walking and then charging is one legal turn",
    m81.commit(LEFT, {"destination": [4, 3],
                      "action": {"key": "ability:charge",
-                                "direction": "forward"}}) is None)
+                                "cell": [7, 3]}}) is None)
 hp81 = foe81.hp
 for e in m81.unacted(RIGHT)[:1]:
     m81.select_hero(RIGHT, e.id); m81.commit(RIGHT, hold)
@@ -4709,6 +4800,38 @@ m.choose_followup(LEFT, [4, 2])
 ok("a shoved hero sets off what is buried where it lands",
    hp0 - gk.hp == mi.atk + BOARD.SmallBomb.DAMAGE,
    f"took {hp0 - gk.hp} ({mi.atk} horns + {BOARD.SmallBomb.DAMAGE} mine)")
+
+# the horns belong to the turn they landed in. Every living unit is asked for a
+# follow-up after every exchange, so an ungated 牛头 was offered its shove again
+# on an exchange somebody else fought — and, its tally never being spent, once
+# more on every exchange after that until the round turned over.
+m, mi, foe = gore_arena()
+foe.set_cell((4, 3))
+gore_turn(m, mi, (4, 3), foe)
+ok("the horns earn their shove", len(gore_tasks(m)) == 1, str(len(gore_tasks(m))))
+m.choose_followup(LEFT, None)                      # decline it
+ok("...and declining still spends the tally", not mi.vars.get("gored"),
+   str(mi.vars.get("gored")))
+cn = unit(m, LEFT, "cannoneer")
+m.select_hero(LEFT, cn.id)
+m.commit(LEFT, {"destination": None, "action": {"key": "attack", "shots": [[[4, 3]]]}})
+r = m.unacted(RIGHT)[0]
+m.select_hero(RIGHT, r.id)
+m.commit(RIGHT, hold)
+ok("an ally's blow on a later exchange earns 牛头 nothing",
+   gore_tasks(m) == [], str(gore_tasks(m)))
+
+# and a hit it never made earns nothing either, on its own turn or anyone's
+m, mi, foe = gore_arena()
+foe.set_cell((4, 3))
+cn = unit(m, LEFT, "cannoneer")
+m.select_hero(LEFT, cn.id)
+m.commit(LEFT, {"destination": None, "action": {"key": "attack", "shots": [[[4, 3]]]}})
+r = m.unacted(RIGHT)[0]
+m.select_hero(RIGHT, r.id)
+m.commit(RIGHT, hold)
+ok("somebody else's kill is not 牛头's to shove", gore_tasks(m) == [],
+   str(gore_tasks(m)))
 
 # 81 — 教皇 never spends past its cap, however many fall at once
 m = arena([("pope", (3, 3)), ("cannoneer", (3, 1)), ("gatekeeper", (3, 2))],

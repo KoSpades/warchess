@@ -87,88 +87,99 @@ class Sweep(Ability):
 
 
 class Charge(Ability):
+    """半人马's 冲撞. Pick a square in a straight line and run to it, over whatever
+    is standing in between.
+
+    The square is chosen rather than the distance: any square up or down its own
+    row or column, as far as REACH, so long as it can be stood on. Everything
+    enemy in the squares crossed on the way is trampled — allies and anything
+    untouchable are ridden past, and how many there are is however many happen to
+    be in the way."""
+
     key = "charge"
     name = "冲撞 Charge"
     ap_cost = 2
     carries_self = True          # but not instead of its walk: it does both
-    targeting = {"kind": "direction", "options": ["forward", "backward", "up", "down"]}
-    blurb = ("Charge 3 squares down one lane. 3 damage to each enemy crossed, at most "
-             "two. Blocked on the last square, it still deals the damage.")
+    targeting = {"kind": "any_cell"}
+    blurb = "Run to any square up to 4 away in a straight line. 3 damage to each enemy crossed."
     DAMAGE = 3
-    DISTANCE = 3
+    REACH = 4
 
     @classmethod
-    def path(cls, match, actor, direction, origin=None):
-        """(landing cell or None when it can't land, [enemies in the crossed squares]).
-        The run is always exactly DISTANCE squares: the ones in between are trampled,
-        the last one is where it ends up — if anybody is standing there, or it is off
-        the board, the charge still lands its damage but the centaur doesn't move.
-        Whole thing is None only if the direction itself is nonsense.
+    def run(cls, match, actor, cell, origin=None):
+        """(crossed squares, enemies trampled) for a charge from `origin` to `cell`,
+        or None if that is not a line this hero could charge down.
 
-        Run from `origin` — where the centaur will be standing when it puts its head
-        down, which is the end of its walk, not the start."""
-        d, origin = match.aim(actor, direction, origin)
-        if d is None:
+        The geometry only — whether the far square can actually be stood on is a
+        separate question, because the two are asked at different moments. It is
+        aimed at a square that was empty when the order was sealed, and somebody
+        may reach that square in the same instant: the run still happened, so what
+        was crossed is still trampled and only the arrival is lost.
+
+        `origin` is where the centaur will be standing when it puts its head down —
+        the end of its walk, not the start."""
+        if cell is None:
             return None
-        c0, r0 = origin
-        lane = [(c0 + d[0] * i, r0 + d[1] * i) for i in range(1, cls.DISTANCE + 1)]
+        origin = tuple(origin or (actor.cell if actor.cells else ()))
+        cell = tuple(cell)
+        if not origin or cell == origin:
+            return None
+        (c0, r0), (c1, r1) = origin, cell
+        if c0 != c1 and r0 != r1:
+            return None                      # not down a row or a column
+        step = ((0 if c0 == c1 else (1 if c1 > c0 else -1)),
+                (0 if r0 == r1 else (1 if r1 > r0 else -1)))
+        far = max(abs(c1 - c0), abs(r1 - r0))
+        if far > cls.REACH:
+            return None
+        if not match.topology.same_region(cell, origin):
+            return None
+        crossed = [(c0 + step[0] * i, r0 + step[1] * i) for i in range(1, far)]
         victims = []
-        for cell in lane[:-1]:
-            if not match.topology.in_bounds(cell):
-                continue
-            if not match.topology.same_region(cell, origin):
-                continue          # a sub-map in the lane is simply run over
-            occ = match.occupant(cell)
+        for c in crossed:
+            occ = match.occupant(c)
             if occ is not None and occ.side != actor.side and occ.flags["targetable"]:
                 victims.append(occ)   # allies, and things that cannot be touched,
                                       # are simply ridden past
-        end = lane[-1]
-        blocked = (not match.topology.same_region(end, origin)
-                   or not match.can_enter(actor, end))
-        return (None if blocked else end), victims
+        return crossed, victims
 
-    def lanes(self, match, actor, origin=None):
-        """Every lane worth charging, for the client to offer and preview. A lane
-        that would neither move nor trample anyone is left out."""
+    def cells(self, match, actor, origin=None):
+        """Every square it could charge to, for the client to offer and the
+        validator to check against. A square already occupied is not one of them —
+        the run ends where it can stand."""
+        origin = tuple(origin or (actor.cell if actor.cells else ()))
+        if not origin:
+            return []
         out = []
-        for d in self.targeting["options"]:
-            p = self.path(match, actor, d, origin)
-            if p is None:
-                continue
-            landing, victims = p
-            if landing is None and not victims:
-                continue   # nowhere to go and nobody to hit
-            n = len(victims)
-            out.append({"dir": d,
-                        "landing": list(landing) if landing else None,
-                        # The charge carries the charger, so it is the one that
-                        # ends up on the landing square.
-                        "mover": actor.id,
-                        "victims": [v.id for v in victims],
-                        "damage": self.DAMAGE,
-                        "where": "charges through" if landing else "holds ground",
-                        "label": (f"tramples {n} {'enemy' if n == 1 else 'enemies'} "
-                                  f"for {self.DAMAGE} each" if n else "nobody in the way")
-                        + ("" if landing else " · the third square is taken")})
+        for d in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            for i in range(1, self.REACH + 1):
+                c = (origin[0] + d[0] * i, origin[1] + d[1] * i)
+                if not match.topology.in_bounds(c):
+                    break
+                if (self.run(match, actor, c, origin) is not None
+                        and match.can_enter(actor, c)):
+                    out.append(c)
         return out
 
     def validate(self, match, actor, params, origin=None):
-        p = self.path(match, actor, params.get("direction"), origin)
-        if p is None:
-            return "Choose a direction."
-        if p[0] is None and not p[1]:
-            return "Nothing to trample that way, and nowhere to land."
+        cell = params.get("cell")
+        if cell is None:
+            return "Choose a square to charge to."
+        if self.run(match, actor, cell, origin) is None:
+            return "Not a square it can charge to."
+        if not match.can_enter(actor, tuple(cell)):
+            return "Somebody is standing there."
         return None
 
     def build_damage(self, match, actor, params):
-        p = self.path(match, actor, params.get("direction"))
-        if p is None:
+        got = self.run(match, actor, params.get("cell"))
+        if got is None:
             actor.vars.pop("charge_plan", None)
             return []
-        landing, victims = p
+        _crossed, victims = got
         # Stashed on the actor, never on self: one Ability instance is shared by
         # every entity of that hero, on both sides.
-        actor.vars["charge_plan"] = {"landing": landing}
+        actor.vars["charge_plan"] = {"landing": tuple(params["cell"])}
         return [
             DMG.DamageEvent(source=actor, target=v, amount=self.DAMAGE, category=DMG.ABILITY)
             for v in victims
@@ -179,13 +190,14 @@ class Charge(Ability):
         if plan is None or not actor.alive:
             return
         landing = plan["landing"]
-        if landing is None:
+        # The square was empty when the order was sealed; somebody may have reached
+        # it in the same instant. The run still happened, so the trampling stands
+        # and only the arrival is lost.
+        if not match.can_enter(actor, landing):
             match.log_line(f"{match.label(actor)} tramples through but holds its ground.")
             return
         match.place_unit(actor, landing)
-        match.log_line(
-            f"{match.label(actor)} charges through the line."
-        )
+        match.log_line(f"{match.label(actor)} charges through the line.")
 
 
 class Possess(Ability):
@@ -1066,7 +1078,9 @@ class RaiseDoors(Ability):
     ap_cost = 0
     prebuild = True
     targeting = {"kind": "two_cells"}
-    blurb = "Before deployment, pick two squares. Your side may step between them."
+    blurb = ("Before deployment, pick two squares. Your side may step between "
+             "them 3 times.")
+    PASSAGES = 3
 
     def build_cells(self, match, side):
         """Only the board proper. An island is not somewhere a door can open onto,
@@ -1088,8 +1102,9 @@ class RaiseDoors(Ability):
 
     def build_effects(self, match, side, params):
         a, b = (tuple(c) for c in params["cells"])
-        match.topology.link(a, b, side)
-        match.log_line(f"{'Left' if side == LEFT else 'Right'} 工匠 raises a pair of doors.")
+        match.topology.link(a, b, side, passages=self.PASSAGES)
+        match.log_line(f"{'Left' if side == LEFT else 'Right'} 工匠 raises a pair of "
+                       f"doors — {self.PASSAGES} passages through them.")
 
 
 class Avalanche(Ability):
@@ -3103,10 +3118,17 @@ class Gore:
             gored.append(ev.target.id)
 
     def followup(self, match, owner, ctx):
-        if ctx.get("entity") is not owner or not owner.alive:
+        # Every living unit is asked after every exchange, not just the one that
+        # took the turn — so being the owner is not enough. Without the `acted`
+        # gate the horns were offered again on somebody else's exchange, and the
+        # tally outliving the turn that earned it meant they were offered over and
+        # over for the rest of the round. The shove belongs to the turn it landed
+        # in, so the tally is spent here whether or not it is used.
+        if ctx.get("entity") is not owner or not ctx.get("acted") or not owner.alive:
             return None
+        gored, owner.vars["gored"] = owner.vars.get("gored") or [], []
         out = []
-        for tid in owner.vars.get("gored") or []:
+        for tid in gored:
             tgt = match.entity(tid)
             if tgt is None or not tgt.alive or not tgt.cells:
                 continue
@@ -3203,7 +3225,7 @@ class ChooseIsland(Ability):
                 return "That square is not on the board."
             if match.topology.region(c) is not None:
                 return "That square is already part of an island."
-            if any(c in (a, b) for a, b, _ in match.topology.links):
+            if any(d.holds(c) for d in match.topology.links):
                 return "A door already opens onto that square."
         mid = ((match.topology.cols + 1) // 2, (match.topology.rows + 1) // 2)
         if mid in cells and match.board_places("centre"):
@@ -3638,7 +3660,7 @@ ROSTER = [
         key="tide_goddess",
         name="潮汐女神",
         name_en="tideGoddess",
-        max_hp=14,
+        max_hp=13,
         atk=2,
         move=1,
         max_ap=4,
@@ -3686,7 +3708,7 @@ ROSTER = [
         key="woodcutter",
         name="樵夫",
         name_en="woodcutter",
-        max_hp=19,
+        max_hp=18,
         atk=2,
         move=1,
         max_ap=0,
@@ -3710,7 +3732,7 @@ ROSTER = [
         key="druid",
         name="德鲁伊",
         name_en="druid",
-        max_hp=17,
+        max_hp=16,
         atk=1,
         move=1,
         max_ap=6,
@@ -4286,7 +4308,7 @@ SQUAD_MEMBERS = [
         key=SNAKE_HEAD,
         name="蛇首",
         name_en="snakeHead",
-        max_hp=25,          # the pool for the whole snake; the tail mirrors it
+        max_hp=20,          # the pool for the whole snake; the tail mirrors it
         atk=3,
         move=1,
         max_ap=0,
@@ -4300,7 +4322,7 @@ SQUAD_MEMBERS = [
         key=SNAKE_TAIL,
         name="蛇尾",
         name_en="snakeTail",
-        max_hp=25,          # display only — every blow is passed to the head
+        max_hp=20,          # display only — every blow is passed to the head
         atk=3,
         move=1,
         max_ap=0,
