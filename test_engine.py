@@ -4987,6 +4987,133 @@ ok("a half-placed squad will not lock", m.lock_force(LEFT) is not None,
    str(m.lock_force(LEFT)))
 
 
+# 75 — 万磁王: a pull a round, before anybody picks a turn
+def magnet_arena():
+    m = Match()
+    m.assign_draft(["magneto", "cannoneer"], ["gatekeeper", "dummy"])
+    for k, c in (("magneto", (3, 3)), ("cannoneer", (3, 1))):
+        assert m.place(LEFT, k, c) is None, (k, c)
+    for k, c in (("gatekeeper", (7, 3)), ("dummy", (7, 1))):
+        assert m.place(RIGHT, k, c) is None, (k, c)
+    assert m.lock_force(LEFT) is None
+    assert m.lock_force(RIGHT) is None
+    return (m, unit(m, LEFT, "magneto"), unit(m, LEFT, "cannoneer"),
+            unit(m, RIGHT, "gatekeeper"))
+
+MAG = HEROES.Magnetism
+
+m, mg, can, gk = magnet_arena()
+ok("it opens the match with a pool of pulls",
+   mg.vars["magnetism"] == MAG.CHARGES, str(mg.vars.get("magnetism")))
+ok("the pull is asked before either side picks a turn",
+   m.phase == "interrupt" and m.round == 1, f"{m.phase} r{m.round}")
+ok("...and it is the magnet's own question",
+   m.interrupts[0]["side"] == LEFT and m.interrupts[0]["kind"] == "confirm",
+   str(m.interrupts[0].get("key")))
+
+# declining costs nothing
+m.choose_interrupt(LEFT, None)
+ok("declining keeps the charge and starts the round",
+   mg.vars["magnetism"] == MAG.CHARGES and m.phase == "commit",
+   f'{mg.vars["magnetism"]} {m.phase}')
+
+# it may name either side
+m, mg, can, gk = magnet_arena()
+m.choose_interrupt(LEFT, True)
+offer = m.interrupts[0]["options"]
+ok("either side may be named", gk.id in offer and can.id in offer, str(offer))
+ok("...but scenery is not a body to drag",
+   all(m.entity(i).flags["takes_turns"] for i in offer))
+
+was = gk.cell
+m.choose_interrupt(LEFT, gk.id)
+spot = m.interrupts[0]
+ok("then it asks where, from the squares beside it",
+   spot["option_kind"] == "cell"
+   and sorted(map(tuple, spot["options"]))
+       == sorted(c for c in m.topology.neighbours(was) if m.can_enter(gk, c)),
+   str(spot["options"]))
+m.choose_interrupt(LEFT, spot["options"][0])
+ok("the hero is moved a square", gk.cell != was and
+   m.topology.distance(gk.cell, was) == 1, f"{was} -> {gk.cell}")
+ok("...and it costs one charge", mg.vars["magnetism"] == MAG.CHARGES - 1,
+   str(mg.vars["magnetism"]))
+ok("...and the round then runs as normal", m.phase == "commit", m.phase)
+
+# the pool runs out, and then it stops asking
+m, mg, can, gk = magnet_arena()
+m.choose_interrupt(LEFT, None)
+mg.vars["magnetism"] = 0
+m.interrupts.clear()
+mg.passives[0].on_round_start(m, mg, {})
+ok("with an empty pool nothing is asked", not m.interrupts, str(m.interrupts))
+mg.vars["magnetism"] = 1
+mg.passives[0].on_round_start(m, mg, {})
+ok("...and with one left it asks again", len(m.interrupts) == 1,
+   str(len(m.interrupts)))
+
+
+# 76 — the new batch: what a turn is worth to a bot, and ground under a pull
+m = Match()
+m.assign_draft(["ninja", "cannoneer"], ["gatekeeper", "mars"])
+for k, c in (("ninja", (3, 3)), ("cannoneer", (3, 1))):
+    assert m.place(LEFT, k, c) is None, (k, c)
+for k, c in (("gatekeeper", (7, 3)), ("mars", (7, 2))):
+    assert m.place(RIGHT, k, c) is None, (k, c)
+assert m.lock_force(LEFT) is None and m.lock_force(RIGHT) is None
+nj = unit(m, LEFT, "ninja"); nj.ap = HEROES.Raikiri.ap_cost
+unit(m, RIGHT, "gatekeeper").set_cell((4, 3))
+unit(m, RIGHT, "mars").set_cell((4, 2))
+# 雷切 resolves as a cell attack, so the ability's own build_damage is never
+# called in play — but anything pricing the turn reads it, and reading nothing
+# is how 封喉 ended up last in the roster.
+seen = HEROES.Raikiri().build_damage(m, nj, {"shots": [[[4, 3], [4, 2]]]})
+ok("雷切 tells a scorer what it would take off",
+   [e.amount for e in seen] == [HEROES.Raikiri.DAMAGE], str([e.amount for e in seen]))
+ok("...one body only, however many are in the net", len(seen) == 1, str(len(seen)))
+import ai as AI
+_score, order = AI.best_order(m, nj, None, candidates_for_test := __import__("playtest").candidates)
+ok("...so a fed ninja beside two enemies cuts rather than swings",
+   order["action"]["key"] == "ability:raikiri", str(order["action"]["key"]))
+
+# 万磁王's prompt is its own to answer
+m = Match()
+m.assign_draft(["magneto", "cannoneer"], ["gatekeeper", "dummy"])
+for k, c in (("magneto", (3, 3)), ("cannoneer", (3, 1))):
+    assert m.place(LEFT, k, c) is None, (k, c)
+for k, c in (("gatekeeper", (7, 3)), ("dummy", (7, 1))):
+    assert m.place(RIGHT, k, c) is None, (k, c)
+assert m.lock_force(LEFT) is None and m.lock_force(RIGHT) is None
+mg = unit(m, LEFT, "magneto")
+gk = unit(m, RIGHT, "gatekeeper")
+was, guard = gk.cell, 0
+import playtest as _PT
+while m.phase == "interrupt" and guard < 8:
+    guard += 1
+    _PT.step(m, (LEFT,))
+ok("a bot actually spends the pull it is offered",
+   mg.vars["magnetism"] == HEROES.Magnetism.CHARGES - 1, str(mg.vars["magnetism"]))
+ok("...on one of theirs, not one of its own", gk.cell != was, f"{was} -> {gk.cell}")
+
+# ground answers a pull the same way it answers a walk
+m = Match()
+m.assign_draft(["magneto", "cannoneer"], ["gatekeeper", "dummy"])
+for k, c in (("magneto", (3, 3)), ("cannoneer", (3, 1))):
+    assert m.place(LEFT, k, c) is None, (k, c)
+for k, c in (("gatekeeper", (7, 3)), ("dummy", (7, 1))):
+    assert m.place(RIGHT, k, c) is None, (k, c)
+assert m.lock_force(LEFT) is None and m.lock_force(RIGHT) is None
+gk = unit(m, RIGHT, "gatekeeper")
+m.board.add_effect((8, 3), BOARD.SmallBomb(LEFT))
+hp0, guard = gk.hp, 0
+while m.phase == "interrupt" and guard < 8:
+    guard += 1
+    _PT.step(m, (LEFT,))
+ok("a mine under a pull still goes off", hp0 - gk.hp == BOARD.SmallBomb.DAMAGE,
+   f"took {hp0 - gk.hp}")
+ok("...and is spent doing it", not m.board.has_kind((8, 3), "small_bomb"))
+
+
 print("\nlog tail:")
 for line in m.log[-5:]:
     print("   ", line["text"])

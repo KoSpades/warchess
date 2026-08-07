@@ -2193,6 +2193,14 @@ class Match:
         the damage landed, so a hero somebody stepped in front of is already back
         above zero by the time anyone counts the fallen."""
         self.instant = None
+        # Whatever the board banked while the queue was being answered. Every
+        # other path flushes this inside an exchange; a queue raised at the top of
+        # a round (万磁王 pulling somebody onto a mine) has no exchange behind it,
+        # and `start_exchange` wipes the bank — so the charge was spent and the
+        # damage quietly thrown away.
+        if self.pending_hazards:
+            batch, self.pending_hazards = self.pending_hazards, []
+            DMG.apply_batch(self, batch)
         self.sweep_deaths()
         if self.check_victory():
             return None

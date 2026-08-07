@@ -463,6 +463,22 @@ def bot_cell_groups(m, count):
         yield [list(x) for x in cells[i:i + count]]
 
 
+def hero_answer(m, task):
+    """The answer the hero that raised this prompt would give, or None to let the
+    generic rules have it. Same shape as every other hint a hero publishes
+    (`move_anchor` for the client, `gain` for the scorer): the knowledge lives on
+    the card rather than in the harness."""
+    e = m.entity(task.get("entity")) if task.get("entity") is not None else None
+    if e is None:
+        return None
+    for p in list(e.passives) + list(e.abilities):
+        fn = getattr(p, "bot_choice", None)
+        got = fn(m, e, task) if fn else None
+        if got is not None:
+            return got
+    return None
+
+
 def step(m, sides=(LEFT, RIGHT), observer=None):
     """One turn of the crank: whatever this phase is waiting for, answer it.
     Split out of the match loop so a harness can drive a match a step at a
@@ -529,7 +545,15 @@ def step(m, sides=(LEFT, RIGHT), observer=None):
         task = m.interrupts[0] if m.interrupts else None
         if task is None or task["side"] not in sides:
             return
-        if task.get("option_kind") == "unit":
+        # A hero that raised the question may answer it. The rules below are
+        # generic — frailest, furthest from the line, only for a big enough blow —
+        # and a prompt they were not written for gets a useless answer: 万磁王's
+        # offer of a free pull read as "not worth a permanent cost" and was
+        # declined every round of every game.
+        own = hero_answer(m, task)
+        if own is not None:
+            m.choose_interrupt(task["side"], own)
+        elif task.get("option_kind") == "unit":
             opts = [m.entity(i) for i in task["options"]]
             opts = [o for o in opts if o is not None and o.alive]
             m.choose_interrupt(task["side"], min(opts, key=lambda o: o.hp).id

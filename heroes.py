@@ -939,6 +939,17 @@ class Raikiri(Ability):
     DAMAGE = 5
     SPRINT = 2
 
+    def build_damage(self, match, actor, params):
+        """What the net would take off. Resolution never comes through here —
+        `instances` hands the shot to the engine's own cell attack — so this
+        exists purely so that anything pricing the turn before it is played can
+        see the 5. Without it the AI read 雷切 as dealing nothing and preferred
+        an ordinary swing, exactly the way it used to misread 封喉."""
+        cells = [tuple(c) for c in (params.get("shots") or [[]])[0]]
+        return [DMG.DamageEvent(source=actor, target=v, amount=self.DAMAGE,
+                                category=DMG.NORMAL_ATTACK)
+                for v in match.enemies_in(cells, actor.side)[:1]]
+
     def instances(self, match, actor, params, intended):
         match.sprint(actor, self.SPRINT)
         match.log_line(
@@ -2550,6 +2561,126 @@ class StoneHide:
             ev.amount = min(ev.amount, self.CAP)
 
 
+class Magnetism:
+    """万磁王. A pool of pulls, spent one a round, on anybody.
+
+    It needs no new machinery: a round-start hook may queue a decision and the
+    round holds for it before either side picks a turn (`start_round` pauses on
+    a raised queue), and a hero answers its own prompts through `apply_interrupt`.
+    The pull runs confirm -> who -> where, and the last step is skipped when the
+    hero it named has only one square to be pulled into.
+
+    Scenery is not draggable: a thing that never takes a turn (世界树) is part of
+    the board, not a body standing on it."""
+
+    describe = ("Starts with 5 磁力. At the start of each round it may spend 1 to move "
+                "any one hero, either side, to an adjacent square.")
+    CHARGES = 5
+    KEY = "magnet"
+
+    def on_match_start(self, match, owner, ctx):
+        if ctx.get("entity") in (None, owner):
+            owner.vars.setdefault("magnetism", self.CHARGES)
+
+    def _draggable(self, match):
+        out = []
+        for e in match.living():
+            if not e.cells or not e.flags["takes_turns"]:
+                continue
+            if any(match.can_enter(e, c) for c in match.topology.neighbours(e.cell)):
+                out.append(e)
+        return out
+
+    def on_round_start(self, match, owner, ctx):
+        if not owner.alive or owner.vars.get("magnetism", 0) <= 0:
+            return
+        if not self._draggable(match):
+            return
+        match.interrupts.append({
+            "kind": "confirm", "key": self.KEY, "side": owner.side, "entity": owner.id,
+            "name": "磁力 Magnetism",
+            "text": f"Spend 1 of {owner.vars['magnetism']} 磁力 to move a hero one square?",
+            "yes": "Pull one", "no": "Save it",
+        })
+
+    def apply_interrupt(self, match, owner, task, answer):
+        if task["key"] == self.KEY:
+            if not answer:
+                return
+            opts = self._draggable(match)
+            if not opts:
+                return
+            match.interrupts.insert(0, {
+                "kind": "pick", "key": self.KEY + ":who", "side": owner.side,
+                "entity": owner.id, "option_kind": "unit",
+                "options": [e.id for e in opts],
+                "name": "磁力 Magnetism", "text": "Name the hero to move.",
+            })
+        elif task["key"] == self.KEY + ":who":
+            tgt = match.entity(answer)
+            if tgt is None or not tgt.cells:
+                return
+            free = [list(c) for c in match.topology.neighbours(tgt.cell)
+                    if match.can_enter(tgt, c)]
+            if not free:
+                return
+            if len(free) == 1:
+                self._pull(match, owner, tgt, tuple(free[0]))
+                return
+            match.interrupts.insert(0, {
+                "kind": "pick", "key": self.KEY + ":where", "side": owner.side,
+                "entity": owner.id, "option_kind": "cell", "options": free,
+                "target": tgt.id,
+                "name": "磁力 Magnetism", "text": f"Where does {tgt.name} go?",
+            })
+        elif task["key"] == self.KEY + ":where":
+            tgt = match.entity(task.get("target"))
+            if tgt is not None and tgt.alive:
+                self._pull(match, owner, tgt, tuple(answer))
+
+    def bot_choice(self, match, owner, task):
+        """What a bot answers when this prompt is its own. Published by the hero
+        rather than guessed at by the harness: the generic rule for a confirm is
+        "only for a big enough blow", which reads a magnet's offer as worthless
+        and declined every one of them — 万磁王 spent whole matches never using
+        the passive it is built around.
+
+        Drag their heaviest hitter away from your line. Simple, and it is a pull
+        rather than a shove, so it never hands them ground."""
+        mine = [e for e in match.living(owner.side) if e.cells]
+        if task["key"] == self.KEY:
+            return True if self._enemies(match, owner) else None
+        if task["key"] == self.KEY + ":who":
+            foes = self._enemies(match, owner)
+            return max(foes, key=lambda e: (e.atk or 0, e.hp)).id if foes else None
+        if task["key"] == self.KEY + ":where":
+            tgt = match.entity(task.get("target"))
+            if tgt is None or not mine:
+                return None
+            far = lambda c: min(match.topology.distance(tuple(c), a.cell) for a in mine)
+            return max(task["options"], key=far)
+        return None
+
+    def _enemies(self, match, owner):
+        return [e for e in self._draggable(match) if e.side != owner.side]
+
+    def _pull(self, match, owner, tgt, cell):
+        owner.vars["magnetism"] = max(0, owner.vars.get("magnetism", 0) - 1)
+        # A real move, so ground that bites whoever arrives (潜水者's mines) bites.
+        match.place_unit(tgt, cell)
+        match.log_line(
+            f"{match.label(owner)} draws {match.label(tgt)} a square — "
+            f"{owner.vars['magnetism']} 磁力 left."
+        )
+
+    def status(self, match, owner):
+        n = owner.vars.get("magnetism", 0)
+        return {
+            "key": "magnetism", "badge": f"磁{n}", "label": "磁力 MAGNETISM",
+            "text": f"{n} pulls left, one a round.",
+        }
+
+
 class MountainGuard:
     """山神 shelters his line. Allied units sharing his column take 2 less from
     every hit (all damage, fire included). He himself is not covered. Positional —
@@ -3978,6 +4109,18 @@ SQUAD_MEMBERS += [
         blurb="Cuts with lightning and is gone — a wide net, and long strides after it.",
     ),
     HeroDef(
+        key="magneto",
+        name="万磁王",
+        name_en="magneto",
+        max_hp=17,
+        atk=3,
+        move=1,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 3, "range": 3},
+        passives=[Magnetism],
+        blurb="Moves the board itself — a hero a round, whoever it likes.",
+    ),
+    HeroDef(
         key="loki",
         name="洛基",
         name_en="loki",
@@ -4028,7 +4171,7 @@ BY_KEY[DUMMY.key] = DUMMY
 # whenever you add heroes; --test fills the rest of your side with dummies.
 # Whoever is newest goes here — --test always deploys the hero just added, so it
 # can be played immediately. Up to two; the rest of the side is padded with dummies.
-TEST_HEROES = ["ninja", "wanderer"]
+TEST_HEROES = ["magneto", "ninja"]
 
 
 
