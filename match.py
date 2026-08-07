@@ -1339,7 +1339,20 @@ class Match:
         # A unit whose square is dictated by another's has to justify standing
         # still too: if the head walks off, the tail cannot simply stay behind.
         _zone, dictated = self.move_zone(e, pending)
-        if dest != e.cell or dictated:
+        # Standing still is always available to a body that cannot move at all.
+        # A dictated square (蛇帝's tail follows its head) is checked even when the
+        # order is a hold, and a pinned body has no legal squares whatsoever — so
+        # a pinned snake could not commit anything, its side never sealed an
+        # order, and the exchange span until the harness gave up. 长冬 pinning a
+        # whole enemy line is enough to do it.
+        # ...and the same is true of a dictated body with an empty zone. 蛇尾's
+        # squares are the head's free neighbours, and a crowd around the head
+        # (海妖's song drags a whole line together, but any press will do) leaves
+        # none. Holding is the only honest answer to "follow the head" when there
+        # is no square beside it left to follow to.
+        stuck = dictated and not self.legal_moves(e, pending)
+        still = dest == e.cell and (self.rooted(e) or stuck)
+        if (dest != e.cell or dictated) and not still:
             if dest not in [tuple(c) for c in self.legal_moves(e, pending)]:
                 # A dictated zone belongs to whichever passive published it, so the
                 # refusal names the squares on offer rather than guessing why.
@@ -1454,10 +1467,12 @@ class Match:
             t["choices"] = ab.shapes(self, e, origin)
         if hasattr(ab, "cells"):
             t["cells"] = [list(c) for c in ab.cells(self, e, origin)]
-        if hasattr(ab, "throwable"):
-            t["options"] = ab.throwable(self, e, origin)
-        if hasattr(ab, "blessable"):
-            t["options"] = ab.blessable(self, e, origin)
+        # Which units this ability may name, when it is narrower than "an ally" or
+        # "an enemy" — 大力士 can only throw what it can reach, 长老 cannot bless
+        # twice, 血盟卫 cannot swear to itself. One hook, so the client is offered
+        # exactly what the validator will accept.
+        if hasattr(ab, "unit_options"):
+            t["options"] = ab.unit_options(self, e, origin)
         return t
 
     def validate_action(self, e, dest, action):

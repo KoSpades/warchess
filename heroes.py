@@ -4,6 +4,7 @@ A hero is a stat block plus ability entries plus passive handler classes. No
 hero subclasses Entity, and nothing here is referenced by the core loop.
 """
 
+import random
 from dataclasses import dataclass, field
 
 import board as BOARD
@@ -466,7 +467,7 @@ class Bless(Ability):
     targeting = {"kind": "ally"}
     blurb = "Ward one ally from the next blow. +1 movement until it lands."
 
-    def blessable(self, match, actor, origin=None):
+    def unit_options(self, match, actor, origin=None):
         return [e.id for e in match.on_map(actor.side) if not e.vars.get("blessed")]
 
     def validate(self, match, actor, params, origin=None):
@@ -514,7 +515,7 @@ class Slam(Ability):
     REACH = 3
     THROW = "slam_throw"
 
-    def throwable(self, match, actor, origin=None):
+    def unit_options(self, match, actor, origin=None):
         """Everyone it could take hold of, for the client to offer — from wherever
         it will be standing when it grabs, not where it is leaving."""
         origin = actor.acts_from(origin)
@@ -531,7 +532,7 @@ class Slam(Ability):
             return "Choose anyone still standing."
         if actor.acts_from(origin) is None:
             return f"{actor.name} has nothing to grab with."
-        if tgt.id not in self.throwable(match, actor, origin):
+        if tgt.id not in self.unit_options(match, actor, origin):
             return "It can only take hold of somebody right beside it."
         return None
 
@@ -2681,6 +2682,222 @@ class Magnetism:
         }
 
 
+class BloodOath(Ability):
+    """血盟卫's bond, sworn before the first exchange. `kind: "ally"` would allow
+    the guard itself, as it does everywhere else, so this narrows the list."""
+
+    key = "blood_oath"
+    name = "血盟 Blood Oath"
+    ap_cost = 0
+    use_limit = 1
+    opening = True
+    targeting = {"kind": "ally"}
+    blurb = "At game start, swear to another ally."
+
+    def unit_options(self, match, actor, origin=None):
+        """Anyone of yours but itself. The oath is a debt owed to somebody else:
+        sworn to itself it would be lifesteal plus a gift nobody is left to
+        collect, which is a different card."""
+        return [e.id for e in match.living(actor.side) if e is not actor]
+
+    def validate(self, match, actor, params, origin=None):
+        if params.get("target") == actor.id:
+            return f"{actor.name} cannot swear to itself."
+        return None
+
+    def side_effects(self, match, actor, params):
+        tgt = match.entity(params.get("target"))
+        if tgt is None or not tgt.alive or tgt.side != actor.side:
+            return
+        actor.vars["oath"] = tgt.id
+        match.log_line(f"{match.label(actor)} swears to {match.label(tgt)}.")
+
+
+class BloodBond:
+    """血盟卫. Everything it takes off the enemy it gives to the hero it swore to,
+    and its own death is the last gift.
+
+    The heal reads `dealt`, not `amount` — what actually got through the pipeline,
+    after guards, caps and stone — so a blow softened to 1 mends 1.
+
+    The bequest hangs off BEFORE_DEATH rather than DEATH: a unit is marked dead
+    before DEATH is emitted and the bus skips the dead, so a hero's own passives
+    never hear their own end. Late, and only if nothing took the death back
+    (蛮王 walks out of its own)."""
+
+    describe = ("At game start it swears to another ally. Everything it deals, that ally "
+                "heals. When it falls, that ally gains +2 attack.")
+    GIFT = 2
+
+    def _sworn(self, match, owner):
+        oid = owner.vars.get("oath")
+        tgt = match.entity(oid) if oid else None
+        return tgt if (tgt is not None and tgt.alive) else None
+
+    # After the whole pipeline, so it mends what really landed rather than what
+    # was aimed.
+    @EV.hook(priority=85)
+    def on_after_damage(self, match, owner, ev):
+        if ev.source is not owner or ev.dealt <= 0:
+            return
+        tgt = self._sworn(match, owner)
+        if tgt is None:
+            return
+        got = DMG.heal(match, tgt, ev.dealt, source=owner)
+        if got:
+            match.log_line(
+                f"{match.label(owner)} bleeds for {match.label(tgt)} — {got} back."
+            )
+
+    @EV.hook(priority=90)
+    def on_before_death(self, match, owner, ctx):
+        if ctx["entity"] is not owner or ctx.get("prevented"):
+            return
+        tgt = self._sworn(match, owner)
+        if tgt is None:
+            return          # nobody left to collect
+        tgt.add_modifier(Modifier("atk", "add", self.GIFT))
+        match.log_line(
+            f"{match.label(owner)} falls, and {match.label(tgt)} takes up the oath "
+            f"— attack now {tgt.atk}."
+        )
+
+    def status(self, match, owner):
+        tgt = self._sworn(match, owner)
+        return {
+            "key": "oath", "badge": "盟", "label": "血盟 OATH",
+            "text": (f"Sworn to {tgt.name}. It heals what this deals." if tgt
+                     else "Nobody left to bleed for."),
+        }
+
+
+class Song(Ability):
+    """海妖's 歌唱. A point off every enemy on the board, and the whole line dragged
+    a square closer.
+
+    Nobody is asked anything. The order is least health first — a random coin only
+    where two are level — because the pulls interact: a body that has already moved
+    is ground the next one cannot walk into, so "who steps first" decides where the
+    line ends up. Health orders it so the answer is public before it is cast.
+
+    Each one steps along whichever axis it is furthest away on, since that is the
+    step that closes the most; level gaps break at random. A step onto ground it
+    cannot hold simply does not happen."""
+
+    key = "song"
+    name = "歌唱 Song"
+    ap_cost = 1
+    targeting = {"kind": "none"}
+    blurb = ("1 damage to all enemies. Each is dragged a square closer, "
+             "weakest first.")
+    DAMAGE = 1
+
+    def build_damage(self, match, actor, params):
+        return [DMG.DamageEvent(source=actor, target=e, amount=self.DAMAGE,
+                                category=DMG.ABILITY)
+                for e in match.enemies_in(None, actor.side)]
+
+    @staticmethod
+    def _step(match, actor, e):
+        """The one square this body is dragged to, or None. Toward the siren along
+        whichever axis the gap is wider; a tie, or a blocked first choice, falls to
+        the other."""
+        if not actor.cells or not e.cells:
+            return None
+        (ac, ar), (ec, er) = actor.cell, e.cell
+        dc, dr = ac - ec, ar - er
+        across = (ec + (1 if dc > 0 else -1), er) if dc else None
+        down = (ec, er + (1 if dr > 0 else -1)) if dr else None
+        if abs(dc) > abs(dr):
+            order = [across, down]
+        elif abs(dr) > abs(dc):
+            order = [down, across]
+        else:
+            order = [across, down]
+            random.shuffle(order)
+        for cell in order:
+            if cell is not None and match.can_enter(e, cell):
+                return cell
+        return None
+
+    def side_effects(self, match, actor, params):
+        # Sung after the blow, so a body the song just killed is not dragged. The
+        # dead are swept later, hence the hp check as well as `alive`.
+        pool = [e for e in match.enemies_in(None, actor.side) if e.hp > 0 and e.cells]
+        pool.sort(key=lambda e: (e.hp, random.random()))
+        moved = []
+        for e in pool:
+            cell = self._step(match, actor, e)
+            if cell is None:
+                continue
+            match.place_unit(e, cell)
+            moved.append(e)
+        if moved:
+            match.log_line(
+                f"{match.label(actor)} sings — "
+                + ", ".join(f"{match.label(e)} to {e.cell}" for e in moved) + "."
+            )
+
+
+class SirensCall:
+    """海妖. Anything standing right next to it swings weaker: close enough to hear
+    the song properly is close enough to be dulled by it.
+
+    An `atk` cut rather than a `damage_dealt` one, because attack is what the rest
+    of the game reads: the card shows it, anything that scales off the wielder's
+    arm uses it, and the AI prices a hero's threat from it — weaken only the
+    damage and nothing can see that standing here is safer.
+
+    Recomputed rather than applied once, the way 马尔斯's endgame bonuses are: it
+    depends on where everyone is standing, and that changes under it. Flat, like
+    every other blunting effect — `worn_down` owns the floor."""
+
+    describe = "Enemies beside it have 2 less atk."
+    DULL = 2
+
+    def _clear(self, match):
+        for e in match.entities:
+            e.modifiers = [m for m in e.modifiers if m.source is not self]
+
+    def on_before_death(self, match, owner, ctx):
+        # The bus does not deliver DEATH to the dead, so a singer that falls would
+        # leave every arm it dulled still dulled, for the rest of the match. Lift
+        # it on the way out instead — the same door 血盟卫 collects its oath
+        # through, and a prevented death changes nothing.
+        if ctx["entity"] is owner and not ctx.get("prevented"):
+            self._clear(match)
+
+    def _recompute(self, match, owner):
+        self._clear(match)
+        if not owner.alive or not owner.cells:
+            return
+        for e in match.living(other_side(owner.side)):
+            if e.cells and match.topology.distance(owner.cell, e.cell) <= 1:
+                e.add_modifier(Modifier("atk", "add", -self.DULL, source=self))
+
+    def on_match_start(self, match, owner, ctx):
+        self._recompute(match, owner)
+
+    def on_round_start(self, match, owner, ctx):
+        self._recompute(match, owner)
+
+    def on_after_move(self, match, owner, ctx):
+        self._recompute(match, owner)
+
+    def on_death(self, match, owner, ctx):
+        self._recompute(match, owner)
+
+    def status(self, match, owner):
+        near = [e for e in match.living(other_side(owner.side))
+                if e.cells and owner.cells
+                and match.topology.distance(owner.cell, e.cell) <= 1]
+        return {
+            "key": "siren", "badge": "歌", "label": "海妖 SONG",
+            "text": (f"Enemies beside it: -{self.DULL} atk." if not near else
+                     f"{len(near)} beside it at -{self.DULL} atk."),
+        }
+
+
 class MountainGuard:
     """山神 shelters his line. Allied units sharing his column take 2 less from
     every hit (all damage, fire included). He himself is not covered. Positional —
@@ -4121,6 +4338,32 @@ SQUAD_MEMBERS += [
         blurb="Moves the board itself — a hero a round, whoever it likes.",
     ),
     HeroDef(
+        key="blood_guard",
+        name="血盟卫",
+        name_en="bloodGuard",
+        max_hp=15,
+        atk=3,
+        move=2,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 3, "range": 1},
+        abilities=[BloodOath()],
+        passives=[BloodBond],
+        blurb="Bleeds for somebody else, and leaves them its strength.",
+    ),
+    HeroDef(
+        key="siren",
+        name="海妖",
+        name_en="siren",
+        max_hp=15,
+        atk=1,
+        move=1,
+        max_ap=3,
+        attack={"mode": CELL, "cells": 3, "range": 5},
+        abilities=[Song()],
+        passives=[SirensCall],
+        blurb="Sings the whole line a square closer, and dulls whatever reaches it.",
+    ),
+    HeroDef(
         key="loki",
         name="洛基",
         name_en="loki",
@@ -4171,7 +4414,7 @@ BY_KEY[DUMMY.key] = DUMMY
 # whenever you add heroes; --test fills the rest of your side with dummies.
 # Whoever is newest goes here — --test always deploys the hero just added, so it
 # can be played immediately. Up to two; the rest of the side is padded with dummies.
-TEST_HEROES = ["magneto", "ninja"]
+TEST_HEROES = ["siren", "blood_guard"]
 
 
 

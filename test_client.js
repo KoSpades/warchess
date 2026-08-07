@@ -56,7 +56,8 @@ function loadClient(side = 'L') {
       buildWants, buildAllowed, buildReady, confirmBuild,
       chooseAction, sealOrder, syncDraft, nameableFor, unaimable,
       shotsWanted, onLastShot, linkedOrder, linkedMoves, isLinked,
-      pickChoice, pendingFee, cellTargets, setHover, renderRHS };`;
+      pickChoice, pendingFee, cellTargets, setHover, renderRHS,
+      allyOptions, allyAllowed };`;
   const tmp = path.join(here, '.client.test.js');
   fs.writeFileSync(tmp, js + api);
   const mod = require(tmp);
@@ -383,17 +384,17 @@ if (F.tree_foe) {
 }
 
 if (F.tree_ally) {
+  // 世界树 keeps time now; nobody strikes it, its own side included.
   C.S = F.tree_ally; C.draft = null; C.err = '';
   const tree = (F.tree_ally.units || []).find(u => u.key === 'world_tree');
   const act = (F.tree_ally.commit.actions || []).find(a => a.key === 'attack');
-  ok('tree: your own order is told it may be struck',
-     (act.targeting.strikeable || []).includes(tree.id),
+  ok('tree: its own side is not told it may be struck',
+     !(act.targeting.strikeable || []).length,
      JSON.stringify(act.targeting.strikeable));
   C.draft = {actionKey: 'attack', targets: []};
-  ok('tree: and your side may name it', C.nameable(act, tree),
-     JSON.stringify(act.targeting.strikeable));
+  ok('tree: and its own side may not name it', !C.nameable(act, tree));
   C.onUnitPick(tree.id);
-  ok('tree: clicking it commits the blow', (C.namedUnits() || []).includes(tree.id),
+  ok('tree: clicking it names nothing', !(C.namedUnits() || []).includes(tree.id),
      JSON.stringify(C.namedUnits()));
 }
 
@@ -875,6 +876,92 @@ if (F.fuelled) {
      JSON.stringify(C.draft.shots));
 }
 
+// An ability that may name only *some* allies must not offer the rest. 血盟卫
+// cannot swear to itself; 长老 cannot bless a hero twice. The server publishes
+// the narrower list and the panel has to honour it, or it offers a hero the
+// server then refuses.
+
+if (F.opening_ally_some) {
+  C.S = F.opening_ally_some; C.draft = null; C.err = '';
+  const t = F.opening_ally_some.opening.task;
+  const guard = (F.opening_ally_some.units || []).find(u => u.key === 'blood_guard');
+  const mate = (F.opening_ally_some.units || []).find(u => u.key === 'cannoneer');
+  ok('oath: the server narrows the list', (t.targeting.options || []).length === 1
+     && !t.targeting.options.includes(guard.id), JSON.stringify(t.targeting.options));
+  ok('oath: the panel offers exactly what the server allows',
+     C.allyOptions(t.targeting).map(u => u.id).join() === String(mate.id),
+     JSON.stringify(C.allyOptions(t.targeting).map(u => u.id)));
+  C.render();
+  const body = document.getElementById('leftbody').innerHTML;
+  ok('oath: and the guard is not a button', !body.includes(`target:${guard.id}`),
+     body.slice(0, 120));
+  ok('oath: while the ally is', body.includes(`target:${mate.id}`));
+}
+
+if (F.ally_heal) {
+  // No restriction published: every living ally, the caster included.
+  C.S = F.ally_heal; C.err = '';
+  const heal = (F.ally_heal.commit.actions || []).find(a => a.targeting.kind === 'ally');
+  const mine = C.myUnits().filter(u => u.alive).length;
+  ok('an unrestricted ally pick still offers everyone',
+     C.allyOptions(heal.targeting).length === mine,
+     `${C.allyOptions(heal.targeting).length} of ${mine}`);
+}
+
+// 万磁王 raises a prompt at the top of a round: confirm, who, where. It is a
+// hero-owned confirm with its own button labels, and the seat that does not own
+// it has to be told it is waiting.
+
+if (F.magnet_confirm) {
+  C.S = F.magnet_confirm; C.draft = null; C.err = '';
+  const t = F.magnet_confirm.interrupt.task;
+  C.render();
+  const body = () => document.getElementById('leftbody').innerHTML;
+  ok('magnet: the confirm uses the hero\'s own wording',
+     body().includes(t.yes) && body().includes(t.no), `${t.yes} / ${t.no}`);
+  ok('magnet: and says what it costs', /磁力/.test(body()), t.text);
+  const before = C.sent.length;
+  C.onKey({key: 'Enter', preventDefault(){}});
+  ok('magnet: Enter takes the offer',
+     C.sent.length > before && lastSent().answer === true,
+     JSON.stringify(lastSent()));
+}
+
+if (F.magnet_who) {
+  C.S = F.magnet_who; C.draft = null; C.err = '';
+  const t = F.magnet_who.interrupt.task;
+  C.render();
+  const panel = document.getElementById('leftbody').innerHTML;
+  ok('magnet: then it lists the heroes it may move',
+     t.options.every(id => panel.includes(`answer:${id}`)),
+     JSON.stringify(t.options));
+  ok('magnet: either side is on the list',
+     new Set(t.options.map(id => (C.S.units.find(u => u.id === id) || {}).side)).size === 2,
+     JSON.stringify(t.options.map(id => (C.S.units.find(u => u.id === id) || {}).side)));
+}
+
+if (F.magnet_where) {
+  C.S = F.magnet_where; C.draft = null; C.err = '';
+  const t = F.magnet_where.interrupt.task;
+  ok('magnet: the squares it may be moved to are clickable',
+     t.options.every(c => C.clickableCell(c)), JSON.stringify(t.options));
+  ok('magnet: and a square not on offer is not',
+     !C.clickableCell([1, 1]));
+  const before = C.sent.length;
+  C.onCell(t.options[0][0], t.options[0][1]);
+  ok('magnet: clicking one answers it',
+     C.sent.length > before && lastSent().cmd === 'interrupt',
+     JSON.stringify(lastSent()));
+}
+
+if (F.magnet_waiting) {
+  C.S = F.magnet_waiting; C.draft = null; C.err = '';
+  C.render();
+  const panel2 = document.getElementById('leftbody').innerHTML;
+  ok('magnet: the other seat is told it is waiting', /aiting/.test(panel2),
+     panel2.slice(0, 90));
+}
+
 // ------------------------------- 工匠: two squares built in before deployment
 
 if (F.build && F.doors) {
@@ -1067,6 +1154,24 @@ if (F.linked_doors) {
      `client ${JSON.stringify(zone)} vs server ${JSON.stringify(server)}`);
   ok('snake by a door: the door square is not clickable either',
      !C.clickableCell(door));
+}
+
+// --------------------- a head with every neighbour taken. The tail follows the
+// head, and there is nowhere beside it left to follow to — the seat must still be
+// able to finish the leg by standing still, the way the server allows.
+
+if (F.linked_boxed) {
+  C.S = F.linked_boxed; C.err = ''; C.draft = C.blankDraft(F.linked_boxed.commit.selected);
+  const ms = C.linkedOrder();
+  const tail = ms[1];
+  C.onCell(ms[0].cell[0], ms[0].cell[1]);          // the head holds its square
+  const zone = C.linkedMoves(1);
+  ok('boxed snake: the server has no square for the tail either',
+     tail.legal_moves.length === 0, JSON.stringify(tail.legal_moves));
+  ok('boxed snake: the tail is offered the square it stands on',
+     zone.length === 1 && zone[0][0] === tail.cell[0] && zone[0][1] === tail.cell[1],
+     JSON.stringify(zone));
+  ok('boxed snake: and that square is clickable', C.clickableCell(tail.cell));
 }
 
 if (F.followup) {

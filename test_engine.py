@@ -3989,7 +3989,7 @@ ok("长冬 does not reach an island", ex6.move_allowance == mv6, str(ex6.move_al
 ml6.abilities[0].side_effects(m6, ml6, {})
 ok("...nor does 大雾", ex6.rng == rng6, str(ex6.rng))
 ok("...nor a blessing of its own side",
-   ex6.id not in elder6.abilities[0].blessable(m6, elder6))
+   ex6.id not in elder6.abilities[0].unit_options(m6, elder6))
 ok("...nor 军火商人's open bar", ex6.max_ap == 0, str(ex6.max_ap))
 ok("...and it is sold nothing either",
    not [o for o in ad6.passives[0].turn_choice(m6, ad6)["options"]
@@ -4342,9 +4342,9 @@ ok("...and that is what the preview promised",
 m77, st77 = aim_arena("strongman", (3, 3), [], [("dummy", (7, 3))])
 unit(m77, RIGHT, "dummy").set_cell((5, 3))      # two squares away: out of reach
 slam77 = st77.abilities[0]
-ok("nobody is within reach from where it stands", not slam77.throwable(m77, st77))
+ok("nobody is within reach from where it stands", not slam77.unit_options(m77, st77))
 ok("...but the enemy is, from one square closer",
-   [unit(m77, RIGHT, "dummy").id] == slam77.throwable(m77, st77, origin=(4, 3)))
+   [unit(m77, RIGHT, "dummy").id] == slam77.unit_options(m77, st77, origin=(4, 3)))
 m77.select_hero(LEFT, st77.id)
 ok("...so stepping in and throwing is one legal turn",
    m77.commit(LEFT, {"destination": [4, 3],
@@ -5112,6 +5112,245 @@ while m.phase == "interrupt" and guard < 8:
 ok("a mine under a pull still goes off", hp0 - gk.hp == BOARD.SmallBomb.DAMAGE,
    f"took {hp0 - gk.hp}")
 ok("...and is spent doing it", not m.board.has_kind((8, 3), "small_bomb"))
+
+
+# 77 — 血盟卫: an oath to somebody else, paid in blood and then in strength
+def oath_arena():
+    m = Match()
+    m.assign_draft(["blood_guard", "cannoneer"], ["gatekeeper", "dummy"])
+    for k, c in (("blood_guard", (3, 3)), ("cannoneer", (3, 1))):
+        assert m.place(LEFT, k, c) is None, (k, c)
+    for k, c in (("gatekeeper", (7, 3)), ("dummy", (7, 1))):
+        assert m.place(RIGHT, k, c) is None, (k, c)
+    assert m.lock_force(LEFT) is None and m.lock_force(RIGHT) is None
+    return (m, unit(m, LEFT, "blood_guard"), unit(m, LEFT, "cannoneer"),
+            unit(m, RIGHT, "gatekeeper"))
+
+m, bg, can, gk = oath_arena()
+offer = m.ability_targeting(bg, bg.abilities[0])["options"]
+ok("the oath is offered to its own side", can.id in offer, str(offer))
+ok("...but never to itself", bg.id not in offer, str(offer))
+ok("...and swearing to itself is refused",
+   m.opening_choose(LEFT, {"target": bg.id}) is not None)
+ok("swearing to an ally is accepted",
+   m.opening_choose(LEFT, {"target": can.id}) is None)
+
+# what it deals, the sworn heals — and only what really landed
+can.hp = 8
+hp0 = can.hp
+DMG.apply_batch(m, [DMG.DamageEvent(source=bg, target=gk, amount=3,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("what it deals, the sworn heals", can.hp - hp0 == 3, f"{hp0} -> {can.hp}")
+gk.vars["damage_reduction"] = 2
+hp0 = can.hp
+DMG.apply_batch(m, [DMG.DamageEvent(source=bg, target=gk, amount=3,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("...only what actually landed, not what was aimed", can.hp - hp0 == 1,
+   f"{hp0} -> {can.hp}")
+gk.vars["damage_reduction"] = 0
+can.hp = can.max_hp
+DMG.apply_batch(m, [DMG.DamageEvent(source=bg, target=gk, amount=3,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("...and a full ally is not overfilled", can.hp == can.max_hp, str(can.hp))
+
+# somebody else's blow mends nobody
+m, bg, can, gk = oath_arena()
+m.opening_choose(LEFT, {"target": can.id})
+can.hp = 8
+DMG.apply_batch(m, [DMG.DamageEvent(source=can, target=gk, amount=3,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("an ally's own blow mends nothing", can.hp == 8, str(can.hp))
+
+# the bequest — a hero's own passive never hears DEATH, so this rides BEFORE_DEATH
+m, bg, can, gk = oath_arena()
+m.opening_choose(LEFT, {"target": can.id})
+atk0 = can.atk
+DMG.apply_batch(m, [DMG.DamageEvent(source=gk, target=bg, amount=99,
+                                    category=DMG.NORMAL_ATTACK)])
+m.sweep_deaths()
+ok("when it falls the sworn takes up the oath",
+   not bg.alive and can.atk == atk0 + HEROES.BloodBond.GIFT,
+   f"alive={bg.alive} atk {atk0} -> {can.atk}")
+
+# a death that is taken back is no death
+m, bg, can, gk = oath_arena()
+m.opening_choose(LEFT, {"target": can.id})
+atk0 = can.atk
+ctx = {"entity": bg, "prevented": True}
+HEROES.BloodBond().on_before_death(m, bg, ctx)
+ok("a prevented death pays nothing", can.atk == atk0, str(can.atk))
+
+# nothing to collect once the sworn is gone
+m, bg, can, gk = oath_arena()
+m.opening_choose(LEFT, {"target": can.id})
+can.alive = False
+hp0 = gk.hp
+DMG.apply_batch(m, [DMG.DamageEvent(source=bg, target=gk, amount=3,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("with the sworn gone it simply fights on", hp0 - gk.hp == 3, f"took {hp0 - gk.hp}")
+
+# a headless match must actually leave the opening: the harness answers an ally
+# pick by naming itself, which this one refuses, and the opening spun forever.
+import playtest as _PT2
+ok("a match with 血盟卫 in it reaches a result",
+   _PT2.play_teams(["blood_guard", "cannoneer"], ["spearman", "mars"], seed=0)
+   in (LEFT, RIGHT, "draw"),
+   str(_PT2.play_teams(["blood_guard", "cannoneer"], ["spearman", "mars"], seed=0)))
+
+
+# 78 — a body that cannot move must still be able to hold
+# 蛇帝's tail has its square dictated by the head, and a dictated square is
+# checked even when the order is a hold. A pinned body has no legal squares at
+# all, so a pinned snake could not seal any order — its side stopped committing
+# and the exchange ran forever. 长冬 pinning a whole enemy line reaches this.
+m = arena([("cannoneer", (3, 3)), ("gatekeeper", (3, 1))],
+          [("snake_head", (7, 3)), ("snake_tail", (7, 4))])
+hd, tl = unit(m, RIGHT, "snake_head"), unit(m, RIGHT, "snake_tail")
+m.root(hd); m.root(tl)
+ok("a pinned snake has nowhere to walk",
+   m.legal_moves(hd) == [] and m.legal_moves(tl) == [],
+   f"{m.legal_moves(hd)} {m.legal_moves(tl)}")
+m.select_hero(RIGHT, hd.id)
+err = m.commit(RIGHT, {"orders": [
+    {"entity": hd.id, "destination": None, "action": {"key": "none"}},
+    {"entity": tl.id, "destination": None, "action": {"key": "none"}}]})
+ok("...but it can still hold where it stands", err is None, str(err))
+ok("...and the order really is sealed", m.commits[RIGHT] is not None)
+
+# and a pinned single body is unchanged
+m = arena([("cannoneer", (3, 3))], [("gatekeeper", (7, 3))])
+gk = unit(m, RIGHT, "gatekeeper")
+m.root(gk)
+m.select_hero(RIGHT, gk.id)
+ok("a pinned ordinary hero still holds too",
+   m.commit(RIGHT, {"destination": None, "action": {"key": "none"}}) is None)
+m2 = arena([("cannoneer", (3, 3))], [("gatekeeper", (7, 3))])
+gk2 = unit(m2, RIGHT, "gatekeeper")
+m2.root(gk2)
+m2.select_hero(RIGHT, gk2.id)
+ok("...and still cannot actually walk",
+   m2.commit(RIGHT, {"destination": [6, 3], "action": {"key": "none"}}) is not None)
+
+
+# 79 — 海妖: a song the whole line hears, and quieter arms beside it
+SONG = HEROES.Song
+DULL = HEROES.SirensCall.DULL
+
+
+def siren_arena(foes):
+    """Deploy inside the zones, then stand each foe exactly where the test wants
+    it — most of these cases turn on a square no deployment could reach."""
+    park = [(7, 1), (8, 1), (9, 1), (7, 5)]
+    m = arena([("siren", (3, 3)), ("cannoneer", (1, 1))],
+              [(k, park[i]) for i, (k, _) in enumerate(foes)])
+    for k, c in foes:
+        m.place_unit(unit(m, RIGHT, k), c)
+    return m, unit(m, LEFT, "siren")
+
+
+def sing(m, sr, holder):
+    sr.ap = sr.max_ap
+    turn(m, sr.id, {"destination": None, "action": {"key": f"ability:{SONG.key}"}},
+         holder.id, {"destination": None, "action": {"key": "none"}})
+
+
+# every enemy on the board is hit, however far off it stands
+m, sr = siren_arena([("gatekeeper", (5, 3)), ("dummy", (9, 1))])
+gk, d = unit(m, RIGHT, "gatekeeper"), unit(m, RIGHT, "dummy")
+hp = {e.id: e.hp for e in (gk, d)}
+sing(m, sr, gk)
+ok("the song reaches every enemy, near and far",
+   hp[gk.id] - gk.hp == SONG.DAMAGE and hp[d.id] - d.hp == SONG.DAMAGE,
+   f"{hp[gk.id] - gk.hp} {hp[d.id] - d.hp}")
+
+# and drags along whichever axis the gap is wider
+m, sr = siren_arena([("gatekeeper", (8, 3)), ("dummy", (4, 5))])
+gk, d = unit(m, RIGHT, "gatekeeper"), unit(m, RIGHT, "dummy")
+sing(m, sr, gk)
+ok("a body far off across steps across", gk.cell == (7, 3), str(gk.cell))
+ok("...and one far off down steps down", d.cell == (4, 4), str(d.cell))
+
+# the weakest steps first, and the ground it leaves is ground the next can take
+m, sr = siren_arena([("gatekeeper", (5, 3)), ("dummy", (6, 3))])
+gk, d = unit(m, RIGHT, "gatekeeper"), unit(m, RIGHT, "dummy")
+gk.hp, d.hp = 4, 9
+sing(m, sr, gk)
+ok("the nearer body moves first when it is the weaker",
+   (gk.cell, d.cell) == ((4, 3), (5, 3)), f"{gk.cell} {d.cell}")
+
+# reverse the health and the same two bodies jam: the stronger is stepped into
+m, sr = siren_arena([("gatekeeper", (5, 3)), ("dummy", (6, 3))])
+gk, d = unit(m, RIGHT, "gatekeeper"), unit(m, RIGHT, "dummy")
+gk.hp, d.hp = 9, 4
+sing(m, sr, gk)
+ok("the far body is stuck behind an ally that has not moved yet",
+   (gk.cell, d.cell) == ((4, 3), (6, 3)), f"{gk.cell} {d.cell}")
+
+# a step onto ground it cannot hold simply does not happen
+m, sr = siren_arena([("gatekeeper", (4, 3)), ("dummy", (9, 5))])
+gk = unit(m, RIGHT, "gatekeeper")
+m.root(gk)
+sing(m, sr, gk)
+ok("a pinned body hears the song but does not move", gk.cell == (4, 3), str(gk.cell))
+
+# a body the song kills is never dragged
+m, sr = siren_arena([("gatekeeper", (5, 3)), ("dummy", (9, 5))])
+gk = unit(m, RIGHT, "gatekeeper")
+gk.hp = SONG.DAMAGE
+sing(m, sr, gk)
+ok("the song does not drag what it just killed",
+   not gk.alive and gk.cell in (None, (5, 3)), f"{gk.alive} {gk.cell}")
+
+# the passive: an arm right next to it swings weaker, and recovers on the way out
+m, sr = siren_arena([("gatekeeper", (8, 3)), ("dummy", (9, 5))])
+gk = unit(m, RIGHT, "gatekeeper")
+far = gk.atk
+m.place_unit(gk, (4, 3))
+ok("an enemy that steps beside 海妖 swings weaker",
+   gk.atk == max(1, far - DULL) and gk.atk < far, f"{far} -> {gk.atk}")
+m.place_unit(gk, (8, 3))
+ok("...and swings its own arm again once it walks off", gk.atk == far, str(gk.atk))
+
+# the aura follows the siren, not only the enemy
+m, sr = siren_arena([("gatekeeper", (5, 3)), ("dummy", (9, 5))])
+gk = unit(m, RIGHT, "gatekeeper")
+far = gk.atk
+m.place_unit(sr, (4, 3))
+ok("海妖 walking up dulls the arm just the same",
+   gk.atk == max(1, far - DULL), f"{far} -> {gk.atk}")
+
+# and nothing outlives the singer
+m, sr = siren_arena([("gatekeeper", (4, 3)), ("dummy", (9, 5))])
+gk = unit(m, RIGHT, "gatekeeper")
+dulled = gk.atk
+sr.hp = 0
+m.sweep_deaths()
+ok("the dulling dies with 海妖", gk.atk > dulled, f"{dulled} -> {gk.atk}")
+
+# 蛇尾 follows the head into whatever square is free beside it — and a song that
+# drags a whole line together can leave none. Its side must still be able to seal.
+m = arena([("siren", (3, 3)), ("cannoneer", (1, 1))],
+          [("snake_head", (7, 1)), ("snake_tail", (8, 1)), ("gatekeeper", (9, 1)),
+           ("dummy", (7, 5)), ("spearman", (8, 5))])
+hd, tl = unit(m, RIGHT, "snake_head"), unit(m, RIGHT, "snake_tail")
+# Wall the head into the corner: every square beside it taken by somebody else,
+# and the tail shaken loose of it — which is exactly what a drag leaves behind.
+for e, c in ((hd, (9, 3)), (unit(m, RIGHT, "gatekeeper"), (8, 3)),
+             (unit(m, RIGHT, "dummy"), (9, 4)),
+             (unit(m, RIGHT, "spearman"), (9, 2)), (tl, (8, 4))):
+    m.place_unit(e, c)
+ok("a boxed-in head leaves its tail no square to follow to",
+   m.legal_moves(tl) == [], str(m.legal_moves(tl)))
+m.select_hero(RIGHT, tl.id)
+ok("...and the tail may still hold where it stands",
+   m.commit(RIGHT, {"orders": [
+       {"entity": hd.id, "destination": None, "action": {"key": "none"}},
+       {"entity": tl.id, "destination": None, "action": {"key": "none"}}]}) is None)
+ok("...so its side can still seal an order", m.commits[RIGHT] is not None)
+
+ok("a match with 海妖 in it reaches a result",
+   _PT2.play_teams(["siren", "gatekeeper"], ["spearman", "mars"], seed=3)
+   in (LEFT, RIGHT, "draw"))
 
 
 print("\nlog tail:")

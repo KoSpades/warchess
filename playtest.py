@@ -408,6 +408,12 @@ def take_turn(m, side, observer=None):
         err = m.commit(side, free_picks(m, e, payload))
     if err:                                   # never leave a side stuck
         err = m.commit(side, hold_payload(m, e))
+    if err:
+        # Even holding was refused. Whatever the reason, a side that cannot seal
+        # an order stops the exchange for good and the match never ends — forfeit
+        # the turn rather than spin on it, and say so.
+        print(f"[playtest] {side} cannot commit ({err}) — forfeiting the turn")
+        m.forfeit_turn(side)
     return err
 
 
@@ -503,7 +509,13 @@ def step(m, sides=(LEFT, RIGHT), observer=None):
                 tt = m.ability_targeting(e, ab)
                 t = tt["kind"]
                 if t == "ally":
-                    m.opening_choose(side, {"target": e.id})
+                    # Whatever the ability actually offers, exactly as the square
+                    # picks below do. Naming itself is only the fallback: an
+                    # ability with a narrower list (血盟卫 may not swear to
+                    # itself) refuses it, and the retry spins the opening
+                    # forever — the match never reaches its first exchange.
+                    opts = tt.get("options")
+                    m.opening_choose(side, {"target": opts[0] if opts else e.id})
                 elif t == "any_cell":
                     # Whatever the ability actually offers. A fixed square is
                     # refused by anything with a restricted list, and the retry

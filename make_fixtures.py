@@ -43,6 +43,21 @@ def unit(m, side, key):
     return next(e for e in m.living(side) if e.key == key)
 
 
+def stage(m, *pairs):
+    """Stand bodies on squares no deployment zone could reach, then make that the
+    board both seats can see.
+
+    A seat renders the other side out of the exchange snapshot, which is taken
+    when the exchange opens — so a board arranged by hand afterwards is arranged
+    for one seat only, and every fixture below is snapped from Left. Without the
+    re-snapshot the client is handed enemies still standing on their deployment
+    squares while the server's own target lists were worked out from where they
+    really are."""
+    for e, c in pairs:
+        e.set_cell(tuple(c))
+    m.take_snapshot()
+
+
 def build():
     out = {}
 
@@ -65,14 +80,12 @@ def build():
     snap("direction_sweep", m, select=m.living(LEFT)[0].id, full_ap=[m.living(LEFT)[0]])
 
     m = arena([("swordsman", (3, 3))], [("dummy", (7, 3)), ("cannoneer", (7, 2))])
-    unit(m, RIGHT, "dummy").set_cell((5, 3))
-    unit(m, RIGHT, "cannoneer").set_cell((3, 5))
+    stage(m, (unit(m, RIGHT, "dummy"), (5, 3)), (unit(m, RIGHT, "cannoneer"), (3, 5)))
     snap("shape_cut", m, select=m.living(LEFT)[0].id, full_ap=[m.living(LEFT)[0]])
 
     # three shapes rather than two, so the overlapping-square rule gets exercised
     m = arena([("bomber", (3, 3))], [("dummy", (7, 3)), ("cannoneer", (7, 2))])
-    unit(m, RIGHT, "dummy").set_cell((4, 4))
-    unit(m, RIGHT, "cannoneer").set_cell((6, 3))
+    stage(m, (unit(m, RIGHT, "dummy"), (4, 4)), (unit(m, RIGHT, "cannoneer"), (6, 3)))
     snap("shape_blast", m, select=m.living(LEFT)[0].id, full_ap=[m.living(LEFT)[0]])
 
     m = arena([("blood_mage", (3, 3))], [("dummy", (7, 3))])
@@ -91,24 +104,22 @@ def build():
     snap("sniper_one_lane", m, select=m.living(LEFT)[0].id)
 
     m = arena([("centaur", (3, 3)), ("gatekeeper", (3, 1))], [("dummy", (7, 3)), ("cannoneer", (8, 3))])
-    unit(m, RIGHT, "dummy").set_cell((5, 3))
+    stage(m, (unit(m, RIGHT, "dummy"), (5, 3)))
     snap("centaur_charge", m, select=unit(m, LEFT, "centaur").id,
          full_ap=[unit(m, LEFT, "centaur")])
 
     m = arena([("mammoth", (3, 3))], [("dummy", (7, 3)), ("cannoneer", (7, 2))])
-    unit(m, RIGHT, "dummy").set_cell((4, 3))
-    unit(m, RIGHT, "cannoneer").set_cell((4, 2))
+    stage(m, (unit(m, RIGHT, "dummy"), (4, 3)), (unit(m, RIGHT, "cannoneer"), (4, 2)))
     snap("mammoth", m, select=m.living(LEFT)[0].id)
 
     m = arena([("gunner", (3, 3))], [("dummy", (7, 3)), ("cannoneer", (7, 2))])
-    unit(m, RIGHT, "dummy").set_cell((4, 3))
-    unit(m, RIGHT, "cannoneer").set_cell((4, 2))
+    stage(m, (unit(m, RIGHT, "dummy"), (4, 3)), (unit(m, RIGHT, "cannoneer"), (4, 2)))
     snap("cone", m, select=m.living(LEFT)[0].id)
 
     # a hit pauses for the follow-up step, after everything else has resolved
     m = arena([("gunner", (3, 3))], [("dummy", (7, 3))])
     g, d = m.living(LEFT)[0], m.living(RIGHT)[0]
-    d.set_cell((4, 3))
+    stage(m, (d, (4, 3)))
     m.select_hero(LEFT, g.id)
     m.commit(LEFT, {"destination": None, "action": {"key": "attack", "direction": "forward"}})
     m.select_hero(RIGHT, d.id)
@@ -135,18 +146,32 @@ def build():
     fm = unit(m, LEFT, "fisherman")
     snap("hook", m, select=fm.id, full_ap=[fm])
 
-    # --- 世界树's beasts: a mid-resolution prompt that names a hero -----------
+    # --- 世界树's beasts: a round-start prompt that names a hero --------------
+    # The tree is a clock now, not a thing to strike: the beasts come at round 3,
+    # so this plays holds until they do.
     m = Match(); m.assign_draft(["world_tree", "cannoneer"], ["dummy", "gatekeeper"])
     m.place(LEFT, "cannoneer", (3, 3))
     m.place(RIGHT, "dummy", (7, 3)); m.place(RIGHT, "gatekeeper", (7, 1))
     m.lock_force(LEFT); m.lock_force(RIGHT)
-    tree = next(e for e in m.entities if e.key == "world_tree")
-    tree.vars["struck"] = 2
-    can = unit(m, LEFT, "cannoneer")
-    m.select_hero(LEFT, can.id)
-    m.commit(LEFT, {"destination": None, "action": {"key": "attack", "shots": [[[5, 3]]]}})
-    m.select_hero(RIGHT, unit(m, RIGHT, "dummy").id); m.commit(RIGHT, HOLD)
+    guard = 0
+    while m.round < 3 and guard < 60:
+        guard += 1
+        if m.phase == "interrupt":
+            t = m.interrupts[0]
+            m.choose_interrupt(t["side"], t["options"][0] if t.get("options") else None)
+        elif m.phase == "commit":
+            moved = False
+            for side in (LEFT, RIGHT):
+                if m.commits[side] is None and m.unacted(side):
+                    m.select_hero(side, m.unacted(side)[0].id)
+                    m.commit(side, HOLD)
+                    moved = True
+            if not moved:
+                break
+        else:
+            break
     assert m.phase == "interrupt", m.phase
+    assert m.interrupts[0].get("beast"), m.interrupts[0]
     out["beasts"] = view.state_for(m, LEFT)
 
     # --- the enemy seat looking at the tree: it may not aim anything at it ----
@@ -229,6 +254,11 @@ def build():
     m.board.add_effect((4, 4), spent)
     great = board.GrapeVine(LEFT); great.great = True
     m.board.add_effect((4, 5), great)
+    # 世界树 is a clock now, and its 长冬 pins every enemy through round 1 — which
+    # correctly hides any ability that carries its own hero (封喉) from the menu.
+    # This fixture is about an enemy side nothing may be *named* on, so thaw it.
+    for e in m.living(LEFT):
+        e.vars["rooted_at"] = None
     asn = unit(m, LEFT, "assassin")
     asn.ap = asn.max_ap
     m.select_hero(LEFT, asn.id)
@@ -314,7 +344,8 @@ def build():
     m.place(LEFT, "pope", (2, 2)); m.place(LEFT, "cannoneer", (2, 3))
     m.place(RIGHT, "cannoneer", (8, 2)); m.place(RIGHT, "dummy", (8, 3))
     m.lock_force(LEFT); m.lock_force(RIGHT)
-    doomed = unit(m, LEFT, "cannoneer"); doomed.set_cell((7, 2)); doomed.hp = 2
+    doomed = unit(m, LEFT, "cannoneer"); doomed.hp = 2
+    stage(m, (doomed, (7, 2)))
     m.select_hero(LEFT, unit(m, LEFT, "pope").id); m.commit(LEFT, HOLD)
     m.select_hero(RIGHT, unit(m, RIGHT, "cannoneer").id)
     m.commit(RIGHT, {"destination": None, "action": {"key": "attack", "shots": [[[7, 2]]]}})
@@ -360,6 +391,55 @@ def build():
     m.lock_force(LEFT); m.lock_force(RIGHT)
     snap("linked_doors", m, select=unit(m, LEFT, "snake_head").id)
 
+    # --- a head walled in, so its tail has nowhere beside it to follow to -----
+    # 海妖's song drags a whole line together and can leave 蛇帝's head with every
+    # neighbour taken. The tail must still be offered the square it is on, or the
+    # seat could never finish the leg.
+    m = Match()
+    m.assign_draft(["snake_emperor", "cannoneer"],
+                   ["gatekeeper", "dummy", "spearman"])
+    for k, c in (("snake_head", (2, 3)), ("snake_tail", (2, 4)), ("cannoneer", (1, 1))):
+        assert m.place(LEFT, k, c) is None, (k, c)
+    for k, c in (("gatekeeper", (7, 1)), ("dummy", (8, 1)), ("spearman", (9, 1))):
+        assert m.place(RIGHT, k, c) is None, (k, c)
+    m.lock_force(LEFT); m.lock_force(RIGHT)
+    # Wall the head into the corner and shake the tail loose of it.
+    stage(m, (unit(m, LEFT, "snake_head"), (1, 3)),
+          (unit(m, RIGHT, "gatekeeper"), (2, 3)),
+          (unit(m, RIGHT, "dummy"), (1, 2)),
+          (unit(m, RIGHT, "spearman"), (1, 4)),
+          (unit(m, LEFT, "snake_tail"), (2, 5)))
+    snap("linked_boxed", m, select=unit(m, LEFT, "snake_head").id)
+
+    # --- a round-start prompt raised by a hero, answered by its own side -------
+    # 万磁王 offers a pull before either seat picks a turn: confirm, then who,
+    # then where. Nothing else in the fixtures exercises a hero-owned confirm.
+    m = Match()
+    m.assign_draft(["magneto", "cannoneer"], ["gatekeeper", "dummy"])
+    for k, c in (("magneto", (3, 3)), ("cannoneer", (3, 1))):
+        assert m.place(LEFT, k, c) is None, (k, c)
+    for k, c in (("gatekeeper", (7, 3)), ("dummy", (7, 1))):
+        assert m.place(RIGHT, k, c) is None, (k, c)
+    m.lock_force(LEFT); m.lock_force(RIGHT)
+    assert m.phase == "interrupt", m.phase
+    out["magnet_confirm"] = view.state_for(m, LEFT)
+    out["magnet_waiting"] = view.state_for(m, RIGHT)
+    m.choose_interrupt(LEFT, True)
+    out["magnet_who"] = view.state_for(m, LEFT)
+    m.choose_interrupt(LEFT, unit(m, RIGHT, "gatekeeper").id)
+    out["magnet_where"] = view.state_for(m, LEFT)
+
+    # --- an opening ally pick with a narrower list than "any ally" ------------
+    # 血盟卫 may not swear to itself, and the client must not offer it.
+    m = Match()
+    m.assign_draft(["blood_guard", "cannoneer"], ["dummy", "dummy"])
+    for k, c in (("blood_guard", (3, 3)), ("cannoneer", (3, 1))):
+        assert m.place(LEFT, k, c) is None, (k, c)
+    for k, c in (("dummy", (7, 3)), ("dummy", (7, 1))):
+        assert m.place(RIGHT, k, c) is None, (k, c)
+    m.lock_force(LEFT); m.lock_force(RIGHT)
+    out["opening_ally_some"] = view.state_for(m, LEFT)
+
     # --- a hero with no square of its own, ready to take one ------------------
     m = arena([("ghost", (3, 3)), ("gatekeeper", (3, 1))], [("cannoneer", (7, 3)), ("dummy", (7, 1))])
     g = unit(m, LEFT, "ghost")
@@ -371,7 +451,7 @@ def build():
     m = arena([("sabretooth", (3, 3)), ("cannoneer", (3, 1))],
               [("gatekeeper", (7, 3)), ("dummy", (7, 1))])
     tig, gk, dm = unit(m, LEFT, "sabretooth"), unit(m, RIGHT, "gatekeeper"), unit(m, RIGHT, "dummy")
-    gk.set_cell((4, 3))
+    stage(m, (gk, (4, 3)))
     m.select_hero(LEFT, tig.id)
     m.commit(LEFT, {"destination": None, "action": {"key": "attack", "shots": [[[4, 3]]]}})
     m.select_hero(RIGHT, dm.id)          # the pinned one keeps its turn for the next exchange
@@ -425,8 +505,7 @@ def build():
     out["sealed"] = view.state_for(m, LEFT)
 
     m = arena([("cannoneer", (3, 3))], [("dummy", (7, 3)), ("gatekeeper", (7, 2))])
-    unit(m, RIGHT, "dummy").set_cell((4, 3))
-    unit(m, RIGHT, "gatekeeper").set_cell((4, 2))
+    stage(m, (unit(m, RIGHT, "dummy"), (4, 3)), (unit(m, RIGHT, "gatekeeper"), (4, 2)))
     c = m.living(LEFT)[0]
     m.select_hero(LEFT, c.id)
     m.commit(LEFT, {"destination": None, "action": {"key": "attack", "shots": [[[4, 3], [4, 2]]]}})

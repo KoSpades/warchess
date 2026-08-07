@@ -185,7 +185,11 @@ function linkedMoves(i){
   if (g.move_anchor){
     const a = placedPos()[g.move_anchor.entity] || (gangMember(g.move_anchor.entity)||{}).cell;
     if (!a) return [];
-    return [[a[0]+1,a[1]],[a[0]-1,a[1]],[a[0],a[1]+1],[a[0],a[1]-1]].filter(open);
+    const beside = [[a[0]+1,a[1]],[a[0]-1,a[1]],[a[0],a[1]+1],[a[0],a[1]-1]].filter(open);
+    // Nothing free beside the anchor — a crowd around 蛇帝's head, which a drag
+    // toward 海妖 makes easy. The server lets a body with no square to follow to
+    // hold where it stands; offer that, or the leg could never be finished.
+    return beside.length ? beside : (g.cell ? [g.cell] : []);
   }
   // A body that walks: the server's own list (holding is always allowed).
   return (g.legal_moves||[]).concat(g.cell?[g.cell]:[]).filter(open);
@@ -238,6 +242,18 @@ function pendingFee(){
     if (w) got += w.ap || 0;
   }
   return got;
+}
+// Which allies an action may actually name. The server publishes a narrower list
+// whenever the ability has one — 长老 will not bless a hero twice, 血盟卫 will not
+// swear to itself — and without honouring it the panel offers a hero the server
+// then refuses.
+function allyOptions(t){
+  const only = t && t.options;
+  return myUnits().filter(u => u.alive && (!only || only.includes(u.id)));
+}
+function allyAllowed(t, u){
+  const only = t && t.options;
+  return !!u && u.side === SIDE && u.alive && (!only || only.includes(u.id));
 }
 function choicesReady(){
   return curChoices().every(ch => ch.optional || (draft.choices||{})[ch.key] != null);
@@ -549,7 +565,7 @@ function unitHTML(u, pending){
     if ((draft.pair||[]).includes(u.id)) cls.push('tgt');
   }
   if (act && act.targeting.kind==='unit' && nameable(act, u)) cls.push('clickable');
-  if (act && act.targeting.kind==='ally' && u.side===SIDE) cls.push('clickable');
+  if (act && act.targeting.kind==='ally' && allyAllowed(act.targeting, u)) cls.push('clickable');
   if (draft && namedUnits().includes(u.id)) cls.push('tgt');
   if (S.phase==='commit' && !S.commit.sealed && !S.commit.selected && canAct(u)) cls.push('clickable');
   const pct = Math.max(0,Math.round(100*u.hp/u.max_hp));
@@ -1570,7 +1586,7 @@ function renderOpening(){
     if (t.text) h += `<p class="note">${t.text}</p>`;
     if (t.targeting.kind==='ally'){
       h += `<div class="step">Choose an ally</div>`;
-      for (const u of myUnits().filter(u=>u.alive)){
+      for (const u of allyOptions(t.targeting)){
         h += `<button class="btn" onclick="cmd({cmd:'opening', target:${u.id}})">
                 ${u.name} <span class="cost">${u.hp}/${u.max_hp} HP</span></button>`;
       }
@@ -1970,8 +1986,8 @@ function targetingHTML(act){
               ${u.name} <span class="cost">${u.side===SIDE?'yours':'theirs'} · ${u.hp}/${u.max_hp} HP</span></button>`;
     }
   } else if (t.kind==='ally'){
-    h += `<p class="note">Choose an ally to heal (yourself included). <b>Enter</b> registers.</p>`;
-    for (const u of myUnits().filter(u=>u.alive)){
+    h += `<p class="note">Choose an ally${t.options?'':' (yourself included)'}. <b>Enter</b> registers.</p>`;
+    for (const u of allyOptions(t)){
       h += `<button class="btn ${draft.target===u.id?'on':''}" onclick="draft.target=${u.id};err='';render()">
               ${u.name} <span class="cost">${u.hp}/${u.max_hp} HP</span></button>`;
     }
