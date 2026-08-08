@@ -383,6 +383,23 @@ def free_picks(m, e, payload):
         if wares:
             best = max(wares, key=lambda w: w.get("ap") or 0)
             choices[ch["key"]] = best["value"]
+        elif ch.get("sets_origin"):
+            # A pick that decides where the hero's attack comes from, and the shot
+            # in hand was aimed from where it stands. Naming another square would
+            # make its own order illegal, so leave it — these are always optional.
+            continue
+        elif ch.get("kind") == "unit_then_cell":
+            # A body and a square for it to reach: take the square that gets the
+            # most out of the reach, which is the one nearest the enemy line.
+            foe = nearest(m, e, e.cell)
+            pick, where, best = None, None, None
+            for who, cells in (ch.get("cells") or {}).items():
+                for c in cells:
+                    score = -m.topology.distance(tuple(c), foe.cell) if foe else 0
+                    if best is None or score > best:
+                        pick, where, best = int(who), list(c), score
+            if pick is not None:
+                choices[ch["key"]] = {"unit": pick, "cell": where}
         else:
             choices[ch["key"]] = ch["options"][0]
     if choices:
@@ -435,11 +452,16 @@ def take_turn(m, side, observer=None):
 
 
 def hold_payload(m, e):
-    """Standing still, in whatever shape this hero's turn is committed in."""
+    """Standing still, in whatever shape this hero's turn is committed in.
+
+    The free picks ride along even here: a hold is still a turn, and a hero with a
+    pick it must answer (戴红手套的女子 must say which body she is) cannot seal one
+    without them. Leaving them off was how the last resort itself got refused."""
     still = {"destination": None, "action": {"key": "none"}}
     if m.gang_of(e):
-        return {"orders": [dict(still, entity=g.id) for g in m.turn_actors(e)]}
-    return still
+        return {"orders": [free_picks(m, g, dict(still, entity=g.id))
+                           for g in m.turn_actors(e)]}
+    return free_picks(m, e, dict(still))
 
 
 def play(left_key, right_key, seed=0, verbose=False):

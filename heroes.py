@@ -1586,17 +1586,17 @@ class Regrowth:
 
 
 class BattleFury:
-    """Below a health threshold, hits harder and reaches further. Conditional on
+    """Below a health threshold, hits harder and closes faster. Conditional on
     current HP, so it is recomputed (spec 7.3) whenever HP can change."""
 
-    describe = "At 11 health or below: +2 attack, +1 range."
+    describe = "At 11 health or below: +2 attack, +1 move."
     THRESHOLD = 11
 
     def _recompute(self, match, owner):
         owner.modifiers = [m for m in owner.modifiers if m.source is not self]
         if owner.alive and owner.hp <= self.THRESHOLD:
             owner.add_modifier(Modifier("atk", "add", 2, source=self))
-            owner.add_modifier(Modifier("rng", "add", 1, source=self))
+            owner.add_modifier(Modifier("move", "add", 1, source=self))
 
     def on_after_damage(self, match, owner, ev):
         self._recompute(match, owner)
@@ -2586,8 +2586,12 @@ class Magnetism:
     The pull runs confirm -> who -> where, and the last step is skipped when the
     hero it named has only one square to be pulled into.
 
-    Scenery is not draggable: a thing that never takes a turn (世界树) is part of
-    the board, not a body standing on it."""
+    Scenery is not draggable: a thing the other side cannot touch at all (世界树) is
+    part of the board, not a body standing on it. Read as "takes a turn" once,
+    which was the same answer for everything then on the board and the wrong one
+    later: 戴红手套的女子's shadows take no turns and are very much bodies, and only
+    the one holding her turn could be pulled — telling the other seat which that
+    was, for nothing but the asking."""
 
     describe = ("Starts with 5 磁力. At the start of each round it may spend 1 to move "
                 "any one hero, either side, to an adjacent square.")
@@ -2601,7 +2605,7 @@ class Magnetism:
     def _draggable(self, match):
         out = []
         for e in match.living():
-            if not e.cells or not e.flags["takes_turns"]:
+            if not e.cells or not e.flags["targetable"]:
                 continue
             if any(match.can_enter(e, c) for c in match.topology.neighbours(e.cell)):
                 out.append(e)
@@ -2948,6 +2952,11 @@ class HeroDef:
     max_ap: int
     attack: dict
     attacks_per_turn: int = 1
+    # What it is already holding when the match opens. Zero for almost everything —
+    # a hero charges one at the start of each of its own turns, so the first turn
+    # normally opens with one. A card that wants its first turn to open with more
+    # (长老, so the ward is affordable the moment it is needed) says so here.
+    start_ap: int = 0
     halve_from_index: int = None
     abilities: list = field(default_factory=list)
     passives: list = field(default_factory=list)
@@ -3157,6 +3166,372 @@ class Gore:
         match.place_unit(tgt, cell)
         match.log_line(f"{match.label(owner)} puts its horns into "
                        f"{match.label(tgt)} and shoves it aside.")
+
+
+RED_SHADOW = "red_shadow"
+
+
+class RedGloves:
+    """戴红手套的女子. One woman standing in several places at once, and only she
+    knows which one she is.
+
+    Every body on the board is a shadow, identical to every other, and one of them
+    is quietly the woman herself — a choice she makes again at the start of each of
+    her turns, so where she was last turn tells you nothing. A normal attack that
+    finds a shadow puts it out; one that finds her wounds her for real, scatters
+    every other body, and she never conjures another. Nothing else in the game
+    touches her at all: no ability, no fire, no mine, before the illusion breaks or
+    after it.
+
+    Only the body she is standing in is a hero. The rest are furniture: they take up
+    a square and nothing else — no life to take, no material to weigh, nothing that
+    pays out when they go. What makes the trick work is that they are the same kind
+    of thing as she is, so no seat can tell them apart by looking; what keeps them
+    honest is that being the woman is a flag rather than a shape, and it moves from
+    body to body without anything on the board appearing to change.
+
+    Which body *acts* is a separate question from which body she *is*: the seat
+    picks up whichever one it wants to fire, and the cloud spends one turn between
+    them all. So a shadow does the shooting while she stands somewhere else, and
+    attacking gives nothing away.
+
+    The bodies never walk. What looks like a move is the cast: the board is left
+    holding one more of her within REACH of a body she already had. Casting rides on
+    the movement rules because the reach it needs is a published zone, the client
+    already draws one, and a woman who may no longer cast is simply a woman with
+    nowhere to move to."""
+
+    describe = ("Every body is a shadow and one is secretly her. Only normal attacks "
+                "touch her: they put out a shadow, or wound her and end the trick.")
+
+    REACH = 3         # how far a new shadow may be set down from one she already has
+    MAX_BODIES = 4
+
+    # --- the cloud ----------------------------------------------------------
+
+    @staticmethod
+    def bodies(match, owner):
+        """Every body of this woman, oldest first."""
+        return sorted((e for e in match.living(owner.side)
+                       if e.key == RED_SHADOW and e.cells), key=lambda e: e.id)
+
+    def state(self, match, owner):
+        """What belongs to the woman rather than to any body of hers — which one
+        she is standing in, and whether she has been found. Kept beside the match
+        so it outlives every body that could have been holding it."""
+        return match.cloud_state(owner.side, "red_gloves")
+
+    def real_body(self, match, owner):
+        """Whichever body she is standing in. Falls back to the oldest, so a cloud
+        that has not been asked yet still has a woman in it — the first exchange
+        can land before her first turn does."""
+        pool = self.bodies(match, owner)
+        if not pool:
+            return None
+        want = self.state(match, owner).get(self.REAL)
+        return next((e for e in pool if e.id == want), pool[0])
+
+    def is_real(self, match, owner):
+        return self.real_body(match, owner) is owner
+
+    # --- what a blow does ---------------------------------------------------
+
+    @EV.hook(priority=3)      # ahead of everything: this decides what is even hit
+    def on_before_damage(self, match, owner, ev):
+        if ev.target is not owner or ev.cancelled:
+            return
+        if ev.category != DMG.NORMAL_ATTACK:
+            # Nothing but a swung weapon finds her. A spell, a fire, a mine has
+            # nothing to land on — whether it is a shadow or the woman.
+            ev.cancel("nothing but an attack can find her")
+            return
+        if not self.is_real(match, owner):
+            ev.cancel("only a shadow")
+            self.snuff(match, owner)
+            # The turn may have been standing in the body that just went out. Left
+            # unsettled, no living body held it and she simply lost the round —
+            # to a blow that found nothing but a picture of her.
+            self.settle(match, owner)
+
+    @EV.hook(priority=95)
+    def on_after_damage(self, match, owner, ev):
+        if ev.target is not owner or ev.cancelled or ev.dealt <= 0:
+            return
+        self.found(match, owner)
+        self.settle(match, owner)
+
+    def on_before_death(self, match, owner, ctx):
+        # The woman falls, so every body she was standing in falls with her.
+        if ctx["entity"] is owner and not ctx.get("prevented"):
+            for e in self.bodies(match, owner):
+                if e is not owner:
+                    self.snuff(match, e, quiet=True)
+
+    @classmethod
+    def snuff(cls, match, body, quiet=False):
+        """Put a shadow out. Not a death: a shadow was never a life, so nothing that
+        pays out when a hero falls — 猎人's first blood, 教皇's tithe — hears it."""
+        if not body.alive:
+            return
+        body.alive = False
+        body.cells = set()
+        if not quiet:
+            match.log_line(f"{match.label(body)} — a shadow, and it goes out.")
+
+    def found(self, match, owner):
+        """The blow landed on the woman. Every other body scatters and she never
+        casts again: from here she is one hero, standing still, reaching
+        anywhere."""
+        st = self.state(match, owner)
+        if st.get("found"):
+            return
+        st["found"] = True
+        st[self.REAL] = owner.id
+        for e in self.bodies(match, owner):
+            if e is not owner:
+                self.snuff(match, e, quiet=True)
+        # A woman with nothing left to hide behind stops throwing her voice and
+        # simply shoots. Handed over as a weapon, which is this engine's own way of
+        # saying "this hero attacks differently from here on".
+        owner.vars["arms"] = {
+            "name": "红手套 Red Gloves",
+            "text": "No range — any one enemy on the board.",
+            "attack": {"mode": UNIT, "range": None},
+            "atk": owner.hero.atk,
+        }
+        match.log_line(
+            f"{match.label(owner)} is found — the shadows scatter, and she draws.")
+
+    # --- hero, or furniture -------------------------------------------------
+
+    def on_match_start(self, match, owner, ctx):
+        self.settle(match, owner)
+
+    def on_heal(self, match, owner, ctx):
+        self.settle(match, owner)
+
+    def on_round_start(self, match, owner, ctx):
+        """A new round, and her turn is hers to take again. Without this the cloud
+        never stopped counting itself as having acted, `settle` stamped the body
+        holding the turn every time it ran, and she took exactly one turn in the
+        whole match — the rest of them refused with "choose a hero that has not
+        acted", of which she had none."""
+        self.state(match, owner)["acted"] = False
+        self.settle(match, owner)
+
+    def actor(self, match, owner):
+        """The one body that takes her turn. Every body is her, so which one holds
+        the turn is a choice rather than a fact — and holding it is what makes the
+        attack come from that square, with nothing in the attack pipeline needing to
+        know she exists. Falls back to the oldest, so a cloud whose actor has just
+        been put out still has somebody to act."""
+        pool = self.bodies(match, owner)
+        if not pool:
+            return None
+        # A frozen body cannot hold her turn: 雪女 aiming at one of four alike
+        # would otherwise cost her the whole turn on a guess, and the enemy can no
+        # more tell which body carries it than which one is her. Whichever bodies
+        # can still act, the oldest of them does.
+        free = [e for e in pool if not match.frozen(e)] or pool
+        want = self.state(match, owner).get("actor")
+        return next((e for e in free if e.id == want), free[0])
+
+    def settle(self, match, owner):
+        """Who she is, and who is holding the turn. Only the body she is standing in
+        is a life to take, and only it carries her health; only the body holding the
+        turn is a hero anyone is asked to give an order to, which is why the roster
+        lists her once however many places she is standing in.
+
+        Re-run rather than set once, because both answers change every round and a
+        body can be put out between them."""
+        st = self.state(match, owner)
+        real = self.real_body(match, owner)
+        act = self.actor(match, owner)
+        for e in self.bodies(match, owner):
+            e.flags["counts_for_defeat"] = e is real
+            # One entry in the roster: the rest take up a square and nothing else.
+            e.flags["takes_turns"] = e is act
+            if e is act and st.get("acted"):
+                # Carried on the cloud, not the body: if the body holding the turn
+                # is put out after she has spent it, whichever body picks the turn
+                # up must not be handed a second one. Only ever set, never cleared —
+                # clearing it here would hand back a turn the engine had taken.
+                e.has_acted = True
+            if e is not real and real is not None:
+                e.hp = real.hp
+            # Deliberately *not* pooled to the body she is standing in. Pooling made
+            # the engine count the cloud as one creature everywhere, and two of the
+            # places it counts are the two that matter most: an enemy marking two of
+            # her squares was offered one body to strike rather than the choice
+            # between them — which is the whole hero — and a sweep of the board
+            # found one body and left the rest standing. Her bodies are several
+            # targets on purpose. What she is is settled by `counts_for_defeat`,
+            # and a mend is aimed by the seat that knows which body she is in.
+            e.vars.pop("pool_holder", None)
+
+    def on_turn_start(self, match, owner, ctx):
+        if ctx.get("entity") is owner:
+            # A body named last round must not aim this one: the pick rides with
+            # the order, and the order is being composed now.
+            owner.vars.pop("red_firing", None)
+
+    def on_turn_resolved(self, match, owner, ctx):
+        """Her turn is spent when it resolves, not when it opens. Marked at the
+        open, a commit refused for a bad order — a grid aimed out of range, say —
+        left the body holding the turn already stamped as having taken it, and the
+        next attempt was told to choose a hero that had not acted. There was none:
+        she had locked herself out of her own turn."""
+        if ctx.get("entity") is owner:
+            self.state(match, owner)["acted"] = True
+
+    # --- her turn -----------------------------------------------------------
+    # Three questions, answered as part of her order rather than before it: pick
+    # her out of the roster like anybody else, then settle which body she is,
+    # which reaches out, and which fires. Each is a click on the board — her
+    # bodies are identical by design, so a list of them names nothing.
+
+    REAL = "red_real"
+    CAST = "red_cast"
+    FIRE = "red_fire"
+
+    def turn_choice(self, match, owner):
+        if self.state(match, owner).get("found"):
+            return []          # nothing left to decide: one body, and it shoots
+        pool = self.bodies(match, owner)
+        out = []
+        if len(pool) > 1:
+            out.append({
+                "key": self.REAL, "name": "真身 Real Body", "kind": "ally",
+                "stage": 1, "board_only": True,
+                # What the board writes on the body once it is named. The panel
+                # cannot say which one she picked — they all read alike — so the
+                # answer has to be legible where it was given. It answers the same
+                # question her 真/影 badges do, so those stand down while it holds
+                # one: a board with both would be a board arguing with itself.
+                "glyph": "真",
+                "supersedes": "red_real",
+                "text": "Which of them are you. They see every body alike.",
+                "options": [e.id for e in pool],
+            })
+        wells = self.casters(match, owner)
+        if wells and len(pool) < self.MAX_BODIES:
+            out.append({
+                "key": self.CAST, "name": "分身 Cast a Shadow",
+                "kind": "unit_then_cell", "stage": 2, "optional": True,
+                "board_only": True, "glyph": "分",
+                "text": f"Stand in one more place: the body that reaches out, then "
+                        f"the square within {self.REACH} it sets one down on.",
+                "options": list(wells),
+                "cells": {str(k): v for k, v in wells.items()},
+            })
+        if len(pool) > 1:
+            out.append({
+                # A square rather than a body, because the body it names may not
+                # exist yet: a shadow cast a moment ago in this same order is as
+                # good a place to shoot from as one that has stood there all game.
+                # The square is the one thing both of them have.
+                "key": self.FIRE, "name": "出手 Which Fires", "kind": "cell",
+                "stage": 3, "optional": True, "board_only": True, "glyph": "出",
+                # The attack is aimed from whichever body this names, so the client
+                # measures its reach from there rather than from the acting body.
+                "sets_origin": True,
+                # ...and the client should offer the square this order is about to
+                # put a body on, alongside the ones already holding her.
+                "includes_new": True,
+                "text": "Which body attacks. It need not be you.",
+                "options": [list(e.cell) for e in pool],
+            })
+        return out
+
+    def apply_choice(self, match, owner, key, answer):
+        if key == self.REAL:
+            tgt = match.entity(answer)
+            if tgt is not None and tgt.alive and tgt.key == RED_SHADOW:
+                self.state(match, owner)[self.REAL] = tgt.id
+                self.settle(match, owner)
+        elif key == self.CAST and isinstance(answer, dict):
+            self.cast(match, owner, tuple(answer["cell"]))
+        elif key == self.FIRE:
+            tgt = match.occupant(tuple(answer)) if answer else None
+            if tgt is not None and tgt.alive and tgt.key == RED_SHADOW \
+                    and tgt.side == owner.side:
+                owner.vars["red_firing"] = tgt.id
+
+    def attack_body(self, match, owner):
+        """She fires with the body she named, not with the one holding the turn.
+        Cleared as her turn begins, so a body named last round cannot aim this one."""
+        who = match.entity(owner.vars.get("red_firing"))
+        if who is not None and who.alive and who.cells and who.key == RED_SHADOW:
+            return who
+        return None
+
+    def casters(self, match, owner):
+        """Bodies with somewhere to set another of her down, and where. `occupant`
+        as well as `can_enter`: a unit may always "enter" the square it is already
+        standing on, and without that check the body reaching out is offered its
+        own square and two of her end up in one place."""
+        out = {}
+        for body in self.bodies(match, owner):
+            free = [list(c) for c in match.topology.cells_within(body.cell, self.REACH)
+                    if match.occupant(c) is None and match.can_enter(owner, c)]
+            if free:
+                out[body.id] = free
+        return out
+
+    def cast(self, match, owner, cell):
+        """Set another of her down. Nothing moves: the board is simply holding one
+        more of her, and no seat can say which one is new."""
+        if (match.occupant(cell) is not None or not match.can_enter(owner, cell)
+                or len(self.bodies(match, owner)) >= self.MAX_BODIES):
+            return
+        body = match.spawn(BY_KEY[RED_SHADOW], owner.side, cell)
+        real = self.real_body(match, owner)
+        body.hp = real.hp if real is not None else owner.hp
+        body.has_acted = True      # cast mid-turn: it does not owe one of its own
+        self.settle(match, body)
+        match.log_line(f"{match.label(owner)} stands in one more place.")
+
+    def move_label(self, match, owner):
+        """She never walks — not while the shadows hold, and not once they are gone.
+        `skip` because a step with one answer is not a step: the panel goes straight
+        on to what she is actually deciding."""
+        return {
+            "step": "never moves",
+            "skip": True,
+            "note": "She does not move.",
+            "hold": "Confirm — she stays where she is",
+            "moving": "Standing still",
+            "holding": "Standing still",
+        }
+
+    # --- what each seat is told --------------------------------------------
+
+    def unit_view(self, match, owner, out, viewer):
+        """What the other seat is told about one of her bodies. Exactly one of them
+        carries her turn, which is true and none of their business: bodies that must
+        be indistinguishable cannot have one of them wearing "still to act" while
+        the rest read as done. Her own seat is told the truth — it has to know which
+        body to pick up."""
+        if viewer is None or viewer == owner.side:
+            return
+        act = self.actor(match, owner)
+        out["acts"] = True
+        out["acted"] = bool(act is not None and act.has_acted)
+
+    def status(self, match, owner):
+        st = self.state(match, owner)
+        if st.get("found"):
+            return {"key": "red_found", "badge": "手", "label": "戴红手套的女子",
+                    "text": "Found. No more shadows; reaches any enemy."}
+        return {
+            "key": "red_real",
+            "badge": "真" if self.is_real(match, owner) else "影",
+            "label": "戴红手套的女子",
+            # Which body she is standing in is the whole hero. Her own seat is
+            # told; the other only that there is a woman somewhere in the cloud.
+            "private": True,
+            "text": "This one is her." if self.is_real(match, owner) else "A shadow.",
+        }
 
 
 class WeaponMaster:
@@ -3758,13 +4133,13 @@ ROSTER = [
         key="berserker",
         name="狂战士",
         name_en="berserker",
-        max_hp=22,
+        max_hp=20,
         atk=4,
         move=1,
         max_ap=0,
         attack={"mode": CELL, "cells": 2, "range": 2},
         passives=[BattleFury],
-        blurb="Wounded and dangerous — +2 attack and +1 range at 11 HP or below.",
+        blurb="Wounded and dangerous — +2 attack and +1 move at 11 HP or below.",
     ),
     HeroDef(
         key="fairy",
@@ -3832,6 +4207,7 @@ ROSTER = [
         atk=3,
         move=1,
         max_ap=4,
+        start_ap=1,        # so its first turn opens on 2, and can ward at once
         attack={"mode": CELL, "cells": 2, "range": 3},
         abilities=[Bless()],
         blurb="Wards one hero at a time against a single blow, and quickens them while it holds.",
@@ -4130,7 +4506,7 @@ ROSTER = [
         key="painter",
         name="画师",
         name_en="painter",
-        max_hp=18,
+        max_hp=17,
         atk=1,
         move=1,
         max_ap=0,
@@ -4214,6 +4590,33 @@ ROSTER = [
         squad=[SNAKE_HEAD, SNAKE_TAIL],
         passives=[SerpentBody],
         blurb="One creature on two squares — a poisoning bite up close, and a tail that reaches.",
+    ),
+    HeroDef(
+        key="red_gloves",
+        name="戴红手套的女子",
+        name_en="redGloves",
+        # The card's numbers are the woman's own: one 10-point life, however many
+        # places she is standing in. The bodies below carry the same, since each of
+        # them might be her.
+        max_hp=10,
+        atk=3,
+        move=0,
+        max_ap=0,
+        attack={"mode": CELL, "cells": 2, "range": 2},
+        squad=[RED_SHADOW, RED_SHADOW],
+        blurb="Two bodies for one slot, and only she knows which of them is her.",
+    ),
+    HeroDef(
+        key=RED_SHADOW,
+        name="红手套",
+        name_en="redGlove",
+        max_hp=10,
+        atk=3,
+        move=0,            # no body of hers ever walks: what looks like a move is a cast
+        max_ap=0,
+        attack={"mode": CELL, "cells": 2, "range": 2},
+        passives=[RedGloves],
+        blurb="A woman in red gloves — or a picture of one.",
     ),
     HeroDef(
         key="goblin_gang",
@@ -4436,7 +4839,7 @@ BY_KEY[DUMMY.key] = DUMMY
 # whenever you add heroes; --test fills the rest of your side with dummies.
 # Whoever is newest goes here — --test always deploys the hero just added, so it
 # can be played immediately. Up to two; the rest of the side is padded with dummies.
-TEST_HEROES = ["siren", "blood_guard"]
+TEST_HEROES = ["red_gloves", "siren"]
 
 
 

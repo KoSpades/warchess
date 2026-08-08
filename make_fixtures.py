@@ -420,6 +420,30 @@ def build():
           (unit(m, LEFT, "snake_tail"), (2, 5)))
     snap("linked_boxed", m, select=unit(m, LEFT, "snake_head").id)
 
+    # --- 戴红手套的女子: several bodies that read alike, one of them her --------
+    # Picked out of the roster like anybody else, and then her turn is three picks
+    # made on the board — which body she is, which reaches out and where, which
+    # fires — before the attack is even aimed. One state is enough: the client
+    # walks the sequence itself, so the tests drive it from here.
+    m = Match()
+    m.assign_draft(["red_gloves", "cannoneer"], ["gatekeeper", "dummy"])
+    for k, c in (("red_shadow", (3, 3)), ("red_shadow", (3, 2)), ("cannoneer", (2, 2))):
+        assert m.place(LEFT, k, c) is None, (k, c)
+    for k, c in (("gatekeeper", (7, 3)), ("dummy", (7, 1))):
+        assert m.place(RIGHT, k, c) is None, (k, c)
+    m.lock_force(LEFT); m.lock_force(RIGHT)
+    shade = sorted((e for e in m.living(LEFT) if e.key == "red_shadow"),
+                   key=lambda e: e.id)
+    stage(m, (unit(m, RIGHT, "gatekeeper"), (5, 2)))   # in reach of one body only
+    snap("red_gloves", m, select=shade[0].id)
+    out["red_gloves_foe"] = view.state_for(m, RIGHT)
+    # ...and the other seat's turn, with a net it could throw over two of her at
+    # once: which body it strikes is the guess the whole hero is built on.
+    m.deselect(LEFT)
+    m.select_hero(RIGHT, unit(m, RIGHT, "gatekeeper").id)
+    stage(m, (unit(m, RIGHT, "gatekeeper"), (4, 3)))
+    out["red_gloves_aimed"] = view.state_for(m, RIGHT)
+
     # --- a round-start prompt raised by a hero, answered by its own side -------
     # 万磁王 offers a pull before either seat picks a turn: confirm, then who,
     # then where. Nothing else in the fixtures exercises a hero-owned confirm.

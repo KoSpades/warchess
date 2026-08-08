@@ -140,7 +140,7 @@ def unit_payload(m, e, live, viewer=None):
     # Only for your own side: what the enemy will charge to is not yours to read.
     if viewer is not None and viewer == e.side and live:
         ap = m.turn_ap(e)
-    return {
+    out = {
         "id": e.id,
         "side": e.side,
         "key": e.key,
@@ -167,6 +167,16 @@ def unit_payload(m, e, live, viewer=None):
         # False = it never spends one of your exchanges (世界树, a sealed 土著).
         "acts": e.flags["takes_turns"],
     }
+    # A hero may have to correct what is said about one of its bodies before the
+    # other seat reads it. 戴红手套的女子 stands in several at once and exactly one
+    # of them carries her turn — true, and none of the other side's business: three
+    # bodies that must be indistinguishable cannot have one of them wearing "still
+    # to act". Given the viewer, so a hero hides only from the seat it must.
+    for p in e.passives:
+        fn = getattr(p, "unit_view", None)
+        if fn:
+            fn(m, e, out, viewer)
+    return out
 
 
 def state_for(m, side):
@@ -206,6 +216,11 @@ def state_for(m, side):
         "units": units,
         "log": [l for l in m.log if l.get("side") in (None, side)][-60:],
         "reveal": m.last_reveal,
+        # Every exchange that has settled since the seat last looked, oldest first.
+        # A round can settle more than one, and showing only the newest lost the
+        # rest — including, for a side with a single hero left, the only exchange
+        # its own hero was in.
+        "reveals": m.reveals[-6:],
     }
 
     if m.phase == M.DRAFT:
@@ -293,6 +308,9 @@ def state_for(m, side):
         if eid is not None and m.commits[side] is None:
             e = m.entity(eid)
             c["legal_moves"] = m.legal_moves(e)
+            # For a hero whose move is not a move (戴红手套的女子 casts instead of
+            # walking), what the panel should call it. None for everyone else.
+            c["move_label"] = m.move_label(e)
             c["actions"] = m.action_menu(e)
             c["enemies"] = [x.id for x in m.living(foe) if x.flags["targetable"]]
             c["ap"] = e.ap

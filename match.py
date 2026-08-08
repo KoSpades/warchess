@@ -107,7 +107,17 @@ class Match:
         # so the ward dies with its caster without a death hook.
         self.ability_lock = {LEFT: None, RIGHT: None}
         self.snapshot = {}
+        # Per-side, per-hero scratch belonging to no one body (see `cloud_state`).
+        # Never cleared between exchanges: it is the hero's own memory, not the
+        # turn's, and 戴红手套的女子 keeps hers across every body she has worn.
+        self.side_state = {}
         self.last_reveal = None
+        # Every exchange's reveal, not just the newest. A round can settle several
+        # in a row — one side with two heroes left to act and the other with none
+        # resolves twice with nothing in between — and a single slot meant the
+        # first was overwritten before any seat had seen it. Kept short: this is a
+        # queue for the pause screen to work through, not a history.
+        self.reveals = []
 
         # Kicks off draft (pvp/self) or auto-setup (test); must come last so all
         # state above exists before an opening ability or first exchange runs.
@@ -1025,6 +1035,26 @@ class Match:
             return None
         return "Order already sealed."
 
+    def move_label(self, e):
+        """What this hero's "movement" should be called, for a hero whose movement
+        is not movement. 戴红手套的女子 never walks: the squares her order offers are
+        where her next shadow appears, and a panel that calls that moving is
+        describing something that does not happen. One hook, so the wording lives
+        with the hero that needs it rather than as a name test in the client."""
+        for p in e.passives:
+            fn = getattr(p, "move_label", None)
+            got = fn(self, e) if fn else None
+            if got:
+                return got
+        return None
+
+    def cloud_state(self, side, key):
+        """A scratch dict belonging to one side's copy of one hero, rather than to
+        any single body of it. 戴红手套的女子 needs somewhere to keep which body she
+        is standing in and whether she has been found — facts that have to outlive
+        every one of the bodies that could be holding them."""
+        return self.side_state.setdefault((side, key), {})
+
     def gang_of(self, e):
         """The squad key this unit belongs to, or None for a lone hero."""
         return e.hero.gang if e is not None else None
@@ -1319,41 +1349,81 @@ class Match:
         out = []
         for p in e.passives:
             fn = getattr(p, "turn_choice", None)
-            ch = fn(self, e) if fn else None
-            if ch and ch.get("options"):
-                out.append(ch)
+            got = fn(self, e) if fn else None
+            # A passive may raise several at once, and in the order it wants them
+            # answered (戴红手套的女子 settles which body she is, then which casts,
+            # then which fires) — a list is as good as one.
+            for ch in (got if isinstance(got, list) else [got]):
+                if ch and ch.get("options"):
+                    out.append(ch)
         return out
 
-    def validate_choices(self, e, payload):
-        picks = payload.get("choices") or {}
-        for ch in self.turn_choices(e):
-            got = picks.get(ch["key"])
-            if ch.get("optional") and got in (None, ""):
-                continue          # a sale nobody wanted to make
-            if got not in ch["options"]:
-                return f"{ch['name']}: pick one."
-        return None
+    def choice_ok(self, ch, got):
+        """Is this a legal answer to that pick? Most name a hero, so the answer is
+        one of the ids on offer. A pick that names a hero *and* a square (her cast:
+        which body reaches out, and where the new one stands) carries both, and the
+        square is checked against the ones that body in particular can reach —
+        every one of them is on the wire, so the client and the validator agree."""
+        if ch.get("kind") == "unit_then_cell":
+            if not isinstance(got, dict):
+                return False
+            who = got.get("unit")
+            if who not in ch["options"]:
+                return False
+            where = got.get("cell")
+            return isinstance(where, (list, tuple)) and \
+                list(where) in (ch.get("cells") or {}).get(str(who), [])
+        if ch.get("kind") == "cell":
+            return isinstance(got, (list, tuple)) and list(got) in ch["options"]
+        return got in ch["options"]
 
-    def apply_choices(self, e, payload):
-        """Settle this unit's free picks. Run as its turn *begins* — before the
-        move and the action are judged — because that is when they happen: the
-        fee 军火商人 charges for a weapon is AP in its own pocket for the rest of
-        the same turn, and its shot may burn it.
+    def settle_choices(self, e, payload):
+        """Judge and settle this unit's free picks, one at a time and in the order
+        the hero asked for them.
 
-        Once per turn, whatever happens next. A commit refused for a bad order
-        leaves the picks made, exactly the way it leaves the turn started."""
+        One at a time because a pick can change what the next one may answer:
+        戴红手套的女子 may fire with the body she has just cast, and that body did
+        not exist when the first question was put. Judging them all against the
+        board as it was would refuse an answer that is legal by the time it is
+        used.
+
+        They are settled as the turn *begins* — before the move and the action are
+        judged — because that is when they happen: the fee 军火商人 charges for a
+        weapon is AP in its own pocket for the rest of the same turn, and its shot
+        may burn it. Once per turn, whatever happens next: a commit refused for a
+        bad order leaves the picks made, the way it leaves the turn started."""
         if e.vars.get("choices_exchange") == self.exchange:
-            return
+            # Already made this turn. Not re-judged either: the board they were
+            # judged against is the one they have since changed — a square she has
+            # just put a body on is no longer a square she may cast to — so asking
+            # again would refuse an answer that was good when it was given, and a
+            # commit refused for a bad *order* could never be retried.
+            return None
         picks = (payload or {}).get("choices") or {}
-        e.vars["choices_exchange"] = self.exchange
-        for ch in self.turn_choices(e):
-            target = picks.get(ch["key"])
-            if target not in ch["options"]:
+        seen, applied = set(), False
+        while True:
+            todo = [c for c in self.turn_choices(e) if c["key"] not in seen]
+            if not todo:
+                break
+            ch = todo[0]
+            seen.add(ch["key"])
+            got = picks.get(ch["key"])
+            if ch.get("optional") and got in (None, "", {}):
                 continue
+            if not self.choice_ok(ch, got):
+                # Nothing settled yet, so nothing is spent: the seat may answer
+                # again. Once one has been applied the whole set is spent, or a
+                # retry would make the same pick twice.
+                if applied:
+                    e.vars["choices_exchange"] = self.exchange
+                return f"{ch['name']}: pick one."
             for p in e.passives:
                 fn = getattr(p, "apply_choice", None)
                 if fn:
-                    fn(self, e, ch["key"], target)
+                    fn(self, e, ch["key"], got)
+            applied = True
+        e.vars["choices_exchange"] = self.exchange
+        return None
 
     def _build_order(self, e, payload, pending=None):
         """Validate one unit's move + action. Returns (order, error). `pending` is
@@ -1392,10 +1462,9 @@ class Match:
         # The free picks are settled first, then the action is judged against
         # what they leave behind. 军火商人 collects its fee as its turn opens, so
         # by the time its shot is priced the fee is its own to feed into it.
-        err = self.validate_choices(e, payload)
+        err = self.settle_choices(e, payload)
         if err:
             return None, err
-        self.apply_choices(e, payload)
         err = self.validate_action(e, dest, action)
         if err:
             return None, err
@@ -1500,6 +1569,29 @@ class Match:
             t["options"] = ab.unit_options(self, e, origin)
         return t
 
+    def firing_body(self, e):
+        """Which body actually makes this hero's attack. For everyone it is the hero
+        you ordered; 戴红手套的女子 fires with whichever of her bodies she named,
+        while she stands somewhere else entirely, which is the whole point of her.
+
+        The *body*, not just its square: a cell attack re-derives its pattern from
+        where its attacker is standing when the shot goes off, so an origin on one
+        body and an attacker on another would slide the whole net across the board."""
+        for p in e.passives:
+            fn = getattr(p, "attack_body", None)
+            got = fn(self, e) if fn else None
+            if got is not None:
+                return got
+        return e
+
+    def firing_origin(self, e, dest=None):
+        """The square this hero's attack goes off from. Where it will be standing
+        when the exchange resolves, unless it is firing with another body."""
+        who = self.firing_body(e)
+        if who is not e and who.cells:
+            return who.cell
+        return tuple(dest) if dest else e.cell
+
     def validate_action(self, e, dest, action):
         key = action.get("key", "none")
         if key == "none":
@@ -1510,7 +1602,7 @@ class Match:
             mode = ATK.mode_for(e)
             if mode is None:
                 return f"{e.name} has no attack."
-            return mode.validate(self, e, dest, action)
+            return mode.validate(self, e, self.firing_origin(e, dest), action)
         if key.startswith("ability:"):
             abkey = key.split(":", 1)[1]
             ab = next((a for a in e.abilities if a.key == abkey), None)
@@ -1673,7 +1765,10 @@ class Match:
                 if o["destination"] is None:
                     continue        # nothing on the board to move (鬼魂 while bodiless)
                 movers.append((side, a, tuple(o["destination"])))
+        reveal["seq"] = self.exchange_seq = getattr(self, "exchange_seq", 0) + 1
         self.last_reveal = reveal
+        # The same object, so the hits filled in during resolution land in both.
+        self.reveals = (self.reveals + [reveal])[-8:]
 
         self.apply_movement(movers)
         # An ability may want the player to say where it lands, now that everyone
@@ -1828,10 +1923,14 @@ class Match:
         key = action.get("key", "none")
         # None only for a unit with no square at all (鬼魂 while bodiless); its
         # actions are targeted, never positional, so the origin is unused.
-        intended = tuple(commit["destination"]) if commit["destination"] else e.cell
+        intended = self.firing_origin(
+            e, tuple(commit["destination"]) if commit["destination"] else None)
         if key == "none":
             return [ACT.NullAction()]     # no weapon drawn, so no stance either
         if key == "attack":
+            # The shot belongs to the body that makes it: it is the one whose
+            # pattern is re-derived if it gets shoved, and the one the log names.
+            e = self.firing_body(e)
             mode = ATK.mode_for(e)
             spend = int(action.get("spend") or 0)
             if spend and e.attack_spec.get("fuel"):
@@ -1960,6 +2059,16 @@ class Match:
                     self.landed.add(inst.actor.id)
             for side, inst, ev in batch:
                 if ev.cancelled:
+                    # Turned aside is an outcome too, and the pause screen said
+                    # nothing about it: a blow that a ward ate read as "no damage",
+                    # with no way to tell it from a shot that missed. The number is
+                    # what would have landed — every reduction has already had its
+                    # say by the time anything cancels.
+                    if self.last_reveal and self.last_reveal.get(side):
+                        self.last_reveal[side].setdefault("hits", []).append(
+                            {"target": ev.target.name, "amount": ev.amount,
+                             "blocked": ev.cancel_reason or "turned aside"}
+                        )
                     self.log_line(
                         f"{inst.label}: {self.label(ev.target)} blocks it ({ev.cancel_reason})."
                     )

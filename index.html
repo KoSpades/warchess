@@ -193,6 +193,17 @@ main{display:grid;grid-template-columns:minmax(0,1fr) var(--rpanel);
   50%{box-shadow:0 0 0 2px var(--oxide),0 0 16px rgba(180,74,52,.75)}}
 .unit.sel{box-shadow:0 0 0 2px var(--verdigris),0 0 14px rgba(87,160,142,.3)}
 .unit.pending{opacity:.62;border-style:dashed}
+/* What a staged pick has settled, written on the square it was clicked. Sized to
+   be read at a glance over whatever sprite is standing there — the hero these
+   belong to (戴红手套的女子) has bodies that are identical by design, so the board
+   is the only place her decisions are legible at all. Several can land on one
+   body, so the chip grows with them rather than clipping. */
+.pickmark{position:absolute;top:2px;left:2px;z-index:3;
+  min-width:20px;height:20px;padding:0 3px;border-radius:3px;
+  background:rgba(9,13,17,.88);border:1px solid var(--verdigris);color:var(--verdigris);
+  font-size:14px;font-weight:700;line-height:1;letter-spacing:-.02em;
+  display:flex;align-items:center;justify-content:center;
+  box-shadow:0 1px 4px rgba(0,0,0,.5)}
 .cell.reachL{box-shadow:inset 0 0 0 2px rgba(87,160,142,.55)}
 .cell.reachR{box-shadow:inset 0 0 0 2px rgba(201,154,62,.55)}
 .unit{cursor:default}
@@ -328,6 +339,12 @@ body.placing .cell.zone{border-style:dashed;border-color:var(--verdigris)}
 .rv-hit{font-size:25px;line-height:1.5;color:var(--text)}
 .rv-hit b{color:var(--oxide);font-weight:700}
 .rv-none{color:var(--dim);font-size:21px}
+/* A blow that was turned aside: the number still reads, dimmed, with what stopped
+   it beside it — "no damage" alone could not tell a ward from a miss. */
+.rv-blocked{color:var(--dim)}
+.rv-blocked b{color:var(--dim);text-decoration:line-through}
+.rv-why{display:block;font-size:16px;color:var(--verdigris);letter-spacing:.04em;
+  text-transform:uppercase}
 .rv-hint{text-align:center;font-family:var(--mono);font-size:13px;letter-spacing:.18em;
   text-transform:uppercase;color:var(--dimmer);margin-top:21px}
 

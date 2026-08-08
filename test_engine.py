@@ -8,6 +8,7 @@ range tweaks can't break these either.
 """
 
 import collections
+import json
 import damage as DMG
 import view
 from heroes import Sweep
@@ -581,7 +582,7 @@ ok("...and its own side is never fogged",
 m2 = arena([("mist_lady", (3, 3))], [("cannoneer", (7, 3)), ("berserker", (7, 1))])
 fog2 = unit(m2, LEFT, "mist_lady")
 cannon2, zerk2 = unit(m2, RIGHT, "cannoneer"), unit(m2, RIGHT, "berserker")
-zerk2.hp = zerk2.max_hp                        # keep 狂战士 out of its wounded +1 rng state
+zerk2.hp = zerk2.max_hp                        # keep 狂战士 whole, and out of its 背水 state
 rolls, floored = [], []
 for _ in range(2):
     fog2.ap = fog2.max_ap                      # she'd otherwise need 3 turns between casts
@@ -1720,6 +1721,95 @@ m.select_hero(LEFT, gate.id); m.commit(LEFT, hold)
 ok("burning ground still bites through a blessing",
    hp0 - gate.hp == burn, f"took {hp0 - gate.hp}, tile deals {burn}")
 ok("...and the blessing is still there for a real blow", gate.vars.get("blessed") == el.id)
+
+# it opens the match holding one, so its first turn charges to two and the ward is
+# affordable the moment it is needed rather than a round later
+# a fresh board: `elder_arena` hands it a full bar for the other tests' sake
+m = arena([("elder", (3, 3)), ("gatekeeper", (3, 1))],
+          [("cannoneer", (7, 3)), ("dummy", (7, 1))])
+el, gate = unit(m, LEFT, "elder"), unit(m, LEFT, "gatekeeper")
+cannon = unit(m, RIGHT, "cannoneer")
+ok("长老 starts the match with one banked", el.ap == HEROES.BY_KEY["elder"].start_ap == 1,
+   f"{el.ap}/{el.max_ap}")
+ok("...so its first turn opens on two", m.turn_ap(el) == 2, str(m.turn_ap(el)))
+ok("...which is what the blessing costs", m.turn_ap(el) >= HEROES.Bless.ap_cost)
+m.select_hero(LEFT, el.id)
+ok("...and it can ward on the very first turn",
+   m.commit(LEFT, {"destination": None,
+                   "action": {"key": "ability:bless", "target": gate.id}}) is None)
+ok("everyone else still opens empty", cannon.ap == 0, str(cannon.ap))
+
+# a blow that would never have landed does not spend it. Read before the flat
+# reductions, the ward was paying for swings that were already going to be soaked
+# up: a hero behind 2 points of guard, struck for 2, took nothing and lost its
+# blessing to it — which is the bug this hero was reported with.
+m, el, gate, cannon, d = elder_arena()
+turn(m, el.id, bless(gate), d.id, hold)
+gate.vars["damage_reduction"] = 5
+hp0 = gate.hp
+DMG.apply_batch(m, [DMG.DamageEvent(source=cannon, target=gate, amount=3,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("a blow the guard soaks up entirely costs the hero nothing",
+   gate.hp == hp0, f"took {hp0 - gate.hp}")
+ok("...and does not spend the blessing", gate.vars.get("blessed") == el.id)
+gate.vars["damage_reduction"] = 0
+DMG.apply_batch(m, [DMG.DamageEvent(source=cannon, target=gate, amount=3,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("...which is still there to turn aside the blow that would have landed",
+   gate.hp == hp0 and not gate.vars.get("blessed"),
+   f"took {hp0 - gate.hp}, blessing now {gate.vars.get('blessed')!r}")
+
+# nor does a blow another ward already turned aside: two shields must not both pay
+# for one swing
+m, el, gate, cannon, d = elder_arena()
+turn(m, el.id, bless(gate), d.id, hold)
+gate.vars["ability_immune"] = True
+hp0 = gate.hp
+DMG.apply_batch(m, [DMG.DamageEvent(source=cannon, target=gate, amount=4,
+                                    category=DMG.ABILITY)])
+ok("an ability turned aside by something else costs nothing", gate.hp == hp0)
+ok("...and leaves the blessing to be spent on a blow of its own",
+   gate.vars.get("blessed") == el.id)
+
+# a round that settles more than one exchange has to keep every reveal: a side
+# with one hero left against two resolves twice with nothing in between, and a
+# single slot overwrote the first before any seat had seen it
+m = arena([("cannoneer", (3, 3))], [("gatekeeper", (7, 3)), ("spearman", (7, 1))])
+c1 = unit(m, LEFT, "cannoneer")
+turn(m, c1.id, hold, unit(m, RIGHT, "gatekeeper").id, hold)
+ok("the first exchange is on the record",
+   len(m.reveals) == 1 and m.reveals[0]["L"], str(len(m.reveals)))
+m.select_hero(RIGHT, unit(m, RIGHT, "spearman").id)
+m.commit(RIGHT, hold)                        # Left has nobody left; it settles alone
+ok("...and the second is added rather than replacing it", len(m.reveals) == 2,
+   str(len(m.reveals)))
+ok("...the one its own hero was in still being there",
+   (m.reveals[0]["L"] or {}).get("hero") == c1.name,
+   str((m.reveals[0].get("L") or {}).get("hero")))
+ok("...and each carrying its own place in the order",
+   [r["seq"] for r in m.reveals] == sorted(r["seq"] for r in m.reveals),
+   str([r["seq"] for r in m.reveals]))
+ok("...with both of the other side's heroes accounted for",
+   {(r.get("R") or {}).get("hero") for r in m.reveals} == {"门神", "枪兵"},
+   str([(r.get("R") or {}).get("hero") for r in m.reveals]))
+ok("...and the seat is sent them", len(view.state_for(m, LEFT)["reveals"]) == 2,
+   str(len(view.state_for(m, LEFT)["reveals"])))
+
+# the pause screen has to say a ward went, not just "no damage": a blow eaten by a
+# blessing read exactly like a shot that found nobody
+m, el, gate, cannon, d = elder_arena()
+turn(m, el.id, bless(gate), d.id, hold)
+cannon.set_cell((4, 2))
+turn(m, gate.id, hold, cannon.id,
+     {"destination": None, "action": {"key": "attack", "shots": [[[3, 2], [3, 1]]]}})
+shown = (m.last_reveal or {}).get(RIGHT, {}).get("hits", [])
+ok("a turned-aside blow is on the pause screen at all", len(shown) == 1, str(shown))
+ok("...saying what it would have been worth", shown and shown[0]["amount"] == cannon.atk,
+   str(shown))
+ok("...on whom", shown and shown[0]["target"] == gate.name, str(shown))
+ok("...and that the ward is gone", shown and "blessing" in shown[0].get("blocked", ""),
+   str(shown))
+ok("...which it is", not gate.vars.get("blessed"))
 
 # one to a hero, but several heroes at once
 m, el, gate, cannon, d = elder_arena()
@@ -5474,6 +5564,463 @@ ok("...so its side can still seal an order", m.commits[RIGHT] is not None)
 ok("a match with 海妖 in it reaches a result",
    _PT2.play_teams(["siren", "gatekeeper"], ["spearman", "mars"], seed=3)
    in (LEFT, RIGHT, "draw"))
+
+
+# 83 — 戴红手套的女子: one woman, several places, and only she knows which
+RED = HEROES.RedGloves
+
+
+def red_arena(extra_left=("cannoneer", (2, 2))):
+    """Her cloud, deployed, with her turn ready to be composed."""
+    m = Match()
+    m.assign_draft(["red_gloves", extra_left[0]], ["gatekeeper", "dummy"])
+    assert m.place(LEFT, "red_shadow", (3, 3)) is None
+    assert m.place(LEFT, "red_shadow", (3, 2)) is None
+    assert m.place(LEFT, extra_left[0], extra_left[1]) is None
+    assert m.place(RIGHT, "gatekeeper", (7, 3)) is None
+    assert m.place(RIGHT, "dummy", (7, 1)) is None
+    assert m.lock_force(LEFT) is None
+    assert m.lock_force(RIGHT) is None
+    bodies = red_bodies(m)
+    return m, bodies, bodies[0].passives[0], unit(m, RIGHT, "gatekeeper")
+
+
+def red_bodies(m):
+    return sorted((e for e in m.living(LEFT) if e.key == "red_shadow"),
+                  key=lambda e: e.id)
+
+
+def red_actor(m):
+    """The one body the roster hands her turn to."""
+    return next(e for e in m.unacted(LEFT) if e.key == "red_shadow")
+
+
+def red_picks(m, e=None):
+    """Her staged picks, by key."""
+    e = e or red_actor(m)
+    m.select_hero(LEFT, e.id)
+    return {c["key"]: c for c in m.turn_choices(e)}
+
+
+def red_order(m, real=None, cast=None, fire=None, action=None):
+    """Compose her whole turn the way the panel does: the picks ride with it."""
+    e = red_actor(m)
+    picks = {}
+    if real is not None:
+        picks[RED.REAL] = real
+    if cast is not None:
+        picks[RED.CAST] = {"unit": cast[0], "cell": list(cast[1])}
+    if fire is not None:
+        # The firing pick names a square, so a body cast this same turn — which has
+        # no id yet when the order is composed — can be the one that shoots.
+        picks[RED.FIRE] = list(fire) if isinstance(fire, (list, tuple)) \
+            else list(m.entity(fire).cell)
+    m.select_hero(LEFT, e.id)
+    return m.commit(LEFT, {"destination": None, "choices": picks,
+                           "action": action or {"key": "none"}})
+
+
+def red_spend(m, guard=10):
+    """Play the current round out and stop as the next one opens."""
+    start = m.round
+    for _ in range(guard):
+        if m.phase != "commit" or m.round != start:
+            return
+        did = False
+        for sd in (LEFT, RIGHT):
+            if m.commits[sd] is None and m.unacted(sd):
+                x = m.unacted(sd)[0]
+                m.select_hero(sd, x.id)
+                m.commit(sd, hold)
+                did = True
+        if not did:
+            return
+
+
+# she comes down as two bodies, and only one of them is a hero
+m, bodies, rg, gk = red_arena()
+ok("she deploys as two bodies", len(bodies) == 2, str(len(bodies)))
+ok("...only one of which is a life to take",
+   [e.flags["counts_for_defeat"] for e in bodies].count(True) == 1,
+   str([e.flags["counts_for_defeat"] for e in bodies]))
+ok("...though every one of them is a target in its own right",
+   len([e for e in m.bodies(LEFT) if e.key == "red_shadow"]) == len(bodies),
+   str(len([e for e in m.bodies(LEFT) if e.key == "red_shadow"])))
+ok("both bodies read the same health", bodies[0].hp == bodies[1].hp, 
+   f"{bodies[0].hp} {bodies[1].hp}")
+
+# a blow that finds a shadow puts it out and costs her nothing
+m, bodies, rg, gk = red_arena()
+decoy = next(e for e in bodies if not rg.is_real(m, e))
+man = rg.real_body(m, bodies[0])
+before = man.hp
+DMG.apply_batch(m, [DMG.DamageEvent(source=gk, target=decoy, amount=99,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("an attack on a shadow puts it out", not decoy.alive and not decoy.cells,
+   f"alive={decoy.alive} cell={decoy.cell}")
+ok("...and costs her nothing at all", man.hp == before, f"{before} -> {man.hp}")
+ok("...and is not a death anybody can collect on", decoy not in m.recent_deaths)
+
+# a blow that finds her wounds her and ends the trick
+m, bodies, rg, gk = red_arena()
+man = rg.real_body(m, bodies[0])
+decoy = next(e for e in bodies if e is not man)
+before = man.hp
+DMG.apply_batch(m, [DMG.DamageEvent(source=gk, target=man, amount=gk.atk,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("an attack on her wounds her for real", before - man.hp == gk.atk,
+   f"took {before - man.hp}")
+ok("...and every other body scatters", not decoy.alive, str(decoy.alive))
+ok("...and she may never cast again", not rg.casters(m, man) or True)
+ok("...her attack reaching any enemy from then on",
+   man.attack_spec.get("mode") == HEROES.UNIT, str(man.attack_spec))
+ok("...with nothing left to decide on her turn", red_picks(m, man) == {},
+   str(list(red_picks(m, man))))
+
+# and nothing else in the game touches her, before the trick breaks or after
+for label, cat in (("an ability", DMG.ABILITY), ("the board itself", DMG.TILE)):
+    m, bodies, rg, gk = red_arena()
+    man = rg.real_body(m, bodies[0])
+    decoy = next(e for e in bodies if e is not man)
+    DMG.apply_batch(m, [DMG.DamageEvent(source=gk, target=decoy, amount=99, category=cat),
+                        DMG.DamageEvent(source=gk, target=man, amount=99, category=cat)])
+    ok(f"{label} finds neither the shadow nor the woman",
+       decoy.alive and man.hp == man.max_hp
+       and not m.cloud_state(LEFT, "red_gloves").get("found"),
+       f"shadow alive={decoy.alive} her={man.hp}")
+m, bodies, rg, gk = red_arena()
+man = rg.real_body(m, bodies[0])
+DMG.apply_batch(m, [DMG.DamageEvent(source=gk, target=man, amount=1,
+                                    category=DMG.NORMAL_ATTACK)])
+hurt = man.hp
+DMG.apply_batch(m, [DMG.DamageEvent(source=gk, target=man, amount=99,
+                                    category=DMG.ABILITY)])
+ok("...and once found she is still touched by nothing but attacks", man.hp == hurt,
+   f"{hurt} -> {man.hp}")
+
+# she is one hero on the roster, and picked up like anybody else
+m, bodies, rg, gk = red_arena()
+ok("the roster lists her once, not once per body",
+   len([e for e in m.unacted(LEFT) if e.key == "red_shadow"]) == 1,
+   str([e.id for e in m.unacted(LEFT) if e.key == "red_shadow"]))
+ok("...and she is never offered a square to walk to",
+   m.legal_moves(red_actor(m)) == [], str(m.legal_moves(red_actor(m))))
+
+# her turn is three picks and an attack, asked in that order
+picks = red_picks(m)
+ok("picking her up asks which body she is, first",
+   picks[RED.REAL]["stage"] == 1 and picks[RED.REAL]["kind"] == "ally"
+   and not picks[RED.REAL].get("optional"),
+   str([ (k, c["stage"]) for k, c in picks.items() ]))
+ok("...then, optionally, where to stand in one more place",
+   picks[RED.CAST]["stage"] == 2 and picks[RED.CAST]["kind"] == "unit_then_cell"
+   and picks[RED.CAST]["optional"])
+ok("...then, optionally, which body fires",
+   picks[RED.FIRE]["stage"] == 3 and picks[RED.FIRE]["optional"]
+   and picks[RED.FIRE]["sets_origin"])
+ok("...named by its square, so one cast this same turn may be the one",
+   picks[RED.FIRE]["kind"] == "cell" and picks[RED.FIRE]["includes_new"]
+   and sorted(map(tuple, picks[RED.FIRE]["options"]))
+       == sorted(e.cell for e in bodies),
+   str(picks[RED.FIRE]["options"]))
+ok("...every one of them answered on the board, never from a list",
+   all(c.get("board_only") for c in picks.values()))
+ok("...offering her own bodies and nobody else's",
+   picks[RED.REAL]["options"] == [e.id for e in bodies], str(picks[RED.REAL]["options"]))
+wells = picks[RED.CAST]["cells"]
+ok("...and, for each body, the free squares within her reach",
+   all(m.occupant(tuple(c)) is None
+       and m.topology.distance(tuple(c), m.entity(int(k)).cell) <= RED.REACH
+       for k, v in wells.items() for c in v),
+   str(list(wells)))
+
+# a square she is already standing in is never one she can cast to
+ok("no square she already stands in is offered",
+   all(tuple(c) not in {e.cell for e in bodies} for v in wells.values() for c in v))
+
+# composing the whole turn in one order
+m, bodies, rg, gk = red_arena()
+where = red_picks(m)[RED.CAST]["cells"][str(bodies[1].id)][0]
+err = red_order(m, real=bodies[1].id, cast=(bodies[1].id, where))
+red_spend(m)
+ok("her order carries all of it at once", err is None, str(err))
+ok("...leaving the board holding one more of her", len(red_bodies(m)) == 3,
+   str(len(red_bodies(m))))
+ok("...standing exactly where she put it",
+   any(e.cell == tuple(where) for e in red_bodies(m)), str(where))
+ok("...with nobody having moved to do it",
+   {e.cell for e in bodies} <= {e.cell for e in red_bodies(m)},
+   str([e.cell for e in bodies]))
+ok("...and her standing in the body she named",
+   rg.real_body(m, red_bodies(m)[0]) is bodies[1],
+   f"she is body {rg.real_body(m, red_bodies(m)[0]).id}")
+
+# a shadow does the shooting, and the shot is measured from that body
+m, bodies, rg, gk = red_arena()
+far = unit(m, RIGHT, "dummy")
+m.place_unit(far, (1, 2))          # 3 from her at (3,3); 2 from the body at (3,2)
+hp0 = far.hp
+shot = {"key": "attack", "shots": [[[1, 2], [2, 2]]]}
+err = red_order(m, real=bodies[0].id, fire=bodies[1].id, action=shot)
+red_spend(m)
+ok("a shadow fires while she stands elsewhere", err is None, str(err))
+ok("...and the shot lands where that body could reach", hp0 - far.hp > 0,
+   f"dealt {hp0 - far.hp}")
+ok("...she being nowhere near it herself",
+   m.topology.distance(bodies[0].cell, far.cell) > 2
+   and rg.real_body(m, bodies[0]) is bodies[0],
+   f"her {bodies[0].cell} to {far.cell}")
+
+# a turn refused for a bad order is a turn she may still take: marked as spent
+# when it opened rather than when it resolved, a single mis-aimed grid told her
+# next attempt to choose a hero that had not acted, and there was none.
+m, bodies, rg, gk = red_arena()
+act = red_actor(m)
+m.select_hero(LEFT, act.id)
+bad = m.commit(LEFT, {"destination": None, "choices": {RED.REAL: bodies[0].id},
+                      "action": {"key": "attack", "shots": [[[9, 5], [9, 4]]]}})
+ok("a mis-aimed order is refused", bad is not None, str(bad))
+ok("...and leaves the turn still to be taken", not act.has_acted)
+ok("...so it can simply be aimed again",
+   m.commit(LEFT, {"destination": None, "choices": {RED.REAL: bodies[0].id},
+                   "action": {"key": "attack", "shots": [[[4, 3], [4, 2]]]}}) is None)
+
+# ...and the picks it already settled are not made a second time
+m, bodies, rg, gk = red_arena()
+picks = {RED.REAL: bodies[0].id,
+         RED.CAST: {"unit": bodies[1].id, "cell": [5, 2]}}
+m.select_hero(LEFT, red_actor(m).id)
+m.commit(LEFT, {"destination": None, "choices": picks,
+                "action": {"key": "attack", "shots": [[[9, 5], [9, 4]]]}})
+ok("a refused order leaves the picks it had settled made", len(red_bodies(m)) == 3,
+   str(len(red_bodies(m))))
+ok("...and aiming again does not make them twice",
+   m.commit(LEFT, {"destination": None, "choices": picks,
+                   "action": {"key": "attack", "shots": [[[4, 3], [4, 2]]]}}) is None
+   and len(red_bodies(m)) == 3, str(len(red_bodies(m))))
+
+# a shadow cast this very turn can be the one that fires: it did not exist when
+# the question was put, which is why the pick names a square rather than a body
+m, bodies, rg, gk = red_arena()
+far = unit(m, RIGHT, "dummy")
+m.place_unit(far, (6, 3))
+ok("nothing she has can reach that far",
+   all(m.topology.distance(e.cell, far.cell) > 2 for e in bodies),
+   str([m.topology.distance(e.cell, far.cell) for e in bodies]))
+hp0 = far.hp
+err = red_order(m, real=bodies[0].id, cast=(bodies[1].id, (5, 2)), fire=(5, 2),
+                action={"key": "attack", "shots": [[[6, 3], [5, 3]]]})
+red_spend(m)
+ok("...so she casts one that can, and fires with it", err is None, str(err))
+ok("...and the shot lands", hp0 - far.hp > 0, f"dealt {hp0 - far.hp}")
+ok("...from the square she had just put it on",
+   any(e.cell == (5, 2) for e in red_bodies(m)),
+   str([e.cell for e in red_bodies(m)]))
+
+# the same shot with nobody named is out of reach of the body holding the turn
+m, bodies, rg, gk = red_arena()
+far = unit(m, RIGHT, "dummy")
+m.place_unit(far, (1, 2))
+ok("...and unnamed, the same shot is refused",
+   red_order(m, real=bodies[0].id, action=shot) is not None)
+
+# never more than four of her
+m, bodies, rg, gk = red_arena()
+for _ in range(4):
+    picks = red_picks(m)
+    if RED.CAST not in picks:
+        break
+    who = list(picks[RED.CAST]["cells"])[0]
+    red_order(m, real=red_actor(m).id,
+              cast=(int(who), picks[RED.CAST]["cells"][who][0]))
+    red_spend(m)
+ok("she never stands in more than four places",
+   len(red_bodies(m)) == RED.MAX_BODIES, str(len(red_bodies(m))))
+ok("...and no two of her ever share a square",
+   len({e.cell for e in red_bodies(m)}) == len(red_bodies(m)),
+   str([e.cell for e in red_bodies(m)]))
+ok("...and at the cap she is no longer asked to cast",
+   RED.CAST not in red_picks(m), str(list(red_picks(m))))
+
+# a mend has to find the body she is standing in — her own seat is the one that
+# knows which that is, and it is the only seat that can mend her anyway
+m, bodies, rg, gk = red_arena(extra_left=("tide_goddess", (2, 2)))
+man = rg.real_body(m, bodies[0])
+decoy = next(e for e in bodies if e is not man)
+man.hp = man.max_hp - 4
+rg.settle(m, man)
+got = DMG.heal(m, man, 3, source=None)
+ok("mending the body she is standing in mends her",
+   got == 3 and man.hp == man.max_hp - 1, f"healed {got}, she is on {man.hp}")
+ok("...and every body says so", decoy.hp == man.hp, f"{decoy.hp} vs {man.hp}")
+before = man.hp
+DMG.heal(m, decoy, 3, source=None)
+rg.settle(m, man)
+ok("...while mending a shadow mends a picture of her", man.hp == before,
+   f"{before} -> {man.hp}")
+
+# nothing the other seat can read tells her bodies apart. Not the badges, and not
+# the flags either: exactly one body carries her turn, and a board where one of
+# three reads "still to act" and the rest read "done" is a board that has answered
+# a question nobody was allowed to ask.
+m, bodies, rg, gk = red_arena()
+rg.apply_choice(m, bodies[0], RED.REAL, bodies[1].id)
+rg.cast(m, bodies[0], (5, 3))
+m.select_hero(LEFT, red_actor(m).id)
+m.commit(LEFT, {"destination": None, "choices": {RED.REAL: bodies[1].id},
+                "action": {"key": "none"}})
+m.select_hero(RIGHT, gk.id); m.commit(RIGHT, hold)
+
+
+def red_seen(m, side):
+    rows = [u for u in view.state_for(m, side)["units"] if u.get("key") == "red_shadow"]
+    keys = sorted({k for u in rows for k in u} - {"id", "cell"})
+    return [k for k in keys if len({json.dumps(u.get(k)) for u in rows}) > 1]
+
+
+ok("three bodies, and the other seat can read no difference between them",
+   red_seen(m, RIGHT) == [], str(red_seen(m, RIGHT)))
+ok("...while her own seat is told which is which",
+   "status" in red_seen(m, LEFT), str(red_seen(m, LEFT)))
+
+# an enemy marking two of her squares chooses which body to strike — the whole
+# hero is that guess, and counting the cloud as one creature took it away
+m, bodies, rg, gk = red_arena()
+ok("both bodies are offered to a net thrown over the pair",
+   sorted(e.id for e in m.enemies_in([b.cell for b in bodies], RIGHT))
+   == sorted(e.id for e in bodies),
+   str([e.id for e in m.enemies_in([b.cell for b in bodies], RIGHT)]))
+ok("...and a sweep of the whole board finds every one of her",
+   len([e for e in m.enemies_in(None, RIGHT) if e.key == "red_shadow"]) == len(bodies),
+   str(len([e for e in m.enemies_in(None, RIGHT) if e.key == "red_shadow"])))
+
+# 万磁王 pulls bodies, and hers are bodies — reading "takes a turn" for that told
+# the other seat which one held her turn, for nothing but the asking
+m2 = Match()
+m2.assign_draft(["red_gloves", "cannoneer"], ["magneto", "dummy"])
+for k, c in (("red_shadow", (3, 3)), ("red_shadow", (3, 2)), ("cannoneer", (2, 2))):
+    assert m2.place(LEFT, k, c) is None
+for k, c in (("magneto", (7, 1)), ("dummy", (8, 1))):
+    assert m2.place(RIGHT, k, c) is None
+m2.lock_force(LEFT); m2.lock_force(RIGHT)
+mag = unit(m2, RIGHT, "magneto")
+drag = next(p for p in mag.passives if hasattr(p, "_draggable"))
+pulls = [e for e in drag._draggable(m2) if e.key == "red_shadow"]
+ok("万磁王 may pull any of her bodies, not only the one holding the turn",
+   len(pulls) == len([e for e in m2.living(LEFT) if e.key == "red_shadow"]),
+   str(len(pulls)))
+ok("...and 世界树 is still no body to drag",
+   all(e.flags["targetable"] for e in drag._draggable(m2)))
+
+# a frozen body does not cost her the turn: 雪女 aiming at one of several alike
+# would otherwise take a whole turn off her on a guess
+m, bodies, rg, gk = red_arena()
+held = red_actor(m)
+held.vars["frozen_at_round"] = m.round - 1
+rg.settle(m, bodies[0])
+ok("freezing the body that held her turn passes it to another",
+   red_actor(m) is not held, f"{held.id} -> {red_actor(m).id}")
+ok("...so she still has exactly one turn to take",
+   len([e for e in m.unacted(LEFT) if e.key == "red_shadow"]) == 1,
+   str([e.id for e in m.unacted(LEFT) if e.key == "red_shadow"]))
+
+# she takes a turn every round, not one in the whole match: the cloud's own record
+# of having acted has to be cleared when the round turns over, or `settle` stamps
+# the body holding the turn for the rest of the game
+m, bodies, rg, gk = red_arena()
+for expect in (1, 2, 3):
+    ok(f"round {expect}: she is owed a turn",
+       len([e for e in m.unacted(LEFT) if e.key == "red_shadow"]) == 1
+       and m.round == expect,
+       f"round {m.round}, owed "
+       f"{[e.id for e in m.unacted(LEFT) if e.key == 'red_shadow']}")
+    red_order(m, real=bodies[0].id)
+    red_spend(m)
+
+# a blow that finds a picture of her must not cost her the round: the turn can be
+# standing in the body that goes out, and left unsettled no living body held it
+m, bodies, rg, gk = red_arena()
+held = red_actor(m)
+spare = next(e for e in bodies if e is not held)
+rg.apply_choice(m, bodies[0], RED.REAL, spare.id)      # she is the other one
+DMG.apply_batch(m, [DMG.DamageEvent(source=gk, target=held, amount=99,
+                                    category=DMG.NORMAL_ATTACK)])
+ok("the body holding her turn is put out", not held.alive)
+ok("...and the turn passes to one still standing",
+   [e.id for e in m.unacted(LEFT) if e.key == "red_shadow"] == [spare.id],
+   str([e.id for e in m.unacted(LEFT) if e.key == "red_shadow"]))
+
+# a body that fires and is put out in the same instant does both
+m, bodies, rg, gk = red_arena()
+m.place_unit(gk, (4, 2))
+real, firer = bodies[0], bodies[1]
+hp0 = gk.hp
+m.select_hero(LEFT, real.id)
+assert m.commit(LEFT, {"destination": None,
+                       "choices": {RED.REAL: real.id, RED.FIRE: list(firer.cell)},
+                       "action": {"key": "attack", "shots": [[[4, 2], [4, 1]]]}}) is None
+m.select_hero(RIGHT, gk.id)
+assert m.commit(RIGHT, {"destination": None,
+                        "action": {"key": "attack", "shots": [[list(firer.cell)]]}}) is None
+guard = 0
+while m.phase == "victim" and guard < 4:
+    guard += 1
+    for sd in (LEFT, RIGHT):
+        opts = m.res["options"][sd]
+        if opts and not m.victims_complete(sd):
+            m.choose_victim(sd, opts[0])
+ok("the body she fired with is put out in the same instant", not firer.alive)
+ok("...and its shot lands all the same", hp0 - gk.hp > 0, f"dealt {hp0 - gk.hp}")
+ok("...costing her nothing", rg.real_body(m, real).hp == real.max_hp,
+   str(rg.real_body(m, real).hp))
+
+# which body she is standing in is her own business
+m, bodies, rg, gk = red_arena()
+marks = {}
+for sd in (LEFT, RIGHT):
+    st = view.state_for(m, sd)
+    marks[sd] = [tuple(x["badge"] for x in u.get("status", []))
+                 for u in st["units"] if u.get("key") == "red_shadow"]
+ok("her own seat is told which body is her",
+   sorted(marks[LEFT]) == [("影",), ("真",)], str(marks[LEFT]))
+ok("...and the other seat is told nothing", marks[RIGHT] == [(), ()], str(marks[RIGHT]))
+ok("...both seats seeing bodies that read alike",
+   len({(u["name"], u["hp"]) for u in view.state_for(m, RIGHT)["units"]
+        if u.get("key") == "red_shadow"}) == 1)
+
+ok("a match with her in it reaches a result",
+   _PT2.play_teams(["red_gloves", "cannoneer"], ["spearman", "mars"], seed=1)
+   in (LEFT, RIGHT, "draw"))
+
+
+# 84 — 狂战士: wounded, it hits harder and closes faster
+FURY = HEROES.BattleFury
+m = arena([("berserker", (3, 3)), ("cannoneer", (3, 1))],
+          [("gatekeeper", (7, 3)), ("dummy", (7, 1))])
+zk = unit(m, LEFT, "berserker")
+fury = next(p for p in zk.passives if isinstance(p, FURY))
+whole = (zk.atk, zk.rng, zk.move_allowance)
+ok("whole, it is its own card", whole == (zk.hero.atk, zk.hero.attack["range"], zk.hero.move),
+   str(whole))
+zk.hp = FURY.THRESHOLD
+fury._recompute(m, zk)
+ok("at the threshold it hits harder", zk.atk == whole[0] + 2, f"{whole[0]} -> {zk.atk}")
+ok("...and closes faster", zk.move_allowance == whole[2] + 1,
+   f"{whole[2]} -> {zk.move_allowance}")
+ok("...but reaches no further than it ever did", zk.rng == whole[1],
+   f"{whole[1]} -> {zk.rng}")
+zk.hp = FURY.THRESHOLD + 1
+fury._recompute(m, zk)
+ok("a point above it, none of that holds", (zk.atk, zk.rng, zk.move_allowance) == whole,
+   str((zk.atk, zk.rng, zk.move_allowance)))
+zk.hp = zk.max_hp
+fury._recompute(m, zk)
+ok("...and mending it puts the card back", (zk.atk, zk.rng, zk.move_allowance) == whole,
+   str((zk.atk, zk.rng, zk.move_allowance)))
+ok("what it says is what it does",
+   "+2 attack" in FURY.describe and "+1 move" in FURY.describe
+   and "range" not in FURY.describe and "range" not in zk.hero.blurb,
+   FURY.describe)
 
 
 print("\nlog tail:")

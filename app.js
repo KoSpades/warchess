@@ -42,6 +42,8 @@ function confirmOpening(){
   cmd({cmd:'opening', cell});
 }
 let hoverId = null, revealActive = false, shownReveal = "";
+// The exchanges still waiting to be shown, and the newest one already queued.
+let revealQueue = [], revealNow = null, shownSeq = 0;
 // Where the field log was left, and what it last said. The right-hand panel is
 // shared with the hero card now that hovering shows one, so a mouse crossing the
 // board must not scroll away the line somebody is reading.
@@ -83,7 +85,7 @@ async function cmd(body){
   err = res.error || "";
   await poll(true);
 }
-async function resetMatch(){ await api('/api/reset'); draft=null; armed=null; pendingMoves=[]; hoverId=null; revealActive=false; shownReveal=""; logScroll=null; logShown=""; rhsShowing="log"; err=""; await poll(true); }
+async function resetMatch(){ await api('/api/reset'); draft=null; armed=null; pendingMoves=[]; hoverId=null; revealActive=false; shownReveal=""; revealQueue=[]; revealNow=null; shownSeq=0; logScroll=null; logShown=""; rhsShowing="log"; err=""; await poll(true); }
 
 async function loadCodex(){
   try {
@@ -102,15 +104,19 @@ async function poll(force){
   // Drop the pending-move ghost once its order is no longer the live selection
   // (i.e. the exchange resolved and the board updated to the real position).
   if (pendingMoves.length && (S.phase!=='commit' || !S.commit || !S.commit.sealed)) pendingMoves = [];
-  // A fresh, fully-resolved exchange: flash the reveal overlay (both heroes +
-  // what they did) for a beat so the resolution is readable.
-  if (S.reveal && (S.phase==='commit' || S.phase==='gameover')){
-    const key = JSON.stringify(S.reveal);
-    if (key !== shownReveal){
-      shownReveal = key; revealActive = true;
-      clearTimeout(window._revealT);
-      window._revealT = setTimeout(() => { revealActive = false; render(); }, 3600);
+  // Exchanges that have settled since this seat last looked, flashed one at a
+  // time so each is readable. A round can settle several in a row — a side with
+  // two heroes left to act and the other with none resolves twice with nothing in
+  // between — and showing only the newest lost the rest, which for a seat down to
+  // one hero was the only exchange its own hero was in.
+  if (S.phase==='commit' || S.phase==='gameover'){
+    for (const rv of (S.reveals || [])){
+      if (rv.seq != null && rv.seq > shownSeq) revealQueue.push(rv);
     }
+    if (S.reveals && S.reveals.length){
+      shownSeq = Math.max(shownSeq, ...S.reveals.map(r => r.seq || 0));
+    }
+    if (!revealActive) nextReveal();
   }
   if (changed || force) { syncDraft(); render(); }
 }
@@ -137,7 +143,11 @@ function syncDraft(){
 function blankDraft(entity){
   return {entity, destination:null, held:false, tentative:null, actionKey:null, shots:[], shotIndex:0,
           target:null, direction:null, cell:null, amount:null, weapon:null, pair:[],
-          choices:{}, gangOrders:[], pos:{}, posIdx:0, stage:'move'};
+          choices:{}, gangOrders:[], pos:{}, posIdx:0, stage:'move',
+          // Picks a hero answers in sequence before the rest of its order, each
+          // one a click on the board (戴红手套的女子). `pickPart` is the leg of a
+          // pick that wants two answers: a body, then a square for it.
+          pickStep:0, pickPart:0};
 }
 function resetLeg(){
   // Clear one unit's half-built order, keeping the gang's sealed-so-far list.
@@ -255,8 +265,193 @@ function allyAllowed(t, u){
   const only = t && t.options;
   return !!u && u.side === SIDE && u.alive && (!only || only.includes(u.id));
 }
+/* Picks the hero wants answered one at a time, before the rest of its order, in
+ * the order it asked for them. Everything else is the old free-pick panel, made
+ * once the order is otherwise settled. */
+function stagedChoices(){
+  return curChoices().filter(ch => ch.stage).sort((a,b) => a.stage - b.stage);
+}
+// The pick being answered right now, or null once they are all settled.
+function currentPick(){
+  const list = stagedChoices();
+  const i = (draft && draft.pickStep) || 0;
+  return i < list.length ? list[i] : null;
+}
+// A two-legged pick's first answer: the body, before the square it reaches to.
+function pickUnit(ch){
+  const got = (draft.choices||{})[ch.key];
+  return got && typeof got === 'object' ? got.unit : got;
+}
+function pickAnswered(ch){
+  const got = (draft.choices||{})[ch.key];
+  if (got == null) return false;
+  return ch.kind === 'unit_then_cell' ? !!(got.unit != null && got.cell) : true;
+}
+// What an answered pick names, as a square — a body's, or the square itself.
+function pickAt(ch){
+  const got = (draft.choices||{})[ch.key];
+  if (got == null) return null;
+  if (ch.kind === 'cell') return got;
+  const u = unitById(ch.kind === 'unit_then_cell' ? got.unit : got, null);
+  return u ? u.cell : null;
+}
+// Which squares this pick will accept a click on right now.
+function pickCells(ch){
+  if (!ch) return [];
+  if (ch.kind === 'unit_then_cell' && draft.pickPart === 1){
+    return (ch.cells || {})[String(pickUnit(ch))] || [];
+  }
+  if (ch.kind === 'cell'){
+    const out = (ch.options || []).slice();
+    // A square this very order is about to put a body on counts as one of them:
+    // the shadow she is casting can be the one that fires.
+    const cg = ch.includes_new && castGhost();
+    if (cg && !has(out, cg.at)) out.push(cg.at);
+    return out;
+  }
+  // Naming a body: its square is where you click it.
+  return (ch.options || []).map(id => (unitById(id, {}) || {}).cell).filter(Boolean);
+}
+/* Answer the pick in hand with the square that was clicked. */
+function answerPick(ch, cell){
+  draft.choices = draft.choices || {};
+  if (ch.kind === 'unit_then_cell'){
+    if (draft.pickPart === 1){
+      draft.choices[ch.key] = {unit: pickUnit(ch), cell: cell};
+    } else {
+      const u = unitAt(cell);
+      if (!u || !has(ch.options, u.id)) return;
+      // Clicking a candidate tries it on rather than settling it: its reach is
+      // drawn and the next click moves to another, so the two can be compared by
+      // looking. Enter is what locks one in. Naming a different body throws away
+      // the square the last one was reaching to — that was its reach, not this one's.
+      draft.choices[ch.key] = (pickUnit(ch) === u.id) ? null : {unit: u.id, cell: null};
+    }
+    err=""; return render();
+  }
+  if (ch.kind === 'cell'){
+    const was = draft.choices[ch.key];
+    draft.choices[ch.key] = (was && eq(was, cell)) ? null : cell;
+    if (ch.sets_origin) unaim();
+    err=""; return render();
+  }
+  const u = unitAt(cell);
+  if (!u || !has(ch.options, u.id)) return;
+  draft.choices[ch.key] = (draft.choices[ch.key] === u.id) ? null : u.id;
+  if (ch.sets_origin) unaim();
+  err=""; render();
+}
+/* Drop an aim taken from a square this order no longer fires from. The same rule
+ * `changeMove` follows for a hero that walks somewhere else: a grid marked from
+ * over there is not a grid, it is a refusal waiting to happen. */
+function unaim(){
+  const act = currentAction();
+  draft.shots = act && act.targeting.kind === 'cells'
+    ? Array.from({length: act.targeting.shots}, () => []) : [];
+  draft.shotIndex = 0; draft.direction = null; draft.cell = null;
+}
+/* Enter on a staged pick: move on to the next one, or refuse if this one must be
+ * answered. Declining an optional pick is just leaving it unanswered. */
+function advancePick(){
+  const ch = currentPick();
+  if (!ch) return false;
+  // A two-legged pick locks its body in first: Enter on a candidate moves to
+  // where that body reaches, and only the second Enter finishes the pick.
+  if (ch.kind === 'unit_then_cell' && draft.pickPart === 0 && pickUnit(ch) != null){
+    draft.pickPart = 1; err=""; render(); return true;
+  }
+  if (ch.kind === 'unit_then_cell' && draft.pickPart === 1 && pickUnit(ch) != null
+      && !(draft.choices[ch.key]||{}).cell){
+    err = `${ch.name}: choose the square it sets one down on.`;
+    render(); return true;
+  }
+  if (!ch.optional && !pickAnswered(ch)){
+    err = `${ch.name}: choose one on the board.`;
+    render(); return true;
+  }
+  draft.pickStep = (draft.pickStep||0) + 1;
+  draft.pickPart = 0;
+  err=""; render();
+  return true;
+}
+
+/* Status badges a pick in this draft supersedes. A pick may say it answers the
+ * same question a badge does; while it has an answer, the badge is the old one. */
+function pendingBadges(){
+  const out = new Set();
+  if (S.phase !== 'commit' || !draft) return out;
+  for (const ch of stagedChoices()){
+    if (ch.supersedes && (draft.choices||{})[ch.key] != null) out.add(ch.supersedes);
+  }
+  return out;
+}
+
+/* What the board writes on the squares a staged pick has settled. The panel
+ * cannot name her bodies — they all read alike — so what has been decided has to
+ * be legible where it was decided. The glyph comes from the pick itself. */
+function pickMarks(){
+  const out = {};
+  if (S.phase !== 'commit' || !draft) return out;
+  for (const ch of stagedChoices()){
+    const got = (draft.choices||{})[ch.key];
+    if (got == null) continue;
+    if (ch.kind === 'cell'){
+      const at = got.join(',');
+      out[at] = (out[at] || '') + (ch.glyph || '·');
+      continue;
+    }
+    const who = ch.kind === 'unit_then_cell' ? got.unit : got;
+    const u = unitById(who, null);
+    if (!u || !u.cell) continue;
+    // One body can answer more than one pick — she can stand in the body that
+    // fires — so the marks stack rather than the last one winning.
+    const at = u.cell.join(',');
+    out[at] = (out[at] || '') + (ch.glyph || '·');
+  }
+  return out;
+}
+/* A cast that has been aimed but not sealed: the body that will be standing there,
+ * drawn where it will stand. Nobody is vacated — she does not move, the board is
+ * simply about to hold one more of her. */
+function castGhost(){
+  if (S.phase !== 'commit' || !draft) return null;
+  for (const ch of stagedChoices()){
+    if (ch.kind !== 'unit_then_cell') continue;
+    const got = (draft.choices||{})[ch.key];
+    if (got && got.unit != null && got.cell) return {id: got.unit, at: got.cell};
+  }
+  return null;
+}
+
+/* The reach of a body being hovered while a cast is waiting to be told which body
+ * reaches out — a look ahead at the answer, before it is given. */
+function pickPeek(){
+  const ch = currentPick();
+  if (!ch || ch.kind !== 'unit_then_cell' || draft.pickPart !== 0) return null;
+  // The candidate being tried on, if one has been clicked; otherwise whichever is
+  // under the cursor. Either way it is a look at an answer not yet given.
+  const who = pickUnit(ch) != null ? pickUnit(ch)
+            : (hoverId != null && has(ch.options, hoverId) ? hoverId : null);
+  if (who == null) return null;
+  return (ch.cells || {})[String(who)] || null;
+}
+
+// What an answered pick reads as in the panel. Never the hero's name — for the
+// one hero that uses these, every body carries the same one.
+function pickSaid(ch){
+  const got = (draft.choices||{})[ch.key];
+  if (got == null) return 'skipped';
+  if (ch.kind === 'unit_then_cell'){
+    const u = unitById(got.unit, {});
+    return got.cell ? `from ${(u.cell||[]).join(',')} to ${got.cell.join(',')}`
+                    : `from ${(u.cell||[]).join(',')} — square?`;
+  }
+  const at = pickAt(ch);
+  return at ? `the body at ${at.join(',')}` : `#${got}`;
+}
+
 function choicesReady(){
-  return curChoices().every(ch => ch.optional || (draft.choices||{})[ch.key] != null);
+  return curChoices().every(ch => ch.optional || pickAnswered(ch));
 }
 function pickChoice(key, id){
   draft.choices = draft.choices || {};
@@ -356,6 +551,17 @@ function plannedCell(u){
   return (o && o.destination) || u.cell;
 }
 function originCell(){
+  // A pick may say which body actually fires (戴红手套的女子 shoots with a shadow
+  // while she stands elsewhere). Reach is measured from there, or the panel would
+  // offer squares the server is about to refuse.
+  const ch = curChoices().find(c => c.sets_origin);
+  const named = ch && (draft||{}).choices && draft.choices[ch.key];
+  if (named){
+    // A square for a cell pick; a body for one that names a hero.
+    if (ch.kind === 'cell') return named;
+    const u = unitById(named, null);
+    if (u && u.cell) return u.cell;
+  }
   const u = selectedUnit();
   return u ? plannedCell(u) : null;
 }
@@ -392,12 +598,20 @@ function renderBoard(){
     const su = unitById(id);
     if (su && to && !eq(to, su.cell)) previews.push({u:su, to});
   };
+  // ...and one that arrives without anybody leaving: a shadow about to be cast is
+  // a new body, not a body moving, so its origin keeps the one standing on it.
+  const spawnFor = (id, at) => {
+    const su = unitById(id);
+    if (su && at) previews.push({u:su, to:at, keep:true});
+  };
   if (S.phase==='commit' && draft){
     // Both halves of a linked body show where they are going as soon as they are
     // placed — before anything is confirmed and before either has aimed.
     if (isLinked()) for (const g of linkedOrder()) ghostFor(g.entity, placedPos()[g.entity]);
     const su = selectedUnit();
     if (su) ghostFor(su.id, draft.destination || draft.tentative);
+    const cg = castGhost();
+    if (cg) spawnFor(cg.id, cg.at);
     // Goblins already ordered keep their ghost while the rest of the gang is aimed.
     for (const o of gangOrders()) ghostFor(o.entity, o.destination);
     // A picked lane shows where somebody will end up — the charger for 冲撞, the
@@ -413,11 +627,15 @@ function renderBoard(){
     for (const p of pendingMoves) ghostFor(p.id, p.to);
   }
 
+  // Worked out once for the whole board rather than per square: both walk the
+  // staged picks, and a board is 45 squares.
+  const pickMark = pickMarks();
+  const castAt = (castGhost() || {}).at;
   let html = '';
   for (let r=1;r<=rows;r++){
     html += `<div class="boardrow"><div class="board">`;
     for (let c=1;c<=cols;c++){
-      const cell=[c,r], cls=['cell'];
+      const cell=[c,r], cls=['cell'], key = c + ',' + r;
       cls.push(c<=3 ? 'regL' : c>=cols-2 ? 'regR' : 'regM');
       let mark='', extra='';
       if (S.phase==='setup' && has(S.zone,cell)) cls.push('zone');
@@ -476,18 +694,41 @@ function renderBoard(){
       // Just the styling here — `pick` is added below from clickableCell, which is
       // the single answer to "can this square be clicked".
       if (S.phase==='commit' && draft && !draft.destination && !draft.held &&
-          has(curMoves(),cell)) cls.push('legal');
+          !currentPick() && has(curMoves(),cell)) cls.push('legal');
+      // A staged pick's own squares read as a range, the same as a move's: for the
+      // cast that is the reach of the body doing the reaching, and seeing it is
+      // half of choosing where to stand next.
+      if (S.phase==='commit' && draft){
+        const pk = currentPick();
+        const two = pk && pk.kind === 'unit_then_cell';
+        // While bodies are being tried on, what needs drawing is the reach each
+        // one would give — the bodies themselves are units, already plain to see.
+        // Drawn the same way as the settled range, since it is the same question
+        // being answered a moment earlier.
+        const peek = pickPeek();
+        if (peek) { if (has(peek, cell)) cls.push('legal'); }
+        else if (pk && !(two && draft.pickPart === 0) && has(pickCells(pk), cell))
+          cls.push('legal');
+        else if (pk && has(pickCells(pk), cell)) cls.push('pick');
+      }
       if (has(sweepCells,cell)) cls.push('preview');
       if (draft && draft.shots){
         draft.shots.forEach((sh,i)=>{ if (has(sh,cell)){ cls.push('marked'); mark = draft.shots.length>1?(i+1):'x'; }});
       }
       if (draft && draft.cell && eq(draft.cell,cell)) cls.push('marked');
+      // Not the `marked` class: that is the look of a square somebody has aimed a
+      // shot at, and a body she has chosen is the opposite of a target. Its own
+      // badge instead, big enough to read over the sprite standing under it.
+      if (castAt && eq(castAt, cell)) cls.push('dest');
       if (S.phase==='victim' && S.victim && has(S.victim.cells,cell)) cls.push('marked');
       if (clickableCell(cell)) cls.push('pick');
 
       let u = unitAt(cell), ghost = false;
       for (const mp of previews){
-        if (u && u.id===mp.u.id){ u = null; cls.push('movefrom'); }   // vacate + mark origin
+        // A move empties the square it left; a cast does not — `keep` is the
+        // difference between somebody going somewhere and one more of her being
+        // there.
+        if (!mp.keep && u && u.id===mp.u.id){ u = null; cls.push('movefrom'); }
         if (eq(cell, mp.to)){ u = mp.u; ghost = true; }                // ghost at target
       }
       if (u) extra = unitHTML(u, ghost);
@@ -513,6 +754,7 @@ function renderBoard(){
             + (vine?`<span class="vine ${vine.owner}">${vine.great?'葡':vine.spent?'枝':'萄'}</span>`:'')
             + (mk?`<span class="markglyph" title="${mk.name}">${mk.glyph}</span>`:'')
             + (mineTxt?`<span class="bomb">${mineTxt}</span>`:'')
+            + (pickMark[key]?`<span class="pickmark">${pickMark[key]}</span>`:'')
             + `</button>`;
     }
     html += '</div></div>';
@@ -577,9 +819,16 @@ function unitHTML(u, pending){
     : u.max_ap <= 6
       ? `<span class="pips">${Array.from({length:u.max_ap},(_,i)=>`<i class="${i<u.ap?'on':''}"></i>`).join('')}</span>`
       : `<span class="apn">${u.ap}<b>AP</b></span>`;
-  const st = u.status || [];
+  // A badge the server put there can be about to be overtaken by a pick still
+  // being made: 戴红手套的女子 wears 真 on the body she is standing in *now*, while
+  // the panel is asking which body that will be. Two answers to one question on
+  // one board is worse than one stale one, so the pick's own mark carries it and
+  // the badge stands down until the order is sealed.
+  const stale = pendingBadges();
+  const st = (u.status || []).filter(s => !stale.has(s.key));
   for (const s of st) cls.push('st-'+s.key);
-  const badges = st.map(s => `<span class="st" title="${s.label} — ${s.text}">${s.badge}</span>`).join('');
+  const badges = pending ? ''    // a body that does not exist yet wears nothing
+    : st.map(s => `<span class="st" title="${s.label} — ${s.text}">${s.badge}</span>`).join('');
   // Board art sits behind the name and HP; heroes with no sprite render as before.
   const sprite = u.sprite ? `<span class="sp" style="background-image:url('${u.sprite}')"></span>` : '';
   if (u.sprite) cls.push('has-sprite');
@@ -849,6 +1098,10 @@ function clickableCell(cell){
     return false;
   }
   if (S.phase!=='commit' || !draft || S.commit.sealed) return false;
+  // A staged pick owns the board while it is in hand: nothing else is clickable,
+  // so naming one of her own bodies can never be confused with aiming at it.
+  const pick = currentPick();
+  if (pick) return has(pickCells(pick), cell);
   if (isLinked() && draft.stage!=='act'){
     // The squares still to be placed, plus any half already put down — clicking
     // one of those goes back to positioning it. A half whose turn it is has
@@ -893,6 +1146,19 @@ function clickableCell(cell){
 /* ---------------- interaction ---------------- */
 function onCell(c,r){
   const cell=[c,r];
+  // While a staged pick is in hand, every click on the board is its answer.
+  if (S.phase==='commit' && draft){
+    const pick = currentPick();
+    if (pick){
+      if (!has(pickCells(pick), cell)){
+        err = pick.kind==='unit_then_cell' && draft.pickPart===1
+          ? 'Not a square that body can reach.'
+          : 'Not one of the bodies on offer.';
+        return render();
+      }
+      return answerPick(pick, cell);
+    }
+  }
   if (S.phase==='setup'){
     if (S.setup.ready) return;
     const placed = S.setup.placements.find(p=>eq(p.cell,cell));
@@ -1126,6 +1392,9 @@ function finishMove(){
   if (atk) chooseAction('attack'); else render();
 }
 function sealFromKeyboard(){
+  // Enter answers the pick in hand and brings up the next, rather than sealing a
+  // turn whose first decisions have not been made.
+  if (advancePick()) return;
   const act = currentAction();
   if (!act) return;
   if (!choicesReady()){ err = "Make the free pick first."; return render(); }
@@ -1245,6 +1514,12 @@ function onKey(e){
     return;
   }
   if (!commitActive()) return;
+  // Her picks come before the order proper: Enter walks them, and the arrow keys
+  // have nothing to steer until they are done.
+  if (currentPick()){
+    if (e.key==='Enter'){ e.preventDefault(); advancePick(); }
+    return;
+  }
   const moving = !draft.destination && !draft.held;
   const dirs = {ArrowUp:[0,-1], ArrowDown:[0,1], ArrowLeft:[-1,0], ArrowRight:[1,0]};
   if (moving && (e.key in dirs)){
@@ -1265,6 +1540,15 @@ function onKey(e){
 
 function chooseAction(key){
   const act = curActions().find(a=>a.key===key);
+  armAction(act);
+  err="";
+  render();
+}
+/* Set an action up in the draft without drawing anything. Split out of
+ * `chooseAction` so a panel that arms one while rendering (a hero whose move step
+ * is skipped) does not render from inside a render. */
+function armAction(act){
+  const key = act.key;
   draft.actionKey=key; draft.shots=[]; draft.shotIndex=0; draft.target=null; draft.direction=null; draft.cell=null; draft.amount=null; draft.weapon=null; draft.pair=[]; draft.named=[]; draft.spend=0;
   if (act.targeting.kind==='cells') draft.shots = Array.from({length:act.targeting.shots},()=>[]);
   if (act.targeting.kind==='magnitude') draft.amount = 1;
@@ -1273,7 +1557,6 @@ function chooseAction(key){
     const only = laneShots();
     if (only.length === 1) draft.direction = only[0].dir;
   }
-  err=""; render();
 }
 function changeMove(){
   // A linked body is positioned as a whole, so re-opening the step restarts the
@@ -1297,6 +1580,36 @@ function chooseWeapon(key){
   const w = currentWeapon();
   draft.shots = (w && w.mode==='cells') ? [[]] : [];
   draft.shotIndex = 0; err=""; render();
+}
+
+/* The free picks a hero makes alongside its order. Split out because they are not
+ * all the same shape: most are a list of allies, one is a shelf of goods
+ * (军火商人's arsenal). Split out of the panel so the two read as one thing. */
+function choicesHTML(list, heading){
+  let h = '';
+  for (const ch of list||[]){
+    // Some picks can only honestly be made on the board: a list of 戴红手套的女子's
+    // bodies is the same name twice.
+    if (ch.board_only) continue;
+    const got = (draft.choices||{})[ch.key];
+    h += `<div class="step">${heading} · ${ch.name}</div><p class="note">${ch.text}${
+            ch.optional ? ' Click a choice again to take it back.' : ''}</p>`;
+    if (ch.wares){
+      // A shelf of goods rather than a list of allies: the option is a string.
+      for (const w of ch.wares){
+        h += `<button class="btn ${got===w.value?'on':''}"
+                onclick="pickChoice('${ch.key}','${w.value}')">
+               ${w.label} <small>${w.note||''}</small></button>`;
+      }
+    } else {
+      for (const id of ch.options){
+        const a = unitById(id, {});
+        h += `<button class="btn ${got===id?'on':''}" onclick="pickChoice('${ch.key}',${id})">
+               ${a.name||('#'+id)} <small>AP ${a.ap}/${a.max_ap}</small></button>`;
+      }
+    }
+  }
+  return h;
 }
 
 /* Why this action cannot be used at all right now, or "" if it can. An ability
@@ -1458,12 +1771,33 @@ function render(){
   if (revealActive) renderReveal();   // sits on top of everything
 }
 
-function dismissReveal(){ revealActive = false; clearTimeout(window._revealT); render(); }
+/* Take the next settled exchange off the queue and put it up. Each gets its own
+ * beat, so a round that resolved twice reads as two exchanges rather than one. */
+function nextReveal(){
+  clearTimeout(window._revealT);
+  revealNow = revealQueue.shift() || null;
+  revealActive = !!revealNow;
+  if (revealActive){
+    window._revealT = setTimeout(() => { nextReveal(); render(); }, 3600);
+  }
+  return revealActive;
+}
+// Clicking moves on to the next one rather than throwing the rest away.
+function dismissReveal(){ nextReveal(); render(); }
 
+/* One line of the pause screen. A blow that was turned aside still says who it
+ * was aimed at and what it would have been worth — and what stopped it, which is
+ * the only place a seat is told a ward has gone. */
+function revealHit(h){
+  return h.blocked
+    ? `<div class="rv-hit rv-blocked"><b>${h.amount}</b> → ${h.target}
+         <span class="rv-why">${h.blocked}</span></div>`
+    : `<div class="rv-hit"><b>${h.amount}</b> damage → ${h.target}</div>`;
+}
 function revealHits(o){
   const bits = [];
   for (const a of (o.abilities||[])) bits.push(`<div class="rv-ability">${a}</div>`);
-  for (const h of (o.hits||[])) bits.push(`<div class="rv-hit"><b>${h.amount}</b> damage → ${h.target}</div>`);
+  for (const h of (o.hits||[])) bits.push(revealHit(h));
   for (const n of (o.notes||[]).slice(0,3)) bits.push(`<div class="rv-note">${n}</div>`);
   if (bits.length) return bits.join('');
   return revealHitsPlain(o);
@@ -1471,10 +1805,10 @@ function revealHits(o){
 function revealHitsPlain(o){
   const hits = o.hits || [];
   if (!hits.length) return `<div class="rv-hit rv-none">no damage</div>`;
-  return hits.map(h => `<div class="rv-hit"><b>${h.amount}</b> damage → ${h.target}</div>`).join('');
+  return hits.map(revealHit).join('');
 }
 function revealSide(side){
-  const o = S.reveal[side];
+  const o = (revealNow || S.reveal || {})[side];
   if (!o) return `<div class="rv-side"><div class="rv-img"></div><div class="rv-name">—</div></div>`;
   const cx = codex[o.key] || {};
   const bg = cx.image ? ` style="background-image:url('${cx.image}')"` : '';
@@ -1743,45 +2077,79 @@ function renderCommit(){
   }
   const bodiless = !u.cell;
   const canAppear = bodiless && (curMoves()||[]).length > 0;
-  h += `<div class="step">1 · ${u.name}${bodiless?(canAppear?' · take flesh':''):' · move'}</div>`;
-  if (!draft.destination && !draft.held){
+  // A hero whose move is not a move says so itself (戴红手套的女子 never walks).
+  // Everyone else gets the plain wording.
+  const ml = (S.commit && S.commit.move_label) || {};
+
+  // Picks answered one at a time on the board, before the rest of the order. Only
+  // the one in hand is shown: they are asked in sequence, and a panel showing all
+  // of them at once is the list this hero cannot use.
+  const staged = stagedChoices();
+  if (staged.length){
+    const at = draft.pickStep || 0;
+    for (let i = 0; i < Math.min(at, staged.length); i++){
+      const ch = staged[i];
+      h += `<button class="btn on" onclick="draft.pickStep=${i};draft.pickPart=0;err='';render()">
+              ${ch.name} — ${pickSaid(ch)} <small>Click to change</small></button>`;
+    }
+    const ch = currentPick();
+    if (ch){
+      const two = ch.kind === 'unit_then_cell';
+      h += `<div class="step">${ch.stage} · ${ch.name}</div>
+            <p class="note">${ch.text}</p>
+            <p class="note">${two && draft.pickPart === 1
+                ? 'Click the square it sets one down on.'
+                : two ? 'Click a body to see what it reaches — click another to compare.'
+                : 'Click one on the board.'} · <b>Enter</b> ${
+                two && draft.pickPart === 1 ? 'needs that square first'
+                : two && pickUnit(ch) != null ? 'locks that body in'
+                : ch.optional && !pickAnswered(ch) ? 'skips it' : 'moves on'}.</p>`;
+      if (pickAnswered(ch) || (two && pickUnit(ch) != null)){
+        h += `<button class="btn on">${pickSaid(ch)}</button>`;
+      }
+      h += `<p class="err">${err}</p>`;
+      document.getElementById('leftbody').innerHTML = h; return;
+    }
+  }
+  // A hero that never moves is not asked about it: a step with one answer is not
+  // a step, and offering one would be offering something that cannot happen. It
+  // still has to reach the same place a confirmed move leaves everyone else —
+  // holding, with the normal attack armed and grids ready to click.
+  if (ml.skip && !draft.destination && !draft.held){
+    draft.held = true;
+    const atk = curActions().find(a => a.key === 'attack');
+    if (atk && !draft.actionKey) armAction(atk);
+  }
+  if (!ml.skip)
+  h += `<div class="step">1 · ${u.name}${bodiless?(canAppear?' · take flesh':''):' · '+(ml.step||'move')}</div>`;
+  if (!ml.skip && !draft.destination && !draft.held){
     h += canAppear
       ? `<p class="note">Click a highlighted square beside its host to <b>take flesh</b> there — then it acts as normal. <b>Enter</b> alone stays a ghost.</p>`
       : bodiless
       ? `<p class="note">${u.name} has no body to move — press <b>Enter</b> to go on to its action.</p>`
-      : `<p class="note">Arrows or click to aim · <b>Enter</b> locks it in (Enter alone holds).</p>
-          <button class="btn primary" onclick="confirmMove()">${draft.tentative?(bodiless?'Take flesh here':'Confirm move'):(bodiless?'Stay a ghost':'Confirm — hold position')}</button>`;
+      : `<p class="note">${ml.note || 'Arrows or click to aim · <b>Enter</b> locks it in (Enter alone holds).'}</p>
+          <button class="btn primary" onclick="confirmMove()">${
+            draft.tentative ? (bodiless?'Take flesh here':(ml.confirm||'Confirm move'))
+                            : (bodiless?'Stay a ghost':(ml.hold||'Confirm — hold position'))}</button>`;
     for (const a of curActions().filter(a=>a.self_move)){
       const dis = a.affordable===false ? 'disabled' : '';
       h += `<button class="btn" ${dis} onclick="chooseSelfMove('${a.key}')">
               ${a.name}<span class="cost">${a.ap_cost} AP</span>
               <small>Moves ${u.name} itself — pick this instead of a move.</small></button>`;
     }
-  } else {
+  } else if (!ml.skip){
     const staying = draft.held || (draft.destination && u.cell && eq(draft.destination, u.cell));
     h += `<button class="btn on" onclick="changeMove()">
-            ${staying?'Holding position':'Moving'} <small>Click to change</small></button>`;
+            ${staying ? (ml.holding||'Holding position') : (ml.moving||'Moving')}
+            <small>Click to change</small></button>`;
   }
   if (draft.destination || draft.held){
-    for (const ch of curChoices()){
-      const got = (draft.choices||{})[ch.key];
-      h += `<div class="step">Free · ${ch.name}</div><p class="note">${ch.text}${
-              ch.optional ? ' Click a choice again to take it back.' : ''}</p>`;
-      if (ch.wares){
-        // A shelf of goods rather than a list of allies: the option is a string.
-        for (const w of ch.wares){
-          h += `<button class="btn ${got===w.value?'on':''}"
-                  onclick="pickChoice('${ch.key}','${w.value}')">
-                 ${w.label} <small>${w.note||''}</small></button>`;
-        }
-      } else {
-        for (const id of ch.options){
-          const a = unitById(id, {});
-          h += `<button class="btn ${got===id?'on':''}" onclick="pickChoice('${ch.key}',${id})">
-                 ${a.name||('#'+id)} <small>AP ${a.ap}/${a.max_ap}</small></button>`;
-        }
-      }
-    }
+    // Staged picks only, never the picks that have their own step above: rendering
+    // those twice gave the same answer two ways of being given, and the button
+    // list wrote a bare id over an answer that is a body *and* a square. The cast
+    // preview vanished, the required pick read as unanswered, and Enter refused to
+    // seal a turn that could then never be finished.
+    h += choicesHTML(curChoices().filter(ch => !ch.stage), 'Free');
     h += `<div class="step">2 · Action</div>`;
     for (const a of curActions()){
       const why = a.blocked || unaimable(a);
@@ -2051,15 +2419,25 @@ function renderInterrupt(){
       h += `<button class="btn primary" onclick="cmd({cmd:'interrupt', answer:true})">${t.yes||'Step in front of it'} — <b>Enter</b></button>`;
       h += `<button class="btn" onclick="cmd({cmd:'interrupt', answer:null})">${t.no||'Let it fall'}</button>`;
     } else if (t.option_kind === 'unit'){
-      h += `<p class="note">Name a hero — click one on the board or below.</p>`;
-      for (const id of t.options){
-        const u = unitById(id, {});
-        h += `<button class="btn" onclick="cmd({cmd:'interrupt', answer:${id}})">
-                ${u.name||('#'+id)}
-                ${u.hp==null?'':`<span class="cost">${u.hp}/${u.max_hp} HP</span>`}</button>`;
+      // The list is a convenience, and for some heroes it is worse than nothing:
+      // 戴红手套的女子's bodies are identical by design, so a column of the same
+      // name and the same health tells you which is which no better than a coin.
+      // Where the answer is only meaningful on the board, only the board offers it.
+      if (t.board_only){
+        h += `<p class="note">Click one on the board.</p>`;
+      } else {
+        h += `<p class="note">Name a hero — click one on the board or below.</p>`;
+        for (const id of t.options){
+          const u = unitById(id, {});
+          h += `<button class="btn" onclick="cmd({cmd:'interrupt', answer:${id}})">
+                  ${u.name||('#'+id)}
+                  ${u.hp==null?'':`<span class="cost">${u.hp}/${u.max_hp} HP</span>`}</button>`;
+        }
       }
     } else if (t.option_kind === 'cell'){
-      h += `<p class="note">Click any empty square on the board.</p>`;
+      h += `<p class="note">${(t.options||[]).length
+              ? 'Click one of the marked squares.'
+              : 'Click any empty square on the board.'}</p>`;
     } else {
       for (const o of t.options){
         h += `<button class="btn" onclick="cmd({cmd:'interrupt', answer:'${o}'})">+1 ${o}</button>`;

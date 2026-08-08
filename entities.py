@@ -41,7 +41,9 @@ class Entity:
 
         self.max_hp = hero_def.max_hp
         self.hp = hero_def.max_hp
-        self.ap = 0
+        # Almost every hero opens the match empty and charges one as its first turn
+        # begins; a card may start with some already banked (长老).
+        self.ap = min(hero_def.max_ap, getattr(hero_def, "start_ap", 0))
         self.modifiers = []
         self.alive = True
         self.has_acted = False

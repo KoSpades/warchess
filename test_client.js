@@ -57,7 +57,12 @@ function loadClient(side = 'L') {
       chooseAction, sealOrder, syncDraft, nameableFor, unaimable,
       shotsWanted, onLastShot, linkedOrder, linkedMoves, isLinked,
       pickChoice, pendingFee, cellTargets, setHover, renderRHS,
-      allyOptions, allyAllowed, currentAction };`;
+      allyOptions, allyAllowed, currentAction, unitById, choicesReady,
+      currentPick, stagedChoices, pickCells, pickAnswered, originCell,
+      pickPeek, setHover, castGhost, pickUnit, pickCells, revealHits,
+      nextReveal, revealActive: () => revealActive, revealNow: () => revealNow,
+      pushReveal: rv => revealQueue.push(rv),
+      shownSeq: () => shownSeq, setShownSeq: n => { shownSeq = n; } };`;
   const tmp = path.join(here, '.client.test.js');
   fs.writeFileSync(tmp, js + api);
   const mod = require(tmp);
@@ -75,6 +80,7 @@ const F = JSON.parse(fs.readFileSync(path.join(here, 'fixtures.json'), 'utf8'));
 const C = loadClient();
 const HOLD_FIRST = st => { C.S = st; C.err = ''; C.draft = C.blankDraft(st.commit.selected); C.confirmMove(); };
 const lastSent = () => C.sent[C.sent.length - 1];
+const eq2 = (a, b) => a && b && a[0] === b[0] && a[1] === b[1];
 
 // The rendered board, cell by cell in row-major order, so a test can ask what a
 // player would actually see on a square.
@@ -1219,6 +1225,333 @@ if (F.centaur_charge) {
      sent && sent.payload.action.key === 'ability:charge'
      && String(sent.payload.action.cell) === String(cells[0]),
      JSON.stringify(sent && sent.payload.action));
+}
+
+// --------------------- the pause screen when a round settles more than one
+// exchange. A seat down to one hero against two resolves twice with nothing in
+// between, and a single reveal slot meant the first was overwritten before it was
+// ever shown — losing the only exchange that seat's own hero was in.
+{
+  const rounds = {
+    version: 1, phase: 'commit', reveal: null,
+    reveals: [
+      {seq: 1, L: {hero: '炮手', key: 'cannoneer', hits: []},
+               R: {hero: '门神', key: 'gatekeeper', hits: []}},
+      {seq: 2, L: null,
+               R: {hero: '枪兵', key: 'spearman', hits: []}},
+    ],
+  };
+  C.setShownSeq(0);
+  while (C.revealActive()) C.nextReveal();
+  for (const rv of rounds.reveals) C.pushReveal(rv);
+  C.setShownSeq(2);
+  C.nextReveal();
+  const walked = [];
+  let guard = 0;
+  while (C.revealActive() && guard++ < 6) {
+    const now = C.revealNow();
+    walked.push([(now.L || {}).hero || null, (now.R || {}).hero || null]);
+    C.nextReveal();
+  }
+  ok('reveal: a round that settled twice is shown twice',
+     walked.length === 2, JSON.stringify(walked));
+  ok('reveal: ...including the exchange this seat’s own hero was in',
+     walked.some(w => w[0] === '炮手'), JSON.stringify(walked.map(w => w[0])));
+  ok('reveal: ...and both of the other side’s heroes',
+     new Set(walked.map(w => w[1])).size === 2, JSON.stringify(walked.map(w => w[1])));
+  ok('reveal: and once walked through, nothing is left showing',
+     !C.revealActive());
+}
+
+// --------------------- the pause screen after an exchange. A blow a ward ate is
+// an outcome, and it read as "no damage" — indistinguishable from a shot that
+// found nobody. It has to say what it would have been worth, on whom, and what
+// stopped it.
+{
+  const blocked = {hero: '炮手', key: 'cannoneer', action: {key: 'attack'},
+                   hits: [{target: '门神', amount: 4, blocked: 'blessing broken'}]};
+  const landed = {hero: '炮手', key: 'cannoneer', action: {key: 'attack'},
+                  hits: [{target: '门神', amount: 4}]};
+  const empty = {hero: '炮手', key: 'cannoneer', action: {key: 'attack'}, hits: []};
+  const html = o => C.revealHits(o);
+  ok('reveal: a landed blow reads as damage',
+     /4<\/b> damage/.test(html(landed)) && !/rv-blocked/.test(html(landed)),
+     html(landed));
+  ok('reveal: a turned-aside blow is drawn apart from one that landed',
+     /rv-blocked/.test(html(blocked)), html(blocked));
+  ok('reveal: ...and still says what it would have been worth, and on whom',
+     /4<\/b>/.test(html(blocked)) && /门神/.test(html(blocked)), html(blocked));
+  ok('reveal: ...and names what stopped it',
+     /blessing broken/.test(html(blocked)), html(blocked));
+  ok('reveal: nothing at all still reads as no damage',
+     /rv-none/.test(html(empty)), html(empty));
+}
+
+// --------------------- 戴红手套的女子. She is picked out of the roster like
+// anybody else, and then her turn is a sequence: which body she is, optionally
+// which reaches out and where, optionally which fires, then the attack — each
+// answered by clicking the board and confirmed with Enter. Her bodies are
+// identical by design, so a list of them to click names nothing; the board is the
+// only place any of these can be answered.
+
+if (F.red_gloves && F.red_gloves_foe) {
+  const shades = st => (st.units || []).filter(u => u.key === 'red_shadow');
+  const badges = st => shades(st).map(u => (u.status || []).map(x => x.badge).join(''));
+  ok('red gloves: her own seat is shown which body is her',
+     badges(F.red_gloves).sort().join('|') === '影|真', badges(F.red_gloves).join('|'));
+  ok('red gloves: the other seat is shown nothing at all',
+     badges(F.red_gloves_foe).every(b => b === ''), badges(F.red_gloves_foe).join('|'));
+  ok('red gloves: and the bodies read alike to them',
+     new Set(shades(F.red_gloves_foe).map(u => u.name + ':' + u.hp)).size === 1,
+     JSON.stringify(shades(F.red_gloves_foe).map(u => u.name + ':' + u.hp)));
+  ok('red gloves: the roster holds her once, not once per body',
+     (F.red_gloves.commit.unacted || []).filter(
+        id => ((F.red_gloves.units.find(u => u.id === id)) || {}).key === 'red_shadow'
+     ).length === 1, JSON.stringify(F.red_gloves.commit.unacted));
+}
+
+// From the other side of the board: her bodies must read alike, and the choice of
+// which one to strike must actually be offered — that guess is the hero.
+if (F.red_gloves_aimed) {
+  C.S = F.red_gloves_aimed; C.draft = null; C.err = '';
+  C.draft = C.blankDraft(F.red_gloves_aimed.commit.selected);
+  const hers = C.S.units.filter(u => u.key === 'red_shadow');
+  ok('red gloves (as the enemy): her bodies read alike in every field',
+     new Set(hers.map(u => JSON.stringify(
+       Object.assign({}, u, {id: 0, cell: 0})))).size === 1,
+     JSON.stringify(hers.map(u => [u.hp, u.acted, u.acts])));
+  ok('red gloves (as the enemy): none of them wears a badge',
+     hers.every(u => (u.status || []).length === 0),
+     JSON.stringify(hers.map(u => u.status)));
+  C.confirmMove();
+  C.chooseAction('attack');
+  const reachable = hers.filter(u => C.clickableCell(u.cell));
+  ok('red gloves (as the enemy): more than one body can be aimed at',
+     reachable.length > 1, `${reachable.length} of ${hers.length} in reach`);
+  for (const u of reachable) C.onCell(u.cell[0], u.cell[1]);
+  ok('red gloves (as the enemy): a net can be thrown over several at once',
+     (C.draft.shots[0] || []).length === reachable.length,
+     JSON.stringify(C.draft.shots));
+}
+
+if (F.red_gloves) {
+  const start = () => {
+    C.S = F.red_gloves; C.err = '';
+    C.draft = C.blankDraft(F.red_gloves.commit.selected);
+  };
+  const panel = () => { C.render();
+    return global.document.getElementById('leftbody').innerHTML || ''; };
+  const enter = () => C.onKey({ key: 'Enter', preventDefault(){} });
+  const bodies = F.red_gloves.units.filter(u => u.key === 'red_shadow');
+  const her = bodies[0], other = bodies[1];
+
+  start();
+  ok('red gloves: her turn opens on which body she is',
+     C.currentPick() && C.currentPick().key === 'red_real',
+     JSON.stringify(C.currentPick() && C.currentPick().key));
+  ok('red gloves: and lists no bodies to click — the board is the only place',
+     (panel().match(/红手套/g) || []).length === 0 && /Click one on the board/.test(panel()),
+     `${(panel().match(/红手套/g) || []).length} names in the panel`);
+  ok('red gloves: only her own bodies are clickable',
+     bodies.every(u => C.clickableCell(u.cell))
+     && !C.clickableCell([7, 3]) && !C.clickableCell([5, 5]));
+  const before = C.sent.length;
+  enter();
+  ok('red gloves: Enter without naming one says so, and seals nothing',
+     C.sent.length === before && !!C.err && C.currentPick().key === 'red_real', C.err);
+  C.onCell(other.cell[0], other.cell[1]);
+  ok('red gloves: clicking a body names it', C.draft.choices.red_real === other.id,
+     JSON.stringify(C.draft.choices));
+  enter();
+  ok('red gloves: Enter moves on to the cast',
+     C.currentPick() && C.currentPick().key === 'red_cast',
+     JSON.stringify(C.currentPick() && C.currentPick().key));
+
+  // the cast wants a body and then a square, in that order
+  ok('red gloves: the cast first wants the body that reaches out',
+     C.draft.pickPart === 0 && bodies.every(u => C.clickableCell(u.cell)));
+  C.onCell(her.cell[0], her.cell[1]);
+  ok('red gloves: clicking a body tries it on rather than settling it',
+     C.draft.pickPart === 0 && C.pickUnit(C.currentPick()) === her.id,
+     `part ${C.draft.pickPart}, trying ${C.pickUnit(C.currentPick())}`);
+  ok('red gloves: and draws what that body would reach',
+     (C.pickPeek() || []).length > 0, `${(C.pickPeek()||[]).length} squares`);
+  C.onCell(other.cell[0], other.cell[1]);
+  ok('red gloves: clicking another candidate moves to it, still unsettled',
+     C.draft.pickPart === 0 && C.pickUnit(C.currentPick()) === other.id,
+     `part ${C.draft.pickPart}, trying ${C.pickUnit(C.currentPick())}`);
+  ok('red gloves: and the drawn reach follows it',
+     JSON.stringify(C.pickPeek())
+       === JSON.stringify(C.currentPick().cells[String(other.id)]));
+  C.onCell(her.cell[0], her.cell[1]);
+  enter();
+  ok('red gloves: Enter is what locks the body in', C.draft.pickPart === 1,
+     String(C.draft.pickPart));
+  const reach = C.currentPick().cells[String(her.id)];
+  ok('red gloves: and only those squares are clickable',
+     reach.every(c => C.clickableCell(c))
+     && !C.clickableCell(bodies.map(u => u.cell)[0]),
+     JSON.stringify(reach.slice(0, 4)));
+  ok('red gloves: Enter with no square yet says so',
+     (enter(), !!C.err && C.currentPick().key === 'red_cast'), C.err);
+  C.onCell(reach[0][0], reach[0][1]);
+  enter();
+  ok('red gloves: the cast carries both the body and the square',
+     JSON.stringify(C.draft.choices.red_cast)
+       === JSON.stringify({unit: her.id, cell: reach[0]}),
+     JSON.stringify(C.draft.choices.red_cast));
+  ok('red gloves: then it asks which body fires',
+     C.currentPick() && C.currentPick().key === 'red_fire',
+     JSON.stringify(C.currentPick() && C.currentPick().key));
+
+  // that one is optional: Enter alone skips it
+  start(); C.onCell(her.cell[0], her.cell[1]); enter(); enter();
+  ok('red gloves: the cast may be skipped with Enter alone',
+     C.currentPick() && C.currentPick().key === 'red_fire'
+     && C.draft.choices.red_cast == null, JSON.stringify(C.draft.choices));
+  enter();
+  ok('red gloves: and so may the firing body, which ends the picks',
+     C.currentPick() === null, JSON.stringify(C.currentPick()));
+  ok('red gloves: leaving her never asked to move',
+     /never moves/.test(panel()) === false && !/· move/.test(panel())
+     && C.draft.held === true, panel().slice(0, 90));
+  ok('red gloves: with the action step ready instead',
+     /2 · Action/.test(panel()), panel().slice(0, 90));
+
+  // the reach is drawn, not just made clickable: a range you cannot see is a
+  // range you have to find by trying squares
+  start(); C.onCell(her.cell[0], her.cell[1]); enter();
+  C.onCell(her.cell[0], her.cell[1]); enter();        // that body reaches out
+  const lit = cellsWith('legal');
+  const reachB = C.currentPick().cells[String(her.id)];
+  ok('red gloves: the cast draws the reach it is offering',
+     lit.length === reachB.length
+     && reachB.every(c => lit.includes(c.join(','))),
+     `${lit.length} drawn, ${reachB.length} offered`);
+  ok('red gloves: and nothing outside it is drawn',
+     !lit.includes(other.cell.join(',')) && !lit.includes('7,3'),
+     lit.slice(0, 6).join(' '));
+
+  // and before a body is named, hovering one shows what that body could reach
+  start(); C.onCell(her.cell[0], her.cell[1]); enter();
+  ok('red gloves: with no body tried on yet, no reach is drawn',
+     cellsWith('legal').length === 0, cellsWith('legal').join(' '));
+  ok('red gloves: though the bodies are still there to click',
+     bodies.every(u => C.clickableCell(u.cell)));
+  C.setHover(other.id);
+  const peek = C.pickPeek();
+  ok('red gloves: hovering a body draws the reach it would give',
+     !!peek && peek.length > 0 && cellsWith('legal').length === peek.length,
+     `${cellsWith('legal').length} drawn, ${peek ? peek.length : 0} in reach`);
+  C.setHover(null);
+  ok('red gloves: and it goes with the hover',
+     cellsWith('legal').length === 0, cellsWith('legal').join(' '));
+
+  // what the board says once an answer has been given: the panel cannot name her
+  // bodies, so the marks have to be legible where the choice was made
+  // Read the badges off the board itself, the way a player does.
+  const marksOn = () => { C.render();
+    const out = {};
+    const html = global.document.getElementById('rows').innerHTML || '';
+    for (const m of html.matchAll(
+        /data-cell="(\d+,\d+)"[^]*?(?=data-cell=|$)/g)){
+      const chip = m[0].match(/<span class="pickmark">([^<]*)<\/span>/);
+      if (chip) out[m[1]] = chip[1];
+    }
+    return out; };
+  start();
+  ok('red gloves: nothing is marked before she has answered anything',
+     Object.keys(marksOn()).length === 0, JSON.stringify(marksOn()));
+  C.onCell(other.cell[0], other.cell[1]);
+  ok('red gloves: naming her body writes it on that square',
+     marksOn()[other.cell.join(',')] === '真', JSON.stringify(marksOn()));
+  enter();
+  C.onCell(her.cell[0], her.cell[1]); enter();
+  ok('red gloves: and naming the body that reaches out writes that too',
+     marksOn()[her.cell.join(',')] === '分', JSON.stringify(marksOn()));
+  const reach2 = C.currentPick().cells[String(her.id)];
+  C.onCell(reach2[0][0], reach2[0][1]);
+  ok('red gloves: the square it is aiming at reads as chosen',
+     cellHas(reach2[0], 'dest'), cellsWith('dest').join(' '));
+  const rowsHTML = () => { C.render();
+    return global.document.getElementById('rows').innerHTML || ''; };
+  const ghosts = () => (rowsHTML().match(/class="unit [^"]*pending[^"]*"/g) || []);
+  const ghostAt = cell => {
+    const at = rowsHTML().indexOf(`data-cell="${cell.join(',')}"`);
+    return at > -1 && /^[^]{0,400}?class="unit [^"]*pending/.test(rowsHTML().slice(at));
+  };
+  ok('red gloves: with a shadow of her drawn standing on it', ghostAt(reach2[0]),
+     ghostAt(reach2[0]) ? 'drawn at ' + reach2[0].join(',') : 'nothing at ' + reach2[0].join(','));
+  ok('red gloves: and none drawn anywhere she is not about to be',
+     ghosts().length === 1, `${ghosts().length} ghosts`);
+  ok('red gloves: and neither body vacated to put it there',
+     !cellHas(her.cell, 'movefrom') && !cellHas(other.cell, 'movefrom'),
+     cellsWith('movefrom').join(' ') || 'nobody moved');
+  enter();
+  C.onCell(other.cell[0], other.cell[1]);
+  ok('red gloves: the firing body is marked as well, alongside the rest',
+     marksOn()[other.cell.join(',')] === '真出'
+     && marksOn()[her.cell.join(',')] === '分', JSON.stringify(marksOn()));
+
+  // she never moves, so nothing arms her attack the way a confirmed move does for
+  // everyone else — it has to be armed when the picks run out instead
+  start(); C.onCell(her.cell[0], her.cell[1]); enter(); enter(); enter();
+  ok('red gloves: with the picks done, the normal attack is armed like anyone else’s',
+     C.draft.actionKey === 'attack', String(C.draft.actionKey));
+  ok('red gloves: so grids are immediately markable, with no action to choose first',
+     C.clickableCell([3, 4]) && C.currentAction().key === 'attack',
+     `${C.currentAction().key}, (3,4) clickable=${C.clickableCell([3, 4])}`);
+
+  // and a shadow cast this same turn is one of the bodies that may fire
+  start(); C.onCell(her.cell[0], her.cell[1]); enter();
+  C.onCell(her.cell[0], her.cell[1]); enter();
+  const spot = C.currentPick().cells[String(her.id)][0];
+  C.onCell(spot[0], spot[1]); enter();
+  ok('red gloves: the firing pick offers the square the cast is about to fill',
+     C.pickCells(C.currentPick()).some(c => eq2(c, spot)),
+     JSON.stringify(C.pickCells(C.currentPick())));
+  ok('red gloves: and that square is clickable', C.clickableCell(spot));
+  C.onCell(spot[0], spot[1]);
+  ok('red gloves: naming it aims the attack from there',
+     String(C.originCell()) === String(spot), `${C.originCell()} vs ${spot}`);
+
+  // the panel must never offer a pick a second way to be answered: it did, as a
+  // list of her bodies below the order, and clicking one wrote a bare id over an
+  // answer that is a body *and* a square. The preview vanished, the required pick
+  // read as unanswered, and the turn could not be sealed or abandoned.
+  start(); C.onCell(her.cell[0], her.cell[1]); enter(); enter(); enter();
+  const settled = panel();
+  ok('red gloves: with her picks settled, the panel offers no second way to answer them',
+     !/pickChoice\('red_/.test(settled),
+     (settled.match(/pickChoice\('[a-z_]*'/g) || []).join(' ') || 'none');
+  ok('red gloves: and still lists none of her bodies',
+     (settled.match(/红手套/g) || []).length === 0,
+     `${(settled.match(/红手套/g) || []).length} names`);
+
+  // changing which body fires drops an aim taken from the old one
+  start(); C.onCell(her.cell[0], her.cell[1]); enter(); enter();
+  C.onCell(other.cell[0], other.cell[1]); enter();
+  const grids = [];
+  for (let c = 1; c <= 9; c++) for (let r = 1; r <= 5; r++)
+    if (C.clickableCell([c, r])) grids.push([c, r]);
+  C.onCell(grids[0][0], grids[0][1]);
+  ok('red gloves: a grid marked from the named body is held',
+     (C.draft.shots[0] || []).length === 1, JSON.stringify(C.draft.shots));
+  C.draft.pickStep = 2; C.draft.pickPart = 0;
+  C.onCell(her.cell[0], her.cell[1]);
+  ok('red gloves: naming another body drops the aim taken from the last one',
+     (C.draft.shots[0] || []).length === 0, JSON.stringify(C.draft.shots));
+
+  // the shot is measured from the body she named, not the one holding the turn
+  start(); C.onCell(her.cell[0], her.cell[1]); enter(); enter();
+  C.onCell(other.cell[0], other.cell[1]); enter();
+  ok('red gloves: naming a firing body moves her reach to it',
+     String(C.originCell()) === String(other.cell),
+     `${C.originCell()} vs ${other.cell}`);
+  C.chooseAction('attack');
+  const foe = F.red_gloves.units.find(u => u.key === 'gatekeeper');
+  ok('red gloves: so an enemy only that body can reach is markable',
+     C.clickableCell(foe.cell), JSON.stringify(foe.cell));
 }
 
 // --------------------- an ability whose option list is empty from the square the

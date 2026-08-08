@@ -142,12 +142,20 @@ class Blessing:
     damage it, then the blessing is spent. Burning ground neither triggers it nor
     is stopped by it — the same two categories 圣骑士's shield answers to.
 
+    Last of the shields, after every reduction has had its say (the flat cut at 40,
+    the stone's cap at 70), because it is spent on the blow it turns aside and a
+    blow that was going to be soaked up anyway is not one. Read early it was: a
+    hero standing behind 2 points of guard, hit for 2, took nothing and lost its
+    blessing to a blow that would never have touched it. Being *ahead* of the other
+    shields was wrong for the same reason — two wards should not both pay for one
+    swing.
+
     Generic, like every other rule in here: it reads a var and names no hero, so
     anything that can bless works through it."""
 
     TRIGGERS = (NORMAL_ATTACK, ABILITY)
 
-    @EV.hook(priority=25)
+    @EV.hook(priority=90)
     def on_before_damage(self, match, ev):
         if ev.cancelled or ev.amount <= 0 or ev.category not in self.TRIGGERS:
             return
@@ -157,7 +165,9 @@ class Blessing:
         for m in list(ev.target.modifiers):
             if m.source == "blessing":
                 ev.target.modifiers.remove(m)
-        ev.cancel("blessing")
+        # Named for what just happened to it, not for what it is: the line the
+        # pause screen shows is the only place a seat learns the ward is gone.
+        ev.cancel("blessing broken")
 
 
 class CurseTrap:
